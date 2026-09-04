@@ -74,7 +74,8 @@ repeating commit messages.
 #### Fixed
 
 * Restored the reference checkpoint cadences, request throttles, timeouts, attempt
-  counts, and provider-specific User-Agent strings.
+  counts, TVDB User-Agent, and actor-image request headers. TMDB requests use the
+  current `harvester/1` identifier rather than the historical reference string.
 * TV scan and materialization now save their manifests when interrupted.
 * Actor download receipts again include timestamps, source URLs, and content types.
 * TV materialization no longer reports a downloaded poster as failed only because a

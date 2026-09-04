@@ -31,6 +31,7 @@ def run(
     def fetch(url):
         request = urllib.request.Request(url, headers={
             "User-Agent": "local-tmdb-actor-photo-gulper/1.0",
+            "Accept": "image/jpeg,image/*,*/*",
         })
         opener = transport.open if transport else urllib.request.urlopen
         with opener(request, timeout=request_timeout) as response:

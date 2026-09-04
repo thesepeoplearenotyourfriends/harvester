@@ -10,8 +10,8 @@ the audit did not rename or consolidate their controls.
 | --- | --- | --- |
 | TMDB scanner `save_every=50` | `jobs/movie_actor_scan.py` | Queue and URL output checkpoint every 50 changed actors, plus a final save. Unknown receipt states are skipped. |
 | Actor downloader `TIMEOUT=30`, `SLEEP_BETWEEN=0.0`, `SAVE_EVERY=25` | `jobs/movie_actor_fetch.py` | The callable job has the same defaults and records timestamps, source content type, and source URL. |
-| Actor downloader User-Agent | `jobs/movie_actor_fetch.py` | Requests use `local-tmdb-actor-photo-gulper/1.0`. |
-| TMDB language, timeout, attempts, and User-Agent | `providers/tmdb.py` | Defaults are `en-US`, 10 seconds, five attempts, and `local-nfo-tmdb-thumb-cache/1.0`. |
+| Actor downloader headers | `jobs/movie_actor_fetch.py` | Requests use `local-tmdb-actor-photo-gulper/1.0` and accept `image/jpeg,image/*,*/*`. |
+| TMDB language, timeout, and attempts | `providers/tmdb.py` | Defaults are `en-US`, 10 seconds, and five attempts. |
 | TVDB timeout, attempts, and User-Agent | `providers/tvdb.py` | Defaults are 20 seconds, five attempts, and `local-tv-tvdb-url-scanner/1.0`. |
 | TV scan `SLEEP_BETWEEN_SHOWS=1` and `SAVE_EVERY_SHOWS=1` | `jobs/tv_scan.py` | The job exposes the same defaults, checkpoints at that cadence, and saves on Ctrl-C. As in the reference loop, unresolved searches skip the inter-show sleep. |
 | TV materializer timeout, attempts, throttle, and `SAVE_EVERY_CHANGES=25` | `jobs/tv_materialize.py` | Defaults remain 30 seconds, four attempts, 0.5 seconds after a downloaded actor image, and 25 changed artifacts per checkpoint. |
@@ -19,10 +19,9 @@ the audit did not rename or consolidate their controls.
 | Poster format replacement | `jobs/tv_materialize.py` | Failure to remove a stale alternate poster format does not relabel the successfully written poster as a failed download. |
 | TV root validation | `jobs/tv_materialize.py` | Materialization rejects a missing TV library before trying to create `.actors`. |
 
-## Deliberate non-behavioral differences
+## Deliberate integration differences
 
-These differences are required by the repository's governing design and do not change
-provider matching, retry, overwrite, cache, image, or checkpoint decisions:
+These differences are intentionally retained rather than copied from the reference:
 
 * Paths and credentials come from `Config` instead of module constants.
 * Jobs report events through a callback and return compact summaries instead of printing.
@@ -30,6 +29,12 @@ provider matching, retry, overwrite, cache, image, or checkpoint decisions:
 * State writes also `fsync` the temporary file before the same-directory atomic replace.
 * Provider exceptions omit credentials and bearer tokens from messages.
 * Stage 2 accepts frozen manifest data and never constructs a TVDB client.
+* TMDB requests use `harvester/1`, the current accepted application identifier, instead
+  of the reference scanner's historical User-Agent.
+* A movie actor refresh that encounters a provider exception preserves the prior good
+  record and records no replacement error status. The reference scanner changes that
+  actor to `status="error"`; Harvester retains the local receipt so a transient refresh
+  cannot discard a known-good image URL.
 
 No reference limit, batch size, overwrite/skip rule, cache key rule, image size/quality,
 retry class, backoff default, timeout, or provider matching oddity was otherwise found

@@ -850,6 +850,8 @@ def run(
         processed += 1
         changed_since_save += 1
         queue["_meta"]["updated"] = now_iso()
+        queue["_meta"]["image_size"] = image_size
+        queue["_meta"]["max_images_per_actor"] = max_images_per_actor
         if changed_since_save >= save_every:
             json_save_atomic(queue_path, queue)
             write_final_actor_db_from_queue(queue, output_path)

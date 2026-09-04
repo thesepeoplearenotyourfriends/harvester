@@ -10,7 +10,7 @@ from ..storage import load_json, save_json_atomic
 
 class TMDBClient:
     BASE = "https://api.themoviedb.org/3"
-    USER_AGENT = "local-nfo-tmdb-thumb-cache/1.0"
+    USER_AGENT = "harvester/1"
 
     def __init__(self, api_key=None, bearer_token=None, cache_file=None, transport=None,
                  language="en-US", request_timeout=10, request_attempts=5):

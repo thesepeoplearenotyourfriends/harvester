@@ -155,8 +155,111 @@ class HarvesterTests(unittest.TestCase):
         self.assertEqual(television_write["request_attempts"].default, 4)
         self.assertEqual(television_write["sleep_between_requests"].default, 0.5)
         self.assertEqual(television_write["save_every_changes"].default, 25)
-        self.assertEqual(TMDBClient.USER_AGENT, "local-nfo-tmdb-thumb-cache/1.0")
+        self.assertEqual(TMDBClient.USER_AGENT, "harvester/1")
         self.assertEqual(TVDBClient.USER_AGENT, "local-tv-tvdb-url-scanner/1.0")
+
+    def test_movie_scanner_checkpoints_at_reference_cadence(self):
+        queue = {
+            "_meta": {},
+            "actors": {
+                f"Actor {number:02d}": {"status": "pending", "contexts": []}
+                for number in range(51)
+            },
+        }
+        provider = FakeProvider({
+            "/configuration": {"images": {
+                "secure_base_url": "https://images/", "profile_sizes": ["w185"],
+            }},
+        })
+        saves = []
+
+        def save(path, value):
+            saves.append(Path(path).name)
+
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            movie_actor_scan, "make_actor_work_queue", return_value=queue
+        ), patch.object(
+            movie_actor_scan, "resolve_actor_from_contexts",
+            return_value={"ok": False, "reason": "not_found"},
+        ), patch.object(movie_actor_scan, "json_save_atomic", side_effect=save):
+            config = self.config(Path(temporary))
+            movie_actor_scan.run(config, provider, save_every=50)
+
+        self.assertEqual(saves.count("movie_actor_queue.json"), 2)
+        self.assertEqual(saves.count("actor_thumb_urls_tmdb.json"), 2)
+        self.assertEqual(queue["_meta"]["image_size"], "w185")
+        self.assertEqual(queue["_meta"]["max_images_per_actor"], 1)
+
+    def test_actor_downloader_sends_reference_accept_header(self):
+        class Response:
+            headers = {"Content-Type": "image/jpeg"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b"photo"
+
+        class RecordingTransport:
+            def __init__(self):
+                self.request = None
+
+            def open(self, request, timeout=None):
+                self.request = request
+                return Response()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            config = self.config(Path(temporary))
+            save_json_atomic(config.state_path("actor_thumb_urls_tmdb.json"), {
+                "Actor": ["https://example.test/actor.jpg"],
+            })
+            transport = RecordingTransport()
+            fetch_actors(config, normalize=False, transport=transport)
+
+        self.assertEqual(
+            transport.request.get_header("Accept"), "image/jpeg,image/*,*/*"
+        )
+
+    def test_tv_scan_writes_full_last_run_receipt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = self.config(Path(temporary))
+            show = config.tv_root / "Show"
+            show.mkdir(parents=True)
+            manifest = {
+                "_meta": {},
+                "shows": {str(show): {
+                    "status": "pending", "folder_name": "Show",
+                    "query_title": "Show", "query_year": None,
+                }},
+            }
+            provider = FakeProvider({
+                "/series/10/extended": ({"id": 10, "name": "Show"}, False),
+            })
+            with patch.object(
+                tv_scan, "load_or_merge_manifest",
+                return_value=(manifest, [show], 1),
+            ), patch.object(
+                tv_scan, "resolve_tvdb_series",
+                return_value={
+                    "ok": True, "tvdb_id": 10, "cache_hit": False,
+                    "selected": {"id": 10, "name": "Show"}, "candidates": [],
+                },
+            ):
+                tv_scan.run(config, provider, sleep_between_shows=0)
+
+            receipt = load_json(
+                config.state_path("tv_show_urls_tvdb.json")
+            )["_meta"]["last_run"]
+            self.assertEqual(receipt["processed"], 1)
+            self.assertEqual(receipt["matched"], 1)
+            self.assertEqual(receipt["ambiguous"], 0)
+            self.assertEqual(receipt["not_found"], 0)
+            self.assertEqual(receipt["errors"], 0)
+            self.assertEqual(receipt["api_cache_hits"], 0)
+            self.assertEqual(receipt["api_cache_misses"], 2)
 
     def test_legacy_movie_nfo_variants_and_nested_actor(self):
         with tempfile.TemporaryDirectory() as temporary:
