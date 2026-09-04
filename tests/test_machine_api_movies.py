@@ -150,6 +150,39 @@ class MachineApiMovieTests(unittest.TestCase):
         (folder / "part-two.mp4").write_bytes(b"video")
         self.assertNotIn(str(video.with_suffix(".nfo").resolve()), discover_movies(self.movies))
 
+    def test_movie_discovery_preserves_legacy_identity_fields(self):
+        folder = self.movies / "Identity"
+        folder.mkdir()
+        nfo = folder / "identity.nfo"
+        nfo.write_text(
+            "<movie><title>Localized</title><originaltitle>Original</originaltitle>"
+            "<id>tt1234567</id></movie>"
+        )
+        record = discover_movies(self.movies)[str(nfo.resolve())]
+        self.assertEqual(record["title"], "Localized")
+        self.assertEqual(record["original_title"], "Original")
+        self.assertEqual(record["imdb_id"], "tt1234567")
+        with mock.patch(
+            "harvester_core.jobs.movie_scan.resolve_movie_tmdb_id",
+            return_value={"ok": False, "reason": "test"},
+        ) as resolve:
+            scan(self.config, MovieProvider(), targets=[str(nfo.resolve())])
+        resolver_input = resolve.call_args.args[1]
+        self.assertEqual(resolver_input["original_title"], "Original")
+        self.assertEqual(resolver_input["imdb_id"], "tt1234567")
+
+    def test_one_poster_is_not_assigned_to_multiple_nfos(self):
+        folder = self.movies / "Anthology"
+        folder.mkdir()
+        first = folder / "first.nfo"
+        second = folder / "second.nfo"
+        first.write_text("<movie><title>First</title></movie>")
+        second.write_text("<movie><title>Second</title></movie>")
+        (folder / "poster.jpg").write_bytes(b"poster")
+        records = discover_movies(self.movies)
+        self.assertIsNone(records[str(first.resolve())]["poster_path"])
+        self.assertIsNone(records[str(second.resolve())]["poster_path"])
+
     def test_tvdb_profile_advertises_person_images(self):
         tvdb = next(item for item in profiles(self.config) if item["key"] == "tvdb")
         self.assertIn("person.image", tvdb["capabilities"])
@@ -166,13 +199,22 @@ class MachineApiMovieTests(unittest.TestCase):
         }}}
         save_json_atomic(self.state / "tv_show_urls_tvdb.json", manifest)
         materialize_tv(
+            self.config, write_nfo=True, write_poster=False, write_actors=False,
+            downloader=lambda url: self.fail("download called"),
+        )
+        actors_dir = Path(self.temp.name) / "tv" / ".actors"
+        self.assertFalse(actors_dir.exists())
+        self.assertTrue((show / "show.nfo").exists())
+        (show / "show.nfo").unlink()
+
+        materialize_tv(
             self.config, write_nfo=False, write_poster=False, write_actors=True,
             downloader=lambda url: (b"image", "image/jpeg"),
             sleep_between_requests=0,
         )
         self.assertFalse((show / "show.nfo").exists())
         self.assertFalse((show / "poster.jpg").exists())
-        self.assertTrue((Path(self.temp.name) / "tv" / ".actors" / "Actor.jpg").exists())
+        self.assertTrue((actors_dir / "Actor.jpg").exists())
 
     def test_actor_image_refresh_does_not_construct_tmdb_client(self):
         import harvester

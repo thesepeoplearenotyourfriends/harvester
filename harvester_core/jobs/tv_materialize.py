@@ -421,7 +421,8 @@ def run(
     if not config.tv_root.is_dir():
         raise FileNotFoundError(f"TV root is not a readable directory: {config.tv_root}")
     actors_dir = config.tv_root / ".actors"
-    actors_dir.mkdir(parents=True, exist_ok=True)
+    if write_actors:
+        actors_dir.mkdir(parents=True, exist_ok=True)
     matched = [
         (path, record) for path, record in manifest["shows"].items()
         if record.get("status") == "matched" and record.get("nfo")

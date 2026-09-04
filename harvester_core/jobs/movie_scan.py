@@ -46,14 +46,19 @@ def discover_movies(root):
         targets = nfos or ([videos[0].with_suffix(".nfo")] if len(videos) == 1 else [])
         for nfo_path in targets:
             title = nfo_path.stem
+            original_title = None
             year = clean_year(base.name) or clean_year(title)
             imdb_id = tmdb_id = None
             if nfo_path.exists():
                 try:
                     node = ET.parse(nfo_path).getroot()
-                    title = _text(node, "title", "originaltitle") or title
+                    original_title = _text(node, "originaltitle")
+                    title = _text(node, "title") or original_title or title
                     year = clean_year(_text(node, "year", "premiered", "releasedate")) or year
                     imdb_id = _id(node, "imdb") or _text(node, "imdbid")
+                    generic_id = _text(node, "id")
+                    if not imdb_id and generic_id and generic_id.startswith("tt"):
+                        imdb_id = generic_id
                     tmdb_id = _id(node, "tmdb") or _text(node, "tmdbid")
                 except (ET.ParseError, OSError):
                     pass
@@ -65,13 +70,18 @@ def discover_movies(root):
                 if path.is_file() and "poster" in path.stem.casefold()
                 and path.suffix.casefold() in (".jpg", ".jpeg", ".png")
             )
-            poster = posters[0].resolve() if len(posters) == 1 else None
+            poster = (
+                posters[0].resolve()
+                if len(targets) == 1 and len(posters) == 1
+                else None
+            )
             found[str(nfo_path.resolve())] = {
                 "kind": "movie", "local_target": str(nfo_path.resolve()),
                 "nfo_path": str(nfo_path.resolve()),
                 "poster_path": str(poster) if poster else None,
                 "poster_target_status": "resolved" if poster else "unresolved",
-                "title": title, "year": year, "imdb_id": imdb_id,
+                "title": title, "original_title": original_title,
+                "year": year, "imdb_id": imdb_id,
                 "local_tmdb_id": int(tmdb_id) if str(tmdb_id or "").isdigit() else None,
                 "status": "pending", "tries": 0, "tmdb_id": None, "match": None,
                 "candidates": [], "nfo": None, "poster_url": None,
@@ -136,7 +146,13 @@ def run(config, provider, reporter=None, limit=None, rebuild=False, refresh=Fals
             record["tries"] = int(record.get("tries") or 0) + 1
             record["updated"] = now_iso()
             try:
-                identity = resolve_movie_tmdb_id(provider, {"title": record.get("title"), "year": record.get("year"), "imdb_id": record.get("imdb_id"), "tmdb_id": record.get("local_tmdb_id")})
+                identity = resolve_movie_tmdb_id(provider, {
+                    "title": record.get("title"),
+                    "original_title": record.get("original_title"),
+                    "year": record.get("year"),
+                    "imdb_id": record.get("imdb_id"),
+                    "tmdb_id": record.get("local_tmdb_id"),
+                })
                 record["match"] = identity.get("method")
                 record["candidates"] = identity.get("top") or []
                 if not identity.get("ok"):

@@ -43,7 +43,8 @@ register(ProviderProfile(
 register(ProviderProfile(
     "tvdb", "TheTVDB",
     ("tv.identity", "tv.metadata", "tv.poster", "tv.credits", "person.image"),
-    ("TVDB_API_KEY",), ("show",), ("metadata", "poster", "credits"),
+    ("TVDB_API_KEY",), ("show", "person"),
+    ("metadata", "poster", "credits", "image"),
     "local-tv-tvdb-url-scanner/1.0",
     lambda config: bool(config.tvdb_api_key),
 ))
