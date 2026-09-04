@@ -5,12 +5,19 @@ from pathlib import Path
 import tempfile
 
 
+class StateReadError(RuntimeError):
+    """A durable state file exists but cannot be safely interpreted."""
+
+
 def load_json(path, default=None):
+    path = Path(path)
     try:
-        with Path(path).open(encoding="utf-8") as stream:
+        with path.open(encoding="utf-8") as stream:
             return json.load(stream)
     except FileNotFoundError:
         return default
+    except (json.JSONDecodeError, OSError) as error:
+        raise StateReadError(f"cannot read JSON state {path}: {error}") from error
 
 
 def save_json_atomic(path, value):

@@ -6,7 +6,7 @@ import sys
 
 from harvester_core.config import load_config
 from harvester_core.events import Event
-from harvester_core.storage import load_json
+from harvester_core.storage import load_json, StateReadError
 
 
 def add_limit(parser):
@@ -87,8 +87,11 @@ def main(argv=None):
                 "tmdb_api_cache.json", "tvdb_api_cache.json",
             )
             for name in names:
-                data = load_json(config.state_path(name), None)
-                state = "absent" if data is None else "present"
+                try:
+                    data = load_json(config.state_path(name), None)
+                    state = "absent" if data is None else "present"
+                except StateReadError as error:
+                    state = f"unreadable ({error})"
                 print(f"{name}: {state}")
             return 0
 

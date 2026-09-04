@@ -176,6 +176,38 @@ class HarvesterTests(unittest.TestCase):
                         downloader=lambda url: self.fail("download called"))
             self.assertEqual((show / "poster.png").read_bytes(), b"png receipt")
 
+    def test_materializer_downloads_actor_and_reports_without_printing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            config = self.config(base)
+            show = config.tv_root / "Show"
+            show.mkdir(parents=True)
+            save_json_atomic(config.state_path("tv_show_urls_tvdb.json"), {
+                "shows": {str(show): {
+                    "status": "matched", "folder_name": "Show",
+                    "nfo": {"title": "Show"},
+                    "assets": {"actor_urls": [
+                        {"name": "Actor Name", "url": "https://face"}
+                    ]},
+                }}
+            })
+            events = []
+            with patch("builtins.print") as terminal_print:
+                result = materialize(
+                    config,
+                    reporter=events.append,
+                    downloader=lambda url: (b"actor image", "image/jpeg"),
+                    normalize=False,
+                    sleep_between_requests=0,
+                )
+            terminal_print.assert_not_called()
+            self.assertEqual(result["actor_ok"], 1)
+            self.assertEqual(
+                (config.tv_root / ".actors" / "Actor_Name.jpg").read_bytes(),
+                b"actor image",
+            )
+            self.assertTrue(any(event.data.get("actor") == "Actor Name" for event in events))
+
     def test_png_detection_and_poster_retry_disabled(self):
         self.assertEqual(image_extension(b"\x89PNG\r\n\x1a\nrest", ""), ".png")
         with tempfile.TemporaryDirectory() as temporary:
@@ -273,6 +305,19 @@ class HarvesterTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 2)
         self.assertIn("TMDB capability unavailable", result.stderr)
+
+    def test_status_marks_bad_json_unreadable_and_continues(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            (state / "movie_actor_queue.json").write_text("{broken")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "harvester.py"),
+                 "--state-dir", str(state), "status"],
+                cwd="/", capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("movie_actor_queue.json: unreadable", result.stdout)
+            self.assertIn("tv_show_urls_tvdb.json: absent", result.stdout)
 
 
 if __name__ == "__main__":

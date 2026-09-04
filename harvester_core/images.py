@@ -13,7 +13,8 @@ def normalize_actor_image(data, enabled=True, max_size=(185, 278), quality=75):
         return data
     try:
         from PIL import Image
-    except ImportError:
+    except Exception:
+        # Broken native Pillow installations are as optional as absent ones.
         return data
     try:
         with Image.open(BytesIO(data)) as image:

@@ -644,21 +644,6 @@ def manifest_status_counts(manifest):
     return dict(sorted(counts.items()))
 
 
-def should_process(record):
-    status = record.get("status", "pending")
-    if status == "pending":
-        return True
-    if status == "matched":
-        return REFRESH_MATCHED
-    if status == "error":
-        return RETRY_ERRORS
-    if status == "ambiguous":
-        return RETRY_AMBIGUOUS
-    if status == "not_found":
-        return RETRY_NOT_FOUND
-    return False
-
-
 def short_candidates(candidates, count=3):
     out = []
     for item in (candidates or [])[:count]:

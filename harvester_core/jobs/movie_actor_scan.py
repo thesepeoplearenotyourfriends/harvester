@@ -62,13 +62,6 @@ def first_text(root, *tags):
         if value:
             return value.strip()
     return None
-    for tag in tags:
-        value = root.findtext(tag)
-
-        if value:
-            return value.strip()
-
-    return None
 
 
 def uniqueid(root, wanted_type):
