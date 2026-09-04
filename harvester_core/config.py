@@ -56,11 +56,17 @@ def load_config(overrides: Mapping[str, object] | None = None,
             value = env.get(env_name, file_values.get(env_name, default))
         return value
 
+    def application_path(field, env_name, default):
+        path = Path(choose(field, env_name, default)).expanduser()
+        if not path.is_absolute():
+            path = app / path
+        return path.resolve()
+
     return Config(
         app_dir=app,
-        state_dir=Path(choose("state_dir", "HARVESTER_STATE_DIR", app / "state")).expanduser().resolve(),
-        movie_root=Path(choose("movie_root", "HARVESTER_MOVIE_ROOT", "/mnt/2tb/Movie")).expanduser().resolve(),
-        tv_root=Path(choose("tv_root", "HARVESTER_TV_ROOT", "/mnt/2tb/TV")).expanduser().resolve(),
+        state_dir=application_path("state_dir", "HARVESTER_STATE_DIR", "state"),
+        movie_root=application_path("movie_root", "HARVESTER_MOVIE_ROOT", "/mnt/2tb/Movie"),
+        tv_root=application_path("tv_root", "HARVESTER_TV_ROOT", "/mnt/2tb/TV"),
         tmdb_api_key=choose("tmdb_api_key", "TMDB_API_KEY"),
         tmdb_bearer_token=choose("tmdb_bearer_token", "TMDB_BEARER_TOKEN"),
         tvdb_api_key=choose("tvdb_api_key", "TVDB_API_KEY"),

@@ -1,71 +1,279 @@
-import builtins, os, subprocess, sys, tempfile, unittest
+import builtins
+import inspect
+import io
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
+
 from harvester_core.config import load_config
-from harvester_core.storage import load_json, save_json_atomic
-from harvester_core.jobs.tv_scan import resolve
-from harvester_core.jobs.tv_materialize import run as materialize
-from harvester_core.jobs.movie_actor_fetch import run as fetch
-from harvester_core.jobs.movie_actor_scan import run as movie_scan
 from harvester_core.images import normalize_actor_image
+from harvester_core.jobs.movie_actor_fetch import run as fetch_actors
+from harvester_core.jobs.movie_actor_scan import (
+    make_actor_work_queue,
+    parse_nfo_file,
+    resolve_actor_from_contexts,
+    resolve_movie_tmdb_id,
+)
+from harvester_core.jobs.tv_materialize import (
+    download_bytes,
+    image_extension,
+    run as materialize,
+)
+from harvester_core.jobs.tv_scan import build_nfo_payload, resolve_tvdb_series
+from harvester_core.providers.tmdb import TMDBClient
+from harvester_core.providers.tvdb import TVDBClient
+from harvester_core.storage import load_json, save_json_atomic
 
-ROOT=Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[1]
 
-class FakeTVDB:
-    def get(self,path,params):
-        return ([{"id":1,"name":"The Office","year":"2001"},{"id":2,"name":"The Office","year":"2005"}],False)
 
-class Tests(unittest.TestCase):
-    def test_config_precedence(self):
-        with tempfile.TemporaryDirectory() as td:
-            Path(td,"keys_and_tokens.txt").write_text("# hi\nTMDB_API_KEY=file\nTVDB_PIN=p\nBAD=x\n")
-            cfg=load_config({"tmdb_api_key":"explicit"},{"TMDB_API_KEY":"env"},Path(td))
-            self.assertEqual(cfg.tmdb_api_key,"explicit"); self.assertEqual(cfg.tvdb_pin,"p")
-    def test_atomic_json_and_resume(self):
-        with tempfile.TemporaryDirectory() as td:
-            path=Path(td,"nested","state.json"); save_json_atomic(path,{"done":3})
-            self.assertEqual(load_json(path,{})["done"],3); self.assertFalse(list(path.parent.glob("*.tmp")))
-    def test_ambiguous_tv_title_stays_ambiguous(self):
-        selected,status,_=resolve(FakeTVDB(),"The Office",None)
-        self.assertIsNone(selected); self.assertEqual(status,"ambiguous")
-    def test_materialize_uses_frozen_data_and_skips(self):
-        with tempfile.TemporaryDirectory() as td:
-            base=Path(td); show=base/"TV"/"Show"; show.mkdir(parents=True); (show/"poster.jpg").write_bytes(b"old")
-            cfg=load_config({"state_dir":base/"state","tv_root":base/"TV","movie_root":base/"Movie"},{},base)
-            save_json_atomic(cfg.state_path("tv_show_urls_tvdb.json"),{"shows":{str(show):{"status":"matched","nfo":{"title":"Show"},"assets":{}}}})
-            result=materialize(cfg,overwrite_nfo=False,overwrite_poster=False)
-            self.assertEqual(result["processed"],1); self.assertEqual((show/"poster.jpg").read_bytes(),b"old")
-    def test_movie_existing_artifact_skipped(self):
-        with tempfile.TemporaryDirectory() as td:
-            base=Path(td); cfg=load_config({"state_dir":base/"state","movie_root":base/"Movie","tv_root":base/"TV"},{},base)
-            actor=cfg.movie_root/".actors"/"A.jpg"; actor.parent.mkdir(parents=True); actor.write_bytes(b"receipt")
-            save_json_atomic(cfg.state_path("actor_thumb_urls_tmdb.json"),{"A":["https://invalid"]})
-            result=fetch(cfg,downloader=lambda _: self.fail("download called"))
-            self.assertEqual(result["statuses"]["A"]["status"],"exists")
+class FakeProvider:
+    def __init__(self, responses):
+        self.responses = responses
+        self.calls = []
+
+    def get(self, path, params=None):
+        self.calls.append((path, params or {}))
+        value = self.responses[path]
+        return value() if callable(value) else value
+
+
+class HarvesterTests(unittest.TestCase):
+    def config(self, base):
+        return load_config(
+            {"state_dir": "state", "movie_root": "Movie", "tv_root": "TV"},
+            {},
+            base,
+        )
+
+    def test_config_precedence_and_relative_paths_are_application_relative(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            (base / "keys_and_tokens.txt").write_text(
+                "# comment\nTMDB_API_KEY=file\nTVDB_PIN=pin\nUNKNOWN=x\n"
+            )
+            config = load_config(
+                {"tmdb_api_key": "explicit", "state_dir": "work"},
+                {"TMDB_API_KEY": "environment"},
+                base,
+            )
+            self.assertEqual(config.tmdb_api_key, "explicit")
+            self.assertEqual(config.tvdb_pin, "pin")
+            self.assertEqual(config.state_dir, (base / "work").resolve())
+
+    def test_atomic_json_round_trip(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "nested" / "state.json"
+            save_json_atomic(path, {"done": 3})
+            self.assertEqual(load_json(path), {"done": 3})
+            self.assertFalse(list(path.parent.glob("*.tmp")))
+
+    def test_legacy_movie_nfo_variants_and_nested_actor(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "movie.nfo"
+            path.write_text(
+                "<movie><originaltitle>Legacy</originaltitle><releasedate>1999-01-02</releasedate>"
+                "<id>tt0123</id><tmdbid>456</tmdbid><cast><actor><name>Actor A</name>"
+                "<role>Lead</role><thumb>https://old/image.jpg</thumb></actor></cast></movie>"
+            )
+            record = parse_nfo_file(path)
+            self.assertEqual(record["title"], "Legacy")
+            self.assertEqual(record["year"], 1999)
+            self.assertEqual(record["imdb_id"], "tt0123")
+            self.assertEqual(record["tmdb_id"], 456)
+            self.assertEqual(record["actors"][0]["role"], "Lead")
+
+    def test_actor_queue_is_actor_centric_with_multiple_contexts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "movies"
+            root.mkdir()
+            for number in (1, 2):
+                (root / f"{number}.nfo").write_text(
+                    f"<movie><title>Film {number}</title><actor><name>Same Actor</name></actor></movie>"
+                )
+            queue = make_actor_work_queue([root], Path(temporary) / "queue.json")
+            self.assertEqual(len(queue["actors"]["Same Actor"]["contexts"]), 2)
+
+    def test_movie_title_year_resolution_without_ids(self):
+        provider = FakeProvider({
+            "/search/movie": {"results": [
+                {"id": 7, "title": "Exact", "release_date": "2004-01-01", "popularity": 2},
+                {"id": 8, "title": "Exact", "release_date": "1990-01-01"},
+            ]}
+        })
+        result = resolve_movie_tmdb_id(
+            provider, {"title": "Exact", "original_title": None, "year": 2004}
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["movie_id"], 7)
+        self.assertEqual(result["method"], "title_year_search")
+
+    def test_actor_resolution_tries_multiple_movie_contexts(self):
+        provider = FakeProvider({
+            "/movie/1/credits": {"cast": []},
+            "/movie/2/credits": {"cast": [
+                {"id": 9, "name": "Actor", "order": 0, "profile_path": "/face.jpg"}
+            ]},
+        })
+        contexts = [{"tmdb_id": 1}, {"tmdb_id": 2}]
+        result = resolve_actor_from_contexts(
+            provider, "Actor", contexts, "https://images/", "w185", 1
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["movie_tmdb_id"], 2)
+
+    def test_rich_tv_payload_and_person_image_url(self):
+        details = {
+            "id": 10, "name": "Show", "year": "2020", "overview": "Plot",
+            "remoteIds": [
+                {"sourceName": "IMDB", "id": "tt10"},
+                {"sourceName": "TheMovieDB.com", "id": "20"},
+            ],
+            "aliases": [{"name": "Alias"}], "originalCountry": "USA",
+            "originalLanguage": "eng", "contentRatings": [{"country": "usa", "name": "TV-14"}],
+            "genres": [{"name": "Drama"}], "companies": [{"name": "Studio"}],
+            "tags": [{"name": "Mystery"}], "originalNetwork": {"name": "Network"},
+            "characters": [{"personName": "Actor", "name": "Role", "sort": 1,
+                            "personImgURL": "/people/face.jpg"}],
+            "defaultSeasonType": 1,
+            "seasons": [{"number": 1, "name": "One", "type": {"id": 1, "name": "Official"}}],
+            "artworks": [{"image": "/poster.png", "width": 600, "height": 900}],
+        }
+        nfo, assets = build_nfo_payload(details)
+        self.assertEqual(nfo["ids"]["imdb"], "tt10")
+        self.assertEqual(nfo["network"], ["Network"])
+        self.assertEqual(nfo["seasons"][0]["season_number"], 1)
+        self.assertEqual(assets["actor_urls"][0]["url"], "https://artworks.thetvdb.com/people/face.jpg")
+        self.assertTrue(assets["poster_url"].endswith("poster.png"))
+
+    def test_ambiguous_tv_title_remains_ambiguous(self):
+        provider = FakeProvider({"/search": ([
+            {"id": 1, "name": "The Office", "year": "2001", "type": "series"},
+            {"id": 2, "name": "The Office", "year": "2005", "type": "series"},
+        ], False)})
+        result = resolve_tvdb_series(provider, "The Office", None)
+        self.assertEqual(result["status"], "ambiguous")
+
+    def test_materializer_skips_existing_png_and_never_uses_tvdb(self):
+        self.assertNotIn("providers", inspect.getsource(materialize))
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            config = self.config(base)
+            show = config.tv_root / "Show"
+            show.mkdir(parents=True)
+            (show / "poster.png").write_bytes(b"png receipt")
+            save_json_atomic(config.state_path("tv_show_urls_tvdb.json"), {
+                "shows": {str(show): {"status": "matched", "folder_name": "Show",
+                                      "nfo": {"title": "Show"},
+                                      "assets": {"poster_url": "https://poster"}}}
+            })
+            materialize(config, overwrite_poster=False,
+                        downloader=lambda url: self.fail("download called"))
+            self.assertEqual((show / "poster.png").read_bytes(), b"png receipt")
+
+    def test_png_detection_and_poster_retry_disabled(self):
+        self.assertEqual(image_extension(b"\x89PNG\r\n\x1a\nrest", ""), ".png")
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            config = self.config(base)
+            show = config.tv_root / "Show"
+            show.mkdir(parents=True)
+            manifest = {"shows": {str(show): {
+                "status": "matched", "folder_name": "Show", "nfo": {"title": "Show"},
+                "assets": {"poster_url": "https://poster"},
+                "materialize": {"poster": {"status": "error"}},
+            }}}
+            save_json_atomic(config.state_path("tv_show_urls_tvdb.json"), manifest)
+            materialize(config, retry_failed=False,
+                        downloader=lambda url: self.fail("download called"))
+            saved = load_json(config.state_path("tv_show_urls_tvdb.json"))
+            self.assertEqual(saved["shows"][str(show)]["materialize"]["poster"]["status"], "error")
+
+    def test_image_retry_backoff_without_network_or_sleep(self):
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"image"
+        response.__enter__.return_value.headers.get.return_value = "image/jpeg"
+        error = urllib.error.URLError("wobble")
+        with patch("harvester_core.jobs.tv_materialize.urllib.request.urlopen",
+                   side_effect=[error, response]), patch(
+                       "harvester_core.jobs.tv_materialize.time.sleep") as sleep:
+            self.assertEqual(download_bytes("https://image"), (b"image", "image/jpeg"))
+            sleep.assert_called_once()
+
+    def test_tvdb_refreshes_token_once_after_401(self):
+        client = TVDBClient("secret")
+        client.token = "old"
+        unauthorized = urllib.error.HTTPError("secret-url", 401, "no", {}, None)
+        with patch.object(client, "_request", side_effect=[unauthorized, {"data": {"id": 1}}]), \
+             patch.object(client, "login", side_effect=lambda: setattr(client, "token", "new")) as login:
+            data, _ = client.get("/series/1")
+            self.assertEqual(data, {"id": 1})
+            login.assert_called_once()
+
+    def test_provider_404_is_cached_and_errors_hide_secrets(self):
+        client = TMDBClient(api_key="VERY_SECRET")
+        missing = urllib.error.HTTPError("https://x?api_key=VERY_SECRET", 404, "missing", {}, None)
+        with patch("harvester_core.providers.tmdb.urllib.request.urlopen", side_effect=missing):
+            self.assertEqual(client.get("/missing"), {})
+        self.assertEqual(client.get("/missing"), {})
+        denied = urllib.error.HTTPError("https://x?api_key=VERY_SECRET", 403, "denied", {}, None)
+        with patch("harvester_core.providers.tmdb.urllib.request.urlopen", side_effect=denied):
+            with self.assertRaises(RuntimeError) as caught:
+                client.get("/denied")
+        self.assertNotIn("VERY_SECRET", str(caught.exception))
+
+        tvdb = TVDBClient("TVDB_SECRET")
+        tvdb.token = "TOKEN_SECRET"
+        tvdb_missing = urllib.error.HTTPError(
+            "https://api/series/missing", 404, "missing", {}, None
+        )
+        with patch.object(tvdb, "_request", side_effect=tvdb_missing) as request:
+            self.assertEqual(tvdb.get("/series/missing"), ({}, False))
+            self.assertEqual(tvdb.get("/series/missing"), ({}, True))
+            request.assert_called_once()
+
+    def test_fetch_returns_compact_summary_and_skips_existing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = self.config(Path(temporary))
+            actor = config.movie_root / ".actors" / "A.jpg"
+            actor.parent.mkdir(parents=True)
+            actor.write_bytes(b"receipt")
+            save_json_atomic(config.state_path("actor_thumb_urls_tmdb.json"),
+                             {"A": ["https://invalid"]})
+            result = fetch_actors(config, downloader=lambda _: self.fail("called"))
+            self.assertNotIn("statuses", result)
+            self.assertEqual(result["counts"]["exists"], 1)
+
     def test_pillow_absence_is_passthrough(self):
-        real_import=builtins.__import__
-        def missing(name,*a,**kw):
-            if name=="PIL": raise ImportError
-            return real_import(name,*a,**kw)
-        with patch("builtins.__import__",side_effect=missing): self.assertEqual(normalize_actor_image(b"raw"),b"raw")
-    def test_cli_help_and_status_from_other_cwd(self):
-        with tempfile.TemporaryDirectory() as td:
-            for args in (["--help"],["movies","--help"],["tv","--help"],["--state-dir",td,"status"]):
-                result=subprocess.run([sys.executable,str(ROOT/"harvester.py"),*args],cwd="/",capture_output=True,text=True)
-                self.assertEqual(result.returncode,0,result.stderr)
-    def test_missing_credentials_are_scoped(self):
-        result=subprocess.run([sys.executable,str(ROOT/"harvester.py"),"movies","scan-actors"],env={"PATH":os.environ["PATH"]},capture_output=True,text=True)
-        self.assertEqual(result.returncode,2); self.assertIn("TMDB capability unavailable",result.stderr)
-    def test_successful_movie_state_survives_refresh_failure(self):
-        class Broken:
-            def get(self,*args,**kwargs): raise TimeoutError("wobble")
-        with tempfile.TemporaryDirectory() as td:
-            base=Path(td); movie=base/"Movie"; movie.mkdir()
-            nfo=movie/"film.nfo"; nfo.write_text("<movie><title>Film</title><uniqueid type='tmdb'>1</uniqueid><actor><name>A</name></actor></movie>")
-            cfg=load_config({"state_dir":base/"state","movie_root":movie,"tv_root":base/"TV"},{},base)
-            prior={str(nfo):{"status":"matched","movie":{"title":"Film","tmdb_id":"1","actors":["A"]},"actors":{"A":["https://image/a.jpg"]}}}
-            save_json_atomic(cfg.state_path("movie_actor_queue.json"),prior)
-            movie_scan(cfg,Broken(),refresh=True)
-            self.assertEqual(load_json(cfg.state_path("movie_actor_queue.json"),{})[str(nfo)]["actors"],prior[str(nfo)]["actors"])
+        real_import = builtins.__import__
+        def missing(name, *args, **kwargs):
+            if name == "PIL":
+                raise ImportError
+            return real_import(name, *args, **kwargs)
+        with patch("builtins.__import__", side_effect=missing):
+            self.assertEqual(normalize_actor_image(b"raw"), b"raw")
 
-if __name__=="__main__": unittest.main()
+    def test_cli_help_status_and_missing_credentials_are_scoped(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for arguments in (["--help"], ["movies", "--help"], ["tv", "--help"],
+                              ["--state-dir", temporary, "status"]):
+                result = subprocess.run(
+                    [sys.executable, str(ROOT / "harvester.py"), *arguments],
+                    cwd="/", capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "harvester.py"), "movies", "scan-actors"],
+            env={"PATH": os.environ["PATH"]}, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("TMDB capability unavailable", result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

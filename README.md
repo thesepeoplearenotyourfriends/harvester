@@ -16,7 +16,7 @@ Run `python3 harvester.py --help` and nested `--help` for the complete map. Stag
 
 ## Configuration
 
-Defaults are `/mnt/2tb/Movie`, `/mnt/2tb/TV`, and `state/` beside `harvester.py`. Override them globally with `--movie-root`, `--tv-root`, and `--state-dir`, or with `HARVESTER_MOVIE_ROOT`, `HARVESTER_TV_ROOT`, and `HARVESTER_STATE_DIR`. Resolution is independent of the current working directory.
+Defaults are `/mnt/2tb/Movie`, `/mnt/2tb/TV`, and `state/` beside `harvester.py`. Override them globally with `--movie-root`, `--tv-root`, and `--state-dir`, or with `HARVESTER_MOVIE_ROOT`, `HARVESTER_TV_ROOT`, and `HARVESTER_STATE_DIR`. Relative overrides are resolved against the application directory, not the invoking shell's directory.
 
 An optional ignored `keys_and_tokens.txt` beside `harvester.py` accepts:
 
@@ -35,13 +35,13 @@ Pillow is optional and imported only while treating actor images. Without it, do
 
 All state is ordinary atomically replaced JSON:
 
-* `movie_actor_queue.json` — per-NFO scan/resolution receipts for resuming.
+* `movie_actor_queue.json` — actor-centric contexts and per-actor resolution/failure receipts for resuming.
 * `actor_thumb_urls_tmdb.json` — frozen actor image URLs consumed by `fetch-actors`.
 * `actor_photo_download_status.json` — actor image download outcomes.
 * `tv_show_urls_tvdb.json` — Stage 1 matches, URL-free NFO payloads, separate asset URLs, and Stage 2 receipts.
 * `tmdb_api_cache.json` and `tvdb_api_cache.json` — persistent raw GET response caches.
 
-Normal runs resume these files. Existing actor files are always receipts; NFO/poster overwrite behavior retains the reference defaults and has explicit opt-outs. Failed transfers are retried only when the corresponding retry control permits it. A transient refresh failure does not replace a prior successful match. Ambiguous title-only TV searches remain staged as ambiguous for human correction rather than selecting recklessly.
+Normal runs resume these files. An actor found in several NFOs is tried through those movie contexts until one resolves. Movie lookup prefers local TMDB ID, then IMDb lookup, then conservative title/year matching. Existing actor files are always receipts; NFO/poster overwrite behavior retains the reference defaults and has explicit opt-outs. Failed transfers are retried only when the corresponding retry control permits it. A transient refresh failure does not replace a prior successful match. Ambiguous title-only TV searches remain staged as ambiguous for human correction rather than selecting recklessly. CLI results are compact summaries; detailed receipts remain in these JSON files.
 
 ## Validation
 

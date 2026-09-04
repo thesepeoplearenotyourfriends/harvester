@@ -17,7 +17,8 @@ def normalize_actor_image(data, enabled=True, max_size=(185, 278), quality=75):
         return data
     try:
         with Image.open(BytesIO(data)) as image:
-            image = image.convert("RGB"); image.thumbnail(max_size, Image.LANCZOS)
+            image = image.convert("RGB")
+            image.thumbnail(max_size, Image.LANCZOS)
             output = BytesIO()
             image.save(output, "JPEG", quality=quality, optimize=True, progressive=False)
             return output.getvalue()

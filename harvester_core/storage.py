@@ -39,8 +39,11 @@ def write_bytes_atomic(path, data):
     try:
         with os.fdopen(fd, "wb") as stream:
             stream.write(data)
-            stream.flush(); os.fsync(stream.fileno())
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, path)
     finally:
-        try: os.unlink(temporary)
-        except FileNotFoundError: pass
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
