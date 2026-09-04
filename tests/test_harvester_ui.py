@@ -37,11 +37,11 @@ class HarvesterUIBridgeTests(unittest.TestCase):
         with self.assertRaises(harvester_ui.BridgeError):
             harvester_ui.action_argv("get.movie", {"identifier": "--help"})
         self.assertEqual(
-            harvester_ui.action_argv("rescan", {"target": "all"})[3:],
-            ["rescan", "all"],
+            harvester_ui.action_argv("rescan", {})[3:],
+            ["rescan"],
         )
         with self.assertRaises(harvester_ui.BridgeError):
-            harvester_ui.action_argv("rescan", {"target": "internet"})
+            harvester_ui.action_argv("rescan", {"target": "actors"})
 
     def test_action_allowlist_is_derived_from_the_registry(self):
         self.assertEqual(harvester_ui.BRIDGE_ACTIONS,
@@ -168,6 +168,8 @@ class HarvesterUICacheTests(unittest.TestCase):
         self.assertIn("setStartupScanning(true)", page)
         self.assertIn('querySelector("#work-menu").disabled = scanning', page)
         self.assertIn('querySelector("#search").disabled = scanning', page)
+        self.assertIn("showStartupRescanFailure(error)", page)
+        self.assertIn("Work queues and Search remain unavailable", page)
 
 
 if __name__ == "__main__":

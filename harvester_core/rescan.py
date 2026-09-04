@@ -43,12 +43,21 @@ def _reconciled_meta(previous, fresh, census_fields):
     return merged
 
 
-def rescan_actors(config):
+def _refuse_suspicious_empty(previous, collection, discovered_count, label):
+    existing = previous.get(collection, {}) if isinstance(previous, dict) else {}
+    if isinstance(existing, dict) and existing and discovered_count == 0:
+        raise RuntimeError(
+            f"refusing to replace non-empty {label} census with empty discovery"
+        )
+
+
+def rescan_actors(config, fresh_queue=None):
     _require_readable_directory(config.movie_root, "MOVIE_ROOT")
     path = config.state_path("movie_actor_queue.json")
     previous = load_json(path, {})
     previous_actors = previous.get("actors", {}) if isinstance(previous, dict) else {}
-    queue = build_actor_work_queue([str(config.movie_root)])
+    queue = fresh_queue or build_actor_work_queue([str(config.movie_root)])
+    _refuse_suspicious_empty(previous, "actors", len(queue["actors"]), "actor")
     for name, fresh in queue["actors"].items():
         queue["actors"][name] = _preserve_remote_state(
             fresh, previous_actors.get(name), ("contexts",),
@@ -65,12 +74,13 @@ def rescan_actors(config):
     return {"kind": "actors", **counts}
 
 
-def rescan_movies(config):
+def rescan_movies(config, discovered=None):
     _require_readable_directory(config.movie_root, "MOVIE_ROOT")
     path = config.state_path("movie_manifest_tmdb.json")
     previous = load_json(path, {})
     previous_movies = previous.get("movies", {}) if isinstance(previous, dict) else {}
-    discovered = discover_movies(config.movie_root)
+    discovered = discovered if discovered is not None else discover_movies(config.movie_root)
+    _refuse_suspicious_empty(previous, "movies", len(discovered), "movie")
     local_fields = (
         "kind", "local_target", "nfo_path", "poster_path",
         "poster_target_status", "title", "original_title", "year",
@@ -81,7 +91,8 @@ def rescan_movies(config):
         for key, fresh in discovered.items()
     }
     fresh_manifest = {"_meta": {
-        "version": 1, "source": "TMDB", "updated": movie_now_iso(),
+        "version": 1, "source": "TMDB", "created": movie_now_iso(),
+        "updated": movie_now_iso(),
         "library_root": str(config.movie_root), "movie_count": len(movies),
     }}
     manifest = {"_meta": _reconciled_meta(
@@ -93,14 +104,20 @@ def rescan_movies(config):
             "status_counts": dict(Counter(x.get("status", "pending") for x in movies.values()))}
 
 
-def rescan_shows(config):
+def rescan_shows(config, directories=None):
     _require_readable_directory(config.tv_root, "TV_ROOT")
     path = config.state_path("tv_show_urls_tvdb.json")
     previous = load_json(path, {})
     previous_shows = previous.get("shows", {}) if isinstance(previous, dict) else {}
+    directories = (
+        directories
+        if directories is not None
+        else scan_immediate_show_dirs(config.tv_root)
+    )
+    _refuse_suspicious_empty(previous, "shows", len(directories), "show")
     manifest = new_manifest(config.tv_root)
     local_fields = ("folder_name", "query_title", "query_year", "local_season")
-    for directory in scan_immediate_show_dirs(config.tv_root):
+    for directory in directories:
         key = str(directory)
         manifest["shows"][key] = _preserve_remote_state(
             new_record(directory), previous_shows.get(key), local_fields,
@@ -116,16 +133,26 @@ def rescan_shows(config):
             "status_counts": dict(Counter(x.get("status", "pending") for x in shows.values()))}
 
 
-def rescan(config, target):
-    operations = {
-        "actors": rescan_actors,
-        "movies": rescan_movies,
-        "shows": rescan_shows,
+def rescan(config):
+    # Validate and discover every storage boundary before the first durable
+    # write. An empty mounted directory is treated like an unavailable one when
+    # it would erase a census that previously contained records.
+    _require_readable_directory(config.movie_root, "MOVIE_ROOT")
+    _require_readable_directory(config.tv_root, "TV_ROOT")
+    actor_queue = build_actor_work_queue([str(config.movie_root)])
+    movies = discover_movies(config.movie_root)
+    show_directories = scan_immediate_show_dirs(config.tv_root)
+    previous = {
+        "actors": load_json(config.state_path("movie_actor_queue.json"), {}),
+        "movies": load_json(config.state_path("movie_manifest_tmdb.json"), {}),
+        "shows": load_json(config.state_path("tv_show_urls_tvdb.json"), {}),
     }
-    if target == "all":
-        # Validate every storage boundary before the first durable state write.
-        _require_readable_directory(config.movie_root, "MOVIE_ROOT")
-        _require_readable_directory(config.tv_root, "TV_ROOT")
-    selected = operations if target == "all" else {target: operations[target]}
-    results = {name: operation(config) for name, operation in selected.items()}
+    _refuse_suspicious_empty(previous["actors"], "actors", len(actor_queue["actors"]), "actor")
+    _refuse_suspicious_empty(previous["movies"], "movies", len(movies), "movie")
+    _refuse_suspicious_empty(previous["shows"], "shows", len(show_directories), "show")
+    results = {
+        "actors": rescan_actors(config, actor_queue),
+        "movies": rescan_movies(config, movies),
+        "shows": rescan_shows(config, show_directories),
+    }
     return {"rescanned": results, "inventory": inventory(config)}

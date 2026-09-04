@@ -555,16 +555,28 @@
         const generation = ++state.generation;
         setStartupScanning(true);
         try {
-          await App.request("rescan", { target: "all" });
+          await App.request("rescan");
         } catch (error) {
           if (error.name !== "AbortError") {
             console.warn("Local census rescan skipped:", error.message);
+            showStartupRescanFailure(error);
           }
-        } finally {
-          setStartupScanning(false);
+          return;
         }
+        setStartupScanning(false);
         if (generation !== state.generation) return;
         await loadOverview();
+      }
+      function showStartupRescanFailure(error) {
+        document.querySelector("#context-pane").innerHTML =
+          "<h1>Local library unavailable</h1>";
+        document.querySelector("#workspace").innerHTML = `
+          <article class="inspector">
+            <h1>Census not refreshed</h1>
+            <p>Harvester could not verify the local Movie and TV libraries.</p>
+            <p class="error">${esc(error.message || "Local rescan failed")}</p>
+            <p class="muted">Work queues and Search remain unavailable until Harvester can complete a local rescan.</p>
+          </article>`;
       }
       function setStartupScanning(scanning) {
         document.querySelector("#work-menu").disabled = scanning;

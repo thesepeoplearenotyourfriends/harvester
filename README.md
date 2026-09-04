@@ -78,10 +78,10 @@ manifests itself.
 Queue clients can request compact records with `api list actors|movies|shows
 --brief` and apply `--status` or `--missing` filters. `api search QUERY` searches
 actor, movie, and show identities in durable state without contacting a provider.
-`api rescan actors|movies|shows|all` rebuilds the selected local census from the
-filesystem while retaining provider results for identities that still exist. It
-refuses unavailable library roots before writing state, retains manifest run
-history, and prunes frozen actor URL work to the actors still in local NFOs. It
+`api rescan` rebuilds all local censuses while retaining provider results for
+identities that still exist. It refuses unavailable or suspiciously empty library
+roots before writing state, retains manifest run history, and prunes frozen actor
+URL work to the actors still in local NFOs. It
 does not construct a provider, download an image, or materialize metadata.
 The desktop UI opens on an inventory overview. Its Work menu and resizable context
 pane open the same queues; Missing Actor Images decodes dropped or selected images

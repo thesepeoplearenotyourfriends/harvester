@@ -102,8 +102,7 @@ def parser():
     search_parser = api.add_parser("search", help="search durable records offline")
     search_parser.add_argument("query")
     search_parser.add_argument("--limit", type=int, default=50)
-    rescan_parser = api.add_parser("rescan", help="rebuild local censuses offline")
-    rescan_parser.add_argument("target", choices=("actors", "movies", "shows", "all"))
+    api.add_parser("rescan", help="rebuild all local censuses offline")
     api.add_parser("inventory", help="summarize durable state")
     refresh = api.add_parser("refresh", help="refresh explicitly named records").add_subparsers(dest="kind", required=True)
     aspects = {"actor": ("identity", "image", "all"), "movie": ("identity", "metadata", "nfo", "poster", "actors", "all"), "show": ("identity", "metadata", "nfo", "poster", "actors", "all")}
@@ -264,7 +263,7 @@ def api_main(args, config):
                 terminal({"items": search(config, args.query, args.limit)})
             elif args.api_command == "rescan":
                 from harvester_core.rescan import rescan
-                terminal(rescan(config, args.target))
+                terminal(rescan(config))
             else:
                 terminal(inventory(config))
         else:

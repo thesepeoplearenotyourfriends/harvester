@@ -196,7 +196,7 @@ class MachineApiMovieTests(unittest.TestCase):
         }})
 
         with mock.patch("urllib.request.urlopen", side_effect=AssertionError("network used")):
-            result = rescan(self.config, "all")
+            result = rescan(self.config)
 
         actors = load_json(self.state / "movie_actor_queue.json")["actors"]
         movies = load_json(self.state / "movie_manifest_tmdb.json")["movies"]
@@ -241,24 +241,47 @@ class MachineApiMovieTests(unittest.TestCase):
                                      "tv_root": Path(self.temp.name) / "tv"},
                                     environ={}, app_dir=ROOT)
         with self.assertRaisesRegex(FileNotFoundError, "MOVIE_ROOT"):
-            rescan(missing_movie, "actors")
+            rescan(missing_movie)
         self.assertEqual(before, {name: (self.state / name).read_bytes() for name in files})
 
         missing_tv = load_config({"state_dir": self.state, "movie_root": self.movies,
                                   "tv_root": Path(self.temp.name) / "missing-tv"},
                                  environ={}, app_dir=ROOT)
         with self.assertRaisesRegex(FileNotFoundError, "TV_ROOT"):
-            rescan(missing_tv, "all")
+            rescan(missing_tv)
         self.assertEqual(before, {name: (self.state / name).read_bytes() for name in files})
 
-    def test_api_rescan_targets_are_available(self):
+    def test_api_rescan_is_whole_library_only(self):
         (Path(self.temp.name) / "tv").mkdir(exist_ok=True)
-        for target in ("actors", "movies", "shows", "all"):
-            with self.subTest(target=target):
-                result = self.cli("api", "rescan", target)
-                self.assertEqual(result.returncode, 0, result.stdout)
-                payload = json.loads(result.stdout)["result"]
-                self.assertIn("inventory", payload)
+        result = self.cli("api", "rescan")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        payload = json.loads(result.stdout)["result"]
+        self.assertEqual(set(payload["rescanned"]), {"actors", "movies", "shows"})
+        self.assertTrue(load_json(self.state / "movie_manifest_tmdb.json")["_meta"]["created"])
+        rejected = self.cli("api", "rescan", "actors")
+        self.assertNotEqual(rejected.returncode, 0)
+
+    def test_rescan_readable_empty_roots_leave_all_state_unchanged(self):
+        empty_movies = Path(self.temp.name) / "empty-movies"
+        empty_tv = Path(self.temp.name) / "empty-tv"
+        empty_movies.mkdir()
+        empty_tv.mkdir()
+        files = {
+            "movie_actor_queue.json": {"actors": {"Existing Actor": {}}},
+            "actor_thumb_urls_tmdb.json": {"Existing Actor": ["https://old"]},
+            "movie_manifest_tmdb.json": {"movies": {"existing": {}}},
+            "tv_show_urls_tvdb.json": {"shows": {"existing": {}}},
+        }
+        for name, value in files.items():
+            save_json_atomic(self.state / name, value)
+        before = {name: (self.state / name).read_bytes() for name in files}
+        config = load_config({"state_dir": self.state, "movie_root": empty_movies,
+                              "tv_root": empty_tv}, environ={}, app_dir=ROOT)
+
+        with self.assertRaisesRegex(RuntimeError, "empty discovery"):
+            rescan(config)
+
+        self.assertEqual(before, {name: (self.state / name).read_bytes() for name in files})
 
     def test_tv_receipt_uses_materializer_filename(self):
         show = Path(self.temp.name) / "tv" / "Example"

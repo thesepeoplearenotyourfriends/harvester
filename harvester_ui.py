@@ -75,9 +75,9 @@ def _refresh_actor(data):
 
 
 def _rescan(data):
-    if set(data) != {"target"} or data["target"] not in ("actors", "movies", "shows", "all"):
-        raise BridgeError("rescan requires an actors, movies, shows, or all target")
-    return ("rescan", data["target"])
+    if data:
+        raise BridgeError("rescan does not accept arguments")
+    return ("rescan",)
 
 
 ACTION_REGISTRY = {
