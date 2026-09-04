@@ -1,5 +1,6 @@
 """TVDB Stage 1, preserving rich frozen reference manifests."""
 import re
+import time
 import unicodedata
 from collections import Counter
 from datetime import datetime, timezone
@@ -668,12 +669,18 @@ def run(
     retry_errors=True,
     retry_ambiguous=False,
     retry_not_found=False,
+    sleep_between_shows=1,
+    save_every=1,
+    sleep=None,
 ):
     """Resolve immediate TV folders and checkpoint each result atomically."""
     work_path = config.state_path("tv_show_urls_tvdb.json")
     manifest, directories, _added = load_or_merge_manifest(config.tv_root, work_path, rebuild)
     processed = 0
-    for show_dir in directories:
+    changed_since_save = 0
+    sleep = sleep or time.sleep
+    try:
+      for show_dir in directories:
         record = manifest["shows"][str(show_dir)]
         status = record.get("status", "pending")
         should_run = (
@@ -693,9 +700,13 @@ def run(
         year = record.get("query_year")
         record["tries"] = int(record.get("tries") or 0) + 1
         record["updated"] = now_iso()
+        sleep_after_show = True
         try:
             resolved = resolve_tvdb_series(provider, title, year)
             if not resolved.get("ok"):
+                # The reference loop continued from this branch before its
+                # inter-show throttle.
+                sleep_after_show = False
                 if old_status == "matched" and record.get("nfo"):
                     record["last_error"] = "refresh left unresolved: " + resolved["status"]
                 else:
@@ -720,6 +731,8 @@ def run(
                     "candidates": resolved.get("candidates") or [],
                     "nfo": nfo, "assets": assets, "last_error": None,
                 })
+        except KeyboardInterrupt:
+            raise
         except Exception as error:
             if old_status == "matched" and record.get("nfo"):
                 record["status"] = "matched"
@@ -728,8 +741,20 @@ def run(
                 record["status"] = "error"
                 record["last_error"] = repr(error)
         processed += 1
+        changed_since_save += 1
         manifest["_meta"]["updated"] = now_iso()
-        json_save_atomic(work_path, manifest)
+        if changed_since_save >= save_every:
+            json_save_atomic(work_path, manifest)
+            changed_since_save = 0
         emit(reporter, "progress", record["folder_name"], status=record["status"])
-    json_save_atomic(work_path, manifest)
+        if sleep_after_show and sleep_between_shows:
+            sleep(sleep_between_shows)
+    except KeyboardInterrupt:
+        emit(reporter, "interrupted", "TV scan interrupted; preserving manifest")
+    finally:
+        manifest["_meta"]["updated"] = now_iso()
+        manifest["_meta"]["last_run"] = {
+            "finished": now_iso(), "processed": processed,
+        }
+        json_save_atomic(work_path, manifest)
     return {"processed": processed, "shows": len(manifest["shows"]), "status_counts": manifest_status_counts(manifest)}

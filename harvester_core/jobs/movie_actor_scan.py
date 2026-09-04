@@ -777,6 +777,7 @@ def run(
     include_old_nfo_urls=False,
     image_size="w185",
     max_images_per_actor=1,
+    save_every=50,
 ):
     """Build/resume the actor-centric queue and return a compact result."""
     queue_path = config.state_path("movie_actor_queue.json")
@@ -787,6 +788,7 @@ def run(
         image_size = "w185" if "w185" in profile_sizes else (profile_sizes[-1] if profile_sizes else image_size)
 
     processed = 0
+    changed_since_save = 0
     for actor_name, item in queue.get("actors", {}).items():
         status = item.get("status", "pending")
         if status == "ok" and not refresh:
@@ -794,6 +796,8 @@ def run(
         if status == "failed" and not retry_failed:
             continue
         if status == "error" and not retry_errors:
+            continue
+        if status not in ("pending", "ok", "failed", "error"):
             continue
         if limit is not None and processed >= limit:
             break
@@ -844,10 +848,14 @@ def run(
                 item["status"] = "error"
                 item["fail_reason"] = repr(error)
         processed += 1
+        changed_since_save += 1
         queue["_meta"]["updated"] = now_iso()
-        json_save_atomic(queue_path, queue)
-        write_final_actor_db_from_queue(queue, output_path)
+        if changed_since_save >= save_every:
+            json_save_atomic(queue_path, queue)
+            write_final_actor_db_from_queue(queue, output_path)
+            changed_since_save = 0
         emit(reporter, "progress", actor_name, status=item.get("status"))
 
+    json_save_atomic(queue_path, queue)
     urls = write_final_actor_db_from_queue(queue, output_path)
     return {"processed": processed, "actors": len(queue.get("actors", {})), "resolved": len(urls), "status_counts": queue_stats(queue)}

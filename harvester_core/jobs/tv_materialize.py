@@ -303,7 +303,9 @@ def materialize_show(
         update_overall_status(record)
         counters["show_missing"] += 1
         emit(reporter, "error", "show directory no longer exists", show=folder_name)
-        return
+        return 2
+
+    changes = 0
 
     def fetch(url):
         if downloader:
@@ -323,9 +325,11 @@ def materialize_show(
             write_bytes_atomic(nfo_path, xml)
             mark_item(state["nfo"], "ok", bytes=len(xml))
             counters["nfo_ok"] += 1
+        changes += 1
     except Exception as error:
         mark_item(state["nfo"], "error", error=repr(error))
         counters["nfo_error"] += 1
+        changes += 1
     emit(reporter, "artifact", "NFO handled", show=folder_name,
          status=state["nfo"].get("status"))
 
@@ -347,16 +351,21 @@ def materialize_show(
             alternate = poster_png if target == poster_jpg else poster_jpg
             write_bytes_atomic(target, data)
             if alternate.exists():
-                alternate.unlink()
+                try:
+                    alternate.unlink()
+                except OSError:
+                    pass
             mark_item(poster_state, "ok", bytes=len(data), file=target.name,
                       content_type=content_type)
             counters["poster_ok"] += 1
             counters["bytes"] += len(data)
+            changes += 1
         else:
             counters["poster_skipped"] += 1
     except Exception as error:
         mark_item(poster_state, "error", error=repr(error), url=poster_url)
         counters["poster_error"] += 1
+        changes += 1
     emit(reporter, "artifact", "poster handled", show=folder_name,
          status=poster_state.get("status"))
 
@@ -388,6 +397,7 @@ def materialize_show(
                           source_bytes=len(source), content_type=content_type)
                 counters["actor_ok"] += 1
                 counters["bytes"] += len(data)
+                changes += 1
                 if options.sleep_between_requests:
                     sleep(options.sleep_between_requests)
         except KeyboardInterrupt:
@@ -395,9 +405,11 @@ def materialize_show(
         except Exception as error:
             mark_item(actor_state, "error", error=repr(error), url=actor.get("url"))
             counters["actor_error"] += 1
+            changes += 1
         emit(reporter, "artifact", "actor image handled", show=folder_name,
              actor=name, status=actor_state.get("status"))
     update_overall_status(record)
+    return changes
 
 
 def run(
@@ -413,6 +425,8 @@ def run(
     sleep_between_requests=0.5,
     sleep=None,
     transport=None,
+    request_timeout=30,
+    save_every_changes=25,
 ):
     """Materialize a frozen manifest and return a compact structured result."""
     options = MaterializeOptions(
@@ -421,6 +435,7 @@ def run(
         retry_failed=retry_failed,
         normalize_actors=normalize,
         request_attempts=request_attempts,
+        request_timeout=request_timeout,
         sleep_between_requests=sleep_between_requests,
     )
     sleep = sleep or time.sleep
@@ -428,6 +443,8 @@ def run(
     manifest = load_json(work_path, None)
     if not isinstance(manifest, dict) or not isinstance(manifest.get("shows"), dict):
         raise RuntimeError(f"No usable Stage 1 work file at {work_path}; run 'tv scan' first")
+    if not config.tv_root.is_dir():
+        raise FileNotFoundError(f"TV root is not a readable directory: {config.tv_root}")
     actors_dir = config.tv_root / ".actors"
     actors_dir.mkdir(parents=True, exist_ok=True)
     matched = [
@@ -436,19 +453,39 @@ def run(
     ]
     matched.sort(key=lambda pair: (pair[1].get("folder_name") or pair[0]).casefold())
     counters = Counter()
-    for show_path, record in matched:
-        if limit is not None and counters["shows_seen"] >= limit:
-            break
-        counters["shows_seen"] += 1
-        materialize_show(
-            show_path, record, actors_dir, counters, options, reporter, downloader, sleep,
-            transport,
-        )
-        manifest.setdefault("_meta", {})["updated"] = now_iso()
+    changed_since_save = 0
+    try:
+        for show_path, record in matched:
+            if limit is not None and counters["shows_seen"] >= limit:
+                break
+            counters["shows_seen"] += 1
+            changes = materialize_show(
+                show_path, record, actors_dir, counters, options, reporter, downloader,
+                sleep, transport,
+            )
+            changed_since_save += changes
+            manifest.setdefault("_meta", {})["updated"] = now_iso()
+            if changed_since_save >= save_every_changes:
+                save_json_atomic(work_path, manifest)
+                changed_since_save = 0
+            emit(reporter, "progress", record.get("folder_name", show_path),
+                 status=record.get("materialize", {}).get("status"))
+    except KeyboardInterrupt:
+        emit(reporter, "interrupted", "TV materialization interrupted; preserving manifest")
+    finally:
+        manifest.setdefault("_meta", {})["last_materialize_run"] = {
+            "finished": now_iso(), "processed_shows": counters["shows_seen"],
+            "nfo_ok": counters["nfo_ok"], "nfo_exists": counters["nfo_exists"],
+            "nfo_error": counters["nfo_error"], "poster_ok": counters["poster_ok"],
+            "poster_exists": counters["poster_exists"],
+            "poster_no_url": counters["poster_no_url"],
+            "poster_error": counters["poster_error"],
+            "actor_ok": counters["actor_ok"], "actor_exists": counters["actor_exists"],
+            "actor_no_url": counters["actor_no_url"],
+            "actor_error": counters["actor_error"],
+            "bytes_written": counters["bytes"],
+        }
         save_json_atomic(work_path, manifest)
-        emit(reporter, "progress", record.get("folder_name", show_path),
-             status=record.get("materialize", {}).get("status"))
-    save_json_atomic(work_path, manifest)
     return {
         "processed": counters["shows_seen"],
         "bytes_written": counters["bytes"],

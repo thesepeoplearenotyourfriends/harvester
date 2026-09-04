@@ -17,6 +17,7 @@ from unittest.mock import patch
 from harvester_core.config import load_config
 from harvester_core.images import normalize_actor_image
 from harvester_core.jobs.movie_actor_fetch import run as fetch_actors
+from harvester_core.jobs import movie_actor_fetch, movie_actor_scan, tv_materialize, tv_scan
 from harvester_core.jobs.movie_actor_scan import (
     make_actor_work_queue,
     parse_nfo_file,
@@ -138,6 +139,24 @@ class HarvesterTests(unittest.TestCase):
             save_json_atomic(path, {"done": 3})
             self.assertEqual(load_json(path), {"done": 3})
             self.assertFalse(list(path.parent.glob("*.tmp")))
+
+    def test_reference_control_defaults_remain_visible_on_callable_jobs(self):
+        fetch = inspect.signature(movie_actor_fetch.run).parameters
+        actor_scan = inspect.signature(movie_actor_scan.run).parameters
+        television_scan = inspect.signature(tv_scan.run).parameters
+        television_write = inspect.signature(tv_materialize.run).parameters
+        self.assertEqual(fetch["request_timeout"].default, 30)
+        self.assertEqual(fetch["sleep_between"].default, 0.0)
+        self.assertEqual(fetch["save_every"].default, 25)
+        self.assertEqual(actor_scan["save_every"].default, 50)
+        self.assertEqual(television_scan["sleep_between_shows"].default, 1)
+        self.assertEqual(television_scan["save_every"].default, 1)
+        self.assertEqual(television_write["request_timeout"].default, 30)
+        self.assertEqual(television_write["request_attempts"].default, 4)
+        self.assertEqual(television_write["sleep_between_requests"].default, 0.5)
+        self.assertEqual(television_write["save_every_changes"].default, 25)
+        self.assertEqual(TMDBClient.USER_AGENT, "local-nfo-tmdb-thumb-cache/1.0")
+        self.assertEqual(TVDBClient.USER_AGENT, "local-tv-tvdb-url-scanner/1.0")
 
     def test_legacy_movie_nfo_variants_and_nested_actor(self):
         with tempfile.TemporaryDirectory() as temporary:
