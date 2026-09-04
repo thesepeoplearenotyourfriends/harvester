@@ -201,7 +201,11 @@ class HarvesterTests(unittest.TestCase):
                     sleep_between_requests=0,
                 )
             terminal_print.assert_not_called()
+            self.assertEqual(result["nfo_ok"], 1)
             self.assertEqual(result["actor_ok"], 1)
+            nfo = (show / "show.nfo").read_text(encoding="utf-8")
+            self.assertIn("<tvshow>", nfo)
+            self.assertIn("<title>Show</title>", nfo)
             self.assertEqual(
                 (config.tv_root / ".actors" / "Actor_Name.jpg").read_bytes(),
                 b"actor image",

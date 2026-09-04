@@ -6,6 +6,7 @@ from pathlib import Path
 import time
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 
 from ..events import emit
 from ..images import normalize_actor_image, safe_actor_filename
