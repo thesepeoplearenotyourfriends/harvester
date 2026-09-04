@@ -10,7 +10,12 @@
   <body>
     <header id="menu-bar">
       <div class="menu">
-        <button class="menu-label" type="button" aria-expanded="false">
+        <button
+          id="work-menu"
+          class="menu-label"
+          type="button"
+          aria-expanded="false"
+        >
           Work
         </button>
         <div class="menu-items">
@@ -548,15 +553,32 @@
       }
       async function start() {
         const generation = ++state.generation;
+        setStartupScanning(true);
         try {
           await App.request("rescan", { target: "all" });
         } catch (error) {
           if (error.name !== "AbortError") {
             console.warn("Local census rescan skipped:", error.message);
           }
+        } finally {
+          setStartupScanning(false);
         }
         if (generation !== state.generation) return;
         await loadOverview();
+      }
+      function setStartupScanning(scanning) {
+        document.querySelector("#work-menu").disabled = scanning;
+        document.querySelectorAll("[data-work]").forEach((button) => {
+          button.disabled = scanning;
+        });
+        document.querySelector("#search").disabled = scanning;
+        if (scanning) {
+          closeMenus();
+          document.querySelector("#context-pane").innerHTML =
+            "<h1>Scanning local libraries…</h1>";
+          document.querySelector("#workspace").innerHTML =
+            '<p class="muted">Rebuilding the local census before loading queues.</p>';
+        }
       }
       function bindWork() {
         document.querySelectorAll("[data-work]").forEach(

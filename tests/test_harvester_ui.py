@@ -165,6 +165,9 @@ class HarvesterUICacheTests(unittest.TestCase):
         self.assertIn('"image/jpeg"', page)
         self.assertIn("const dataUrl = await normalizeActorImage(file)", page)
         self.assertIn('classList.remove("busy")', page)
+        self.assertIn("setStartupScanning(true)", page)
+        self.assertIn('querySelector("#work-menu").disabled = scanning', page)
+        self.assertIn('querySelector("#search").disabled = scanning', page)
 
 
 if __name__ == "__main__":
