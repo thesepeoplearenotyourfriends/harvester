@@ -75,6 +75,26 @@ class HarvesterUIBridgeTests(unittest.TestCase):
         ))
         self.assertEqual(harvester_ui.parse_ndjson(output), {"items": []})
 
+    def test_large_collection_is_published_outside_bridge_reply(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache" / "ui"
+            items = [{"kind": "actor", "name": f"Actor {number:05d}"}
+                     for number in range(16000)]
+            with mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                    mock.patch.object(harvester_ui, "CACHE_DIR", cache):
+                descriptor = harvester_ui.publish_collection(
+                    "list.actors", {"missing": "image"}, {"items": items})
+                other = harvester_ui.publish_collection(
+                    "list.actors", {"status": "failed"}, {"items": []})
+            reply = harvester_ui.make_reply(1, result=descriptor)
+            self.assertLess(len(reply), 500)
+            self.assertNotIn("Actor 15999", reply)
+            self.assertNotEqual(descriptor["asset"], other["asset"])
+            payload = json.loads(next(cache.glob("*" + descriptor["asset"].rsplit("-", 1)[-1])).read_text())
+            self.assertEqual(payload["items"], items)
+            self.assertEqual(payload["generation"], descriptor["generation"])
+
     def test_structured_error_becomes_bridge_error(self):
         with self.assertRaisesRegex(harvester_ui.BridgeError, "movie not found"):
             harvester_ui.parse_ndjson('{"schema":1,"type":"error","ok":false,"error":"movie not found"}')
@@ -121,7 +141,14 @@ class HarvesterUICacheTests(unittest.TestCase):
     def test_host_and_page_package_ids_agree(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
         self.assertIn(f'const PACKAGE_ID = "{harvester_ui.PACKAGE_ID}";', page)
-        self.assertIn("asset://${PACKAGE_ID}/.cache/ui/snapshot.json", page)
+        self.assertIn("asset://${PACKAGE_ID}/.cache/ui/collection-v", page)
+        self.assertIn("requestCollection", page)
+
+    def test_provider_profiles_are_rendered_as_profiles(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        self.assertIn("value.providers", page)
+        self.assertIn("profile.credential_requirements", page)
+        self.assertIn("renderProvider(row)", page)
 
 
 if __name__ == "__main__":

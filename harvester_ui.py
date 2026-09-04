@@ -7,6 +7,7 @@ standard-library-only required path.
 
 import json
 import base64
+import hashlib
 import os
 import subprocess
 import sys
@@ -21,6 +22,7 @@ PACKAGE_ID = "com.harvester.app"
 CACHE_VERSION = 1
 CACHE_DIR = PROJECT_DIR / ".cache" / "ui"
 SNAPSHOT_PATH = CACHE_DIR / "snapshot.json"
+COLLECTION_CACHE_VERSION = 1
 
 _cache_lock = threading.Lock()
 
@@ -192,8 +194,37 @@ def run_action(action, data):
         raise
     if completed.returncode:
         raise BridgeError(f"Harvester API exited with status {completed.returncode}")
+    if action.startswith("list.") or action == "search":
+        return publish_collection(action, data, result)
     cache_result(action, result)
     return result
+
+
+def publish_collection(action, data, result):
+    """Publish large queue payloads outside Severin's bounded reply frame."""
+    if not isinstance(result, dict) or not isinstance(result.get("items"), list):
+        raise BridgeError(f"{action} returned an invalid collection")
+    identity = json.dumps(
+        {"version": COLLECTION_CACHE_VERSION, "action": action, "data": data},
+        ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    cache_name = f"collection-v{COLLECTION_CACHE_VERSION}-{hashlib.sha256(identity).hexdigest()[:20]}.json"
+    path = CACHE_DIR / cache_name
+    generation = hashlib.sha256(json.dumps(
+        result["items"], ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")).hexdigest()[:20]
+    payload = {"version": COLLECTION_CACHE_VERSION, "generation": generation,
+               "items": result["items"]}
+    with _cache_lock:
+        _prepare_cache_directory()
+        atomic_write_json(path, payload)
+    return {
+        "asset": f"asset://{PACKAGE_ID}/.cache/ui/{cache_name}",
+        "count": len(result["items"]),
+        "generation": generation,
+        "version": COLLECTION_CACHE_VERSION,
+    }
 
 
 def read_snapshot(path=SNAPSHOT_PATH):

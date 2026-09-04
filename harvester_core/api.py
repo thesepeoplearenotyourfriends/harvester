@@ -61,7 +61,8 @@ def list_records(config, kind, status=None, limit=None, missing=None, brief=Fals
     values = [(key, record, decorate(config, kind, key, record))
               for key, record in source.items()]
     if status:
-        values = [item for item in values if item[2].get("status") == status]
+        statuses = ("failed", "error") if kind == "movie" and status == "failed" else (status,)
+        values = [item for item in values if item[2].get("status") in statuses]
     if missing:
         if kind == "actor":
             values = [item for item in values if not item[2].get("local_file")]

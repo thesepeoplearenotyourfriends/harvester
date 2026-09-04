@@ -70,10 +70,10 @@ Syntax check: `python3 -m compileall -q harvester.py harvester-ui.py harvester_u
 
 ## Optional desktop UI
 
-`python3 harvester-ui.py` opens the compact Severin desktop browser when the
-optional `severin` package and a graphical session are available. The Overview,
-Movies, TV, Actors, and Providers sections are read-only views backed by
-`harvester.py api`; the UI host does not read Harvester manifests itself.
+`python3 harvester-ui.py` opens the compact Severin workbench when the optional
+`severin` package and a graphical session are available. Overview and its work
+queues are backed by `harvester.py api`; the UI host does not read Harvester
+manifests itself.
 
 Queue clients can request compact records with `api list actors|movies|shows
 --brief` and apply `--status` or `--missing` filters. `api search QUERY` searches
@@ -83,11 +83,11 @@ pane open the same queues; Missing Actor Images accepts a JPEG by drop or file
 picker (other formats require optional Pillow) and writes the canonical `.actors`
 file. Refresh from API invokes the existing targeted actor image refresh.
 
-The renderer can read its last derived snapshot at
-`asset://com.harvester.app/.cache/ui/snapshot.json`. Python writes that
-versioned snapshot atomically under `.cache/ui/` after successful API requests.
-The cache is not authoritative and `rm -rf .cache/` is always safe; a missing,
-malformed, or incompatible snapshot produces a normal cold start.
+List and search results are written atomically to filter-specific, versioned files
+under `.cache/ui/`. Only an asset descriptor crosses the Severin bridge, and the
+renderer reads the collection through `asset://com.harvester.app/`. The cache is
+not authoritative and `rm -rf .cache/` is always safe; the next request recreates
+any missing collection file.
 
 ## Changelog
 

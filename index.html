@@ -1,54 +1,587 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Cache-Control" content="no-store"><title>Harvester</title><link rel="stylesheet" href="css/my.css"></head>
-<body>
-<header id="menu-bar">
-  <button class="plain-menu" type="button">File</button>
-  <div class="menu"><button class="menu-label" type="button" aria-expanded="false">Work</button><div class="menu-items">
-    <button data-work="missing-actor-images">Missing Actor Images</button><button data-work="failed-actors">Failed Actors</button><button data-work="lost-found">Lost &amp; Found</button><button data-work="missing-posters">Missing Movie Posters</button><button data-work="unresolved-movies">Unresolved Movies</button><button data-work="ambiguous-tv">Ambiguous TV</button><button data-work="not-found-tv">TV Not Found</button>
-  </div></div>
-  <div class="menu"><button class="menu-label" type="button" aria-expanded="false">View</button><div class="menu-items"><button id="toggle-context">Hide Context Pane</button><button id="reset-pane">Reset Pane Width</button></div></div>
-  <label id="search-box"><span>Search</span><input id="search" type="search" autocomplete="off"></label>
-</header>
-<main id="app-shell"><div id="workbench"><aside id="context-pane" aria-live="polite"></aside><div id="splitter" role="separator" aria-label="Resize context pane" aria-orientation="vertical" tabindex="0"></div><section id="workspace" aria-live="polite"></section></div><footer id="job-strip">Bulk: idle</footer></main>
-<script>
-"use strict";
-const PACKAGE_ID = "com.harvester.app";
-const CACHE_URI = `asset://${PACKAGE_ID}/.cache/ui/snapshot.json`;
-const state={workflow:"overview",inventory:{},rows:[],generation:0,selectionGeneration:0,leftWidth:184,contextVisible:true,searchTimer:null};
-const workflows={
- "missing-actor-images":{title:"Missing Actor Images",action:"list.actors",data:{missing:"image"},get:"get.actor",kind:"actor",repair:true},
- "failed-actors":{title:"Failed Actors",action:"list.actors",data:{status:"failed"},get:"get.actor",kind:"actor"},
- "lost-found":{title:"Lost & Found",action:"list.movies",data:{missing:"nfo"},get:"get.movie",kind:"movie"},
- "missing-posters":{title:"Missing Movie Posters",action:"list.movies",data:{missing:"poster"},get:"get.movie",kind:"movie"},
- "unresolved-movies":{title:"Unresolved Movies",action:"list.movies",data:{status:"unresolved"},get:"get.movie",kind:"movie"},
- "failed-movies":{title:"Failed Movies",action:"list.movies",data:{status:"failed"},get:"get.movie",kind:"movie"},
- "ambiguous-tv":{title:"Ambiguous TV",action:"list.shows",data:{status:"ambiguous"},get:"get.show",kind:"show"},
- "not-found-tv":{title:"TV Not Found",action:"list.shows",data:{status:"not_found"},get:"get.show",kind:"show"},
- "tv-errors":{title:"TV Errors",action:"list.shows",data:{status:"error"},get:"get.show",kind:"show"},
- "all-actors":{title:"All Actors",action:"list.actors",data:{},get:"get.actor",kind:"actor"},
- "all-movies":{title:"All Movies",action:"list.movies",data:{},get:"get.movie",kind:"movie"},
- "all-tv":{title:"All TV",action:"list.shows",data:{},get:"get.show",kind:"show"},
- "providers":{title:"Providers",action:"providers",data:{}}
-};
-const App={id:1,async request(action,data={},selection=false){const generation=state.generation, token=state.selectionGeneration; if(!globalThis.severin?.send)throw Error("Severin bridge is not available");let reply=await globalThis.severin.send({id:this.id++,action,data});if(generation!==state.generation||(selection&&token!==state.selectionGeneration))throw new DOMException("Stale response","AbortError");if(typeof reply==="string")reply=JSON.parse(reply);if(!reply?.ok)throw Error(reply?.error||"Bridge request failed");return reply.result;}};
-const esc=value=>String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-function count(section,key){return state.inventory?.[section]?.[key]??0}
-function tocRows(){return [{h:"Actors"},{n:"All",w:"all-actors",c:count("actors","total")},{n:"Missing image",w:"missing-actor-images",c:count("actors","total")-count("actors","local")},{n:"Failed",w:"failed-actors",c:count("actors","failed")},{h:"Movies"},{n:"All",w:"all-movies",c:count("movies","total")},{n:"Lost & Found",w:"lost-found",c:count("movies","missing_nfo")},{n:"Missing poster",w:"missing-posters",c:count("movies","missing_poster")},{n:"Unresolved",w:"unresolved-movies",c:count("movies","unresolved")},{n:"Failed",w:"failed-movies",c:count("movies","failed")},{h:"TV"},{n:"All",w:"all-tv",c:Object.values(state.inventory.tv||{}).reduce((a,b)=>a+b,0)},{n:"Ambiguous",w:"ambiguous-tv",c:count("tv","ambiguous")},{n:"Not found",w:"not-found-tv",c:count("tv","not_found")},{n:"Errors",w:"tv-errors",c:count("tv","error")},{h:"Providers"},{n:"Provider status",w:"providers"}];}
-function renderOverview(){state.selectionGeneration++;state.workflow="overview";document.querySelector("#context-pane").innerHTML='<h1>Overview</h1><div class="toc">'+tocRows().map(r=>r.h?`<h2>${r.h}</h2>`:`<button data-work="${r.w}"><span>${r.n}</span>${r.c===undefined?'':`<b>${r.c}</b>`}</button>`).join("")+"</div>";let groups={Actors:tocRows().slice(1,4),Movies:tocRows().slice(5,10),TV:tocRows().slice(11,15)};document.querySelector("#workspace").innerHTML='<div class="overview"><h1>Overview</h1><p class="muted">Saved work and local receipts</p>'+Object.entries(groups).map(([name,rows])=>`<section><h2>${name}</h2>${rows.map(r=>`<button class="summary-row" data-work="${r.w}"><span>${r.n}</span><b>${r.c}</b></button>`).join("")}</section>`).join("")+"</div>";bindWork();}
-function rowLabel(row){return row.label||row.name||row.local_target||row.provider||"Item"} function rowIdentifier(row){return row.identifier||row.name||row.local_target}
-function renderContext(title,rows){document.querySelector("#context-pane").innerHTML=`<button id="back-overview">⮪ Overview</button><hr><h1>${esc(title)}</h1><div class="queue">${rows.map((r,i)=>`<button data-row="${i}"><span>${r.kind?`<small>${esc(r.kind.toUpperCase())}</small>`:""}${esc(rowLabel(r))}</span></button>`).join("")}</div>`;document.querySelector("#back-overview").onclick=()=>loadOverview();document.querySelectorAll("[data-row]").forEach(b=>b.onclick=()=>selectRow(+b.dataset.row));}
-async function openWorkflow(name){const cfg=workflows[name];if(!cfg)return;state.generation++;state.selectionGeneration++;state.workflow=name;state.rows=[];renderContext(cfg.title,[]);document.querySelector("#workspace").innerHTML=`<p class="muted">Loading ${esc(cfg.title)}…</p>`;try{let value=await App.request(cfg.action,cfg.data);state.rows=value.items||Object.entries(value.providers||value||{}).map(([name,details])=>({name,details}));renderContext(cfg.title,state.rows);document.querySelector("#workspace").innerHTML=state.rows.length?'<p class="muted">Select an item from the context pane.</p>':'<p class="muted">No items in this queue.</p>';}catch(e){if(e.name!=="AbortError")document.querySelector("#workspace").textContent=e.message}}
-function detailPairs(detail){return Object.entries(detail).filter(([k,v])=>!Array.isArray(v)&&typeof v!=="object").map(([k,v])=>`<dt>${esc(k.replaceAll("_"," "))}</dt><dd>${esc(v)}</dd>`).join("")}
-function renderInspector(detail){document.querySelector("#workspace").innerHTML=`<article class="inspector"><h1>${esc(rowLabel(detail))}</h1><dl>${detailPairs(detail)}</dl><details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail,null,2))}</pre></details></article>`}
-function contexts(detail){let value=detail.contexts||detail.known_from||[];return value.map(x=>typeof x==="string"?x:(x.title||x.movie_title||x.local_target||JSON.stringify(x)))}
-function renderActorRepair(detail){let known=contexts(detail);document.querySelector("#workspace").innerHTML=`<article class="actor-repair"><h1>${esc(detail.name)}</h1><p class="missing-note">No local actor image.</p><div id="drop-zone" tabindex="0">Drop an image here<br><span>or</span><br><button id="choose-image">Choose Image…</button><input id="image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></div><button id="refresh-actor">Refresh from API</button><h2>Known from</h2>${known.length?`<ul>${known.map(x=>`<li>${esc(x)}</li>`).join("")}</ul>`:'<p class="muted">No saved contexts.</p>'}<dl>${detailPairs(detail)}</dl><details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail,null,2))}</pre></details></article>`;const input=document.querySelector("#image-file"),zone=document.querySelector("#drop-zone");document.querySelector("#choose-image").onclick=e=>{e.stopPropagation();input.click()};input.onchange=()=>input.files[0]&&installFile(detail.name,input.files[0]);zone.ondragover=e=>{e.preventDefault();zone.classList.add("drag")};zone.ondragleave=()=>zone.classList.remove("drag");zone.ondrop=e=>{e.preventDefault();zone.classList.remove("drag");e.dataTransfer.files[0]&&installFile(detail.name,e.dataTransfer.files[0])};document.querySelector("#refresh-actor").onclick=()=>repairActor("refresh.actor.image",{identifier:detail.name});}
-async function installFile(name,file){if(file.size>8000000){showError("Image is larger than 8 MB");return}const reader=new FileReader();reader.onload=()=>repairActor("actor.install_image",{identifier:name,data_url:reader.result});reader.onerror=()=>showError("Could not read image");reader.readAsDataURL(file)}
-async function repairActor(action,data){document.querySelector("#workspace").classList.add("busy");try{await App.request(action,data,true);await refreshInventory();await openWorkflow("missing-actor-images");if(state.rows.length)selectRow(0)}catch(e){if(e.name!=="AbortError")showError(e.message)}} function showError(message){document.querySelector("#workspace").insertAdjacentHTML("afterbegin",`<p class="error">${esc(message)}</p>`)}
-async function selectRow(index){let row=state.rows[index],cfg=workflows[state.workflow];if(!row||!cfg?.get)return;state.selectionGeneration++;document.querySelectorAll("[data-row]").forEach((b,i)=>b.classList.toggle("selected",i===index));document.querySelector("#workspace").innerHTML='<p class="muted">Loading…</p>';try{let detail=await App.request(cfg.get,{identifier:rowIdentifier(row)},true);cfg.repair?renderActorRepair(detail):renderInspector(detail)}catch(e){if(e.name!=="AbortError")showError(e.message)}}
-async function search(query){state.generation++;state.selectionGeneration++;state.workflow="search";try{let value=await App.request("search",{query});state.rows=value.items||[];renderContext("Search results",state.rows);document.querySelector("#workspace").innerHTML=state.rows.length?'<p class="muted">Select a search result.</p>':'<p class="muted">No local matches.</p>';document.querySelectorAll("[data-row]").forEach(b=>b.onclick=()=>selectSearch(+b.dataset.row))}catch(e){if(e.name!=="AbortError")showError(e.message)}}async function selectSearch(i){let row=state.rows[i];state.selectionGeneration++;try{let detail=await App.request(`get.${row.kind}`,{identifier:row.identifier},true);renderInspector(detail)}catch(e){if(e.name!=="AbortError")showError(e.message)}}
-async function refreshInventory(){try{state.inventory=await App.request("inventory")}catch(e){if(e.name!=="AbortError")showError(e.message)}}async function loadOverview(){state.generation++;await refreshInventory();renderOverview()}
-function bindWork(){document.querySelectorAll("[data-work]").forEach(b=>b.onclick=()=>{closeMenus();openWorkflow(b.dataset.work)})}bindWork();
-document.querySelector("#search").oninput=e=>{clearTimeout(state.searchTimer);let q=e.target.value.trim();state.searchTimer=setTimeout(()=>q?search(q):loadOverview(),220)};
-function closeMenus(){document.querySelectorAll(".menu.open").forEach(m=>{m.classList.remove("open");m.querySelector(".menu-label").setAttribute("aria-expanded","false")})}document.querySelectorAll(".menu-label").forEach(b=>b.onclick=()=>{let m=b.parentElement,o=!m.classList.contains("open");closeMenus();m.classList.toggle("open",o);b.setAttribute("aria-expanded",o)});document.onclick=e=>{if(!e.target.closest(".menu"))closeMenus()};document.onkeydown=e=>{if(e.key==="Escape")closeMenus()};
-const splitter=document.querySelector("#splitter"),pane=document.querySelector("#context-pane");function setWidth(w){state.leftWidth=Math.max(130,Math.min(w,innerWidth-260));pane.style.width=state.leftWidth+"px"}splitter.onpointerdown=e=>{splitter.setPointerCapture(e.pointerId);let start=e.clientX,width=state.leftWidth;splitter.onpointermove=m=>setWidth(width+m.clientX-start);splitter.onpointerup=()=>splitter.onpointermove=null};splitter.ondblclick=()=>setWidth(184);splitter.onkeydown=e=>{if(e.key==="ArrowLeft"||e.key==="ArrowRight"){e.preventDefault();setWidth(state.leftWidth+(e.key==="ArrowRight"?10:-10))}};document.querySelector("#reset-pane").onclick=()=>{setWidth(184);closeMenus()};document.querySelector("#toggle-context").onclick=e=>{state.contextVisible=!state.contextVisible;pane.hidden=!state.contextVisible;splitter.hidden=!state.contextVisible;e.target.textContent=state.contextVisible?"Hide Context Pane":"Show Context Pane";closeMenus()};setWidth(184);loadOverview();
-</script></body></html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta http-equiv="Cache-Control" content="no-store" />
+    <title>Harvester</title>
+    <link rel="stylesheet" href="css/my.css" />
+  </head>
+  <body>
+    <header id="menu-bar">
+      <div class="menu">
+        <button class="menu-label" type="button" aria-expanded="false">
+          Work
+        </button>
+        <div class="menu-items">
+          <button data-work="missing-actor-images">Missing Actor Images</button
+          ><button data-work="failed-actors">Failed Actors</button
+          ><button data-work="lost-found">Lost &amp; Found</button
+          ><button data-work="missing-posters">Missing Movie Posters</button
+          ><button data-work="unresolved-movies">Unresolved Movies</button
+          ><button data-work="ambiguous-tv">Ambiguous TV</button
+          ><button data-work="not-found-tv">TV Not Found</button>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-label" type="button" aria-expanded="false">
+          View
+        </button>
+        <div class="menu-items">
+          <button id="toggle-context">Hide Context Pane</button
+          ><button id="reset-pane">Reset Pane Width</button>
+        </div>
+      </div>
+      <label id="search-box"
+        ><span>Search</span><input id="search" type="search" autocomplete="off"
+      /></label>
+    </header>
+    <main id="app-shell">
+      <div id="workbench">
+        <aside id="context-pane" aria-live="polite"></aside>
+        <div
+          id="splitter"
+          role="separator"
+          aria-label="Resize context pane"
+          aria-orientation="vertical"
+          tabindex="0"
+        ></div>
+        <section id="workspace" aria-live="polite"></section>
+      </div>
+      <footer id="job-strip">Bulk: idle</footer>
+    </main>
+    <script>
+      "use strict";
+      const PACKAGE_ID = "com.harvester.app";
+      const COLLECTION_CACHE_VERSION = 1;
+      const state = {
+        workflow: "overview",
+        inventory: {},
+        rows: [],
+        generation: 0,
+        selectionGeneration: 0,
+        leftWidth: 184,
+        contextVisible: true,
+        searchTimer: null,
+      };
+      const workflows = {
+        "missing-actor-images": {
+          title: "Missing Actor Images",
+          action: "list.actors",
+          data: { missing: "image" },
+          get: "get.actor",
+          kind: "actor",
+          repair: true,
+        },
+        "failed-actors": {
+          title: "Failed Actors",
+          action: "list.actors",
+          data: { status: "failed" },
+          get: "get.actor",
+          kind: "actor",
+        },
+        "lost-found": {
+          title: "Lost & Found",
+          action: "list.movies",
+          data: { missing: "nfo" },
+          get: "get.movie",
+          kind: "movie",
+        },
+        "missing-posters": {
+          title: "Missing Movie Posters",
+          action: "list.movies",
+          data: { missing: "poster" },
+          get: "get.movie",
+          kind: "movie",
+        },
+        "unresolved-movies": {
+          title: "Unresolved Movies",
+          action: "list.movies",
+          data: { status: "unresolved" },
+          get: "get.movie",
+          kind: "movie",
+        },
+        "failed-movies": {
+          title: "Failed Movies",
+          action: "list.movies",
+          data: { status: "failed" },
+          get: "get.movie",
+          kind: "movie",
+        },
+        "ambiguous-tv": {
+          title: "Ambiguous TV",
+          action: "list.shows",
+          data: { status: "ambiguous" },
+          get: "get.show",
+          kind: "show",
+        },
+        "not-found-tv": {
+          title: "TV Not Found",
+          action: "list.shows",
+          data: { status: "not_found" },
+          get: "get.show",
+          kind: "show",
+        },
+        "tv-errors": {
+          title: "TV Errors",
+          action: "list.shows",
+          data: { status: "error" },
+          get: "get.show",
+          kind: "show",
+        },
+        "all-actors": {
+          title: "All Actors",
+          action: "list.actors",
+          data: {},
+          get: "get.actor",
+          kind: "actor",
+        },
+        "all-movies": {
+          title: "All Movies",
+          action: "list.movies",
+          data: {},
+          get: "get.movie",
+          kind: "movie",
+        },
+        "all-tv": {
+          title: "All TV",
+          action: "list.shows",
+          data: {},
+          get: "get.show",
+          kind: "show",
+        },
+        providers: { title: "Providers", action: "providers", data: {} },
+      };
+      const App = {
+        id: 1,
+        async request(action, data = {}, selection = false) {
+          const generation = state.generation,
+            token = state.selectionGeneration;
+          if (!globalThis.severin?.send)
+            throw Error("Severin bridge is not available");
+          let reply = await globalThis.severin.send({
+            id: this.id++,
+            action,
+            data,
+          });
+          if (
+            generation !== state.generation ||
+            (selection && token !== state.selectionGeneration)
+          )
+            throw new DOMException("Stale response", "AbortError");
+          if (typeof reply === "string") reply = JSON.parse(reply);
+          if (!reply?.ok) throw Error(reply?.error || "Bridge request failed");
+          return reply.result;
+        },
+        async requestCollection(action, data = {}) {
+          const generation = state.generation;
+          const descriptor = await this.request(action, data);
+          if (
+            typeof descriptor?.asset !== "string" ||
+            !descriptor.asset.startsWith(
+              `asset://${PACKAGE_ID}/.cache/ui/collection-v${COLLECTION_CACHE_VERSION}-`,
+            ) ||
+            descriptor.version !== COLLECTION_CACHE_VERSION
+          ) {
+            throw Error("Bridge returned an invalid collection descriptor");
+          }
+          const response = await fetch(descriptor.asset, { cache: "no-store" });
+          if (!response.ok) throw Error("Could not read collection cache");
+          const collection = await response.json();
+          if (generation !== state.generation) {
+            throw new DOMException("Stale response", "AbortError");
+          }
+          if (
+            collection?.version !== COLLECTION_CACHE_VERSION ||
+            collection.generation !== descriptor.generation ||
+            !Array.isArray(collection.items) ||
+            collection.items.length !== descriptor.count
+          ) {
+            throw Error("Collection cache did not match its descriptor");
+          }
+          return collection.items;
+        },
+      };
+      const esc = (value) =>
+        String(value ?? "").replace(
+          /[&<>"']/g,
+          (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[c],
+        );
+      function count(section, key) {
+        return state.inventory?.[section]?.[key] ?? 0;
+      }
+      function tocRows() {
+        return [
+          { h: "Actors" },
+          { n: "All", w: "all-actors", c: count("actors", "total") },
+          {
+            n: "Missing image",
+            w: "missing-actor-images",
+            c: count("actors", "total") - count("actors", "local"),
+          },
+          { n: "Failed", w: "failed-actors", c: count("actors", "failed") },
+          { h: "Movies" },
+          { n: "All", w: "all-movies", c: count("movies", "total") },
+          {
+            n: "Lost & Found",
+            w: "lost-found",
+            c: count("movies", "missing_nfo"),
+          },
+          {
+            n: "Missing poster",
+            w: "missing-posters",
+            c: count("movies", "missing_poster"),
+          },
+          {
+            n: "Unresolved",
+            w: "unresolved-movies",
+            c: count("movies", "unresolved"),
+          },
+          { n: "Failed", w: "failed-movies", c: count("movies", "failed") },
+          { h: "TV" },
+          {
+            n: "All",
+            w: "all-tv",
+            c: Object.values(state.inventory.tv || {}).reduce(
+              (a, b) => a + b,
+              0,
+            ),
+          },
+          { n: "Ambiguous", w: "ambiguous-tv", c: count("tv", "ambiguous") },
+          { n: "Not found", w: "not-found-tv", c: count("tv", "not_found") },
+          { n: "Errors", w: "tv-errors", c: count("tv", "error") },
+          { h: "Providers" },
+          { n: "Provider status", w: "providers" },
+        ];
+      }
+      function renderOverview() {
+        state.selectionGeneration++;
+        state.workflow = "overview";
+        document.querySelector("#context-pane").innerHTML =
+          '<h1>Overview</h1><div class="toc">' +
+          tocRows()
+            .map((r) =>
+              r.h
+                ? `<h2>${r.h}</h2>`
+                : `<button data-work="${r.w}"><span>${r.n}</span>${r.c === undefined ? "" : `<b>${r.c}</b>`}</button>`,
+            )
+            .join("") +
+          "</div>";
+        let groups = {
+          Actors: tocRows().slice(1, 4),
+          Movies: tocRows().slice(5, 10),
+          TV: tocRows().slice(11, 15),
+        };
+        document.querySelector("#workspace").innerHTML =
+          '<div class="overview"><h1>Overview</h1><p class="muted">Saved work and local receipts</p>' +
+          Object.entries(groups)
+            .map(
+              ([name, rows]) =>
+                `<section><h2>${name}</h2>${rows.map((r) => `<button class="summary-row" data-work="${r.w}"><span>${r.n}</span><b>${r.c}</b></button>`).join("")}</section>`,
+            )
+            .join("") +
+          "</div>";
+        bindWork();
+      }
+      function rowLabel(row) {
+        return (
+          row.display_name ||
+          row.label ||
+          row.name ||
+          row.local_target ||
+          row.key ||
+          "Item"
+        );
+      }
+      function rowIdentifier(row) {
+        return row.identifier || row.name || row.local_target;
+      }
+      function renderContext(title, rows) {
+        document.querySelector("#context-pane").innerHTML =
+          `<button id="back-overview">⮪ Overview</button><hr><h1>${esc(title)}</h1><div class="queue">${rows.map((r, i) => `<button data-row="${i}"><span>${r.kind ? `<small>${esc(r.kind.toUpperCase())}</small>` : ""}${esc(rowLabel(r))}</span></button>`).join("")}</div>`;
+        document.querySelector("#back-overview").onclick = () => loadOverview();
+        document
+          .querySelectorAll("[data-row]")
+          .forEach((b) => (b.onclick = () => selectRow(+b.dataset.row)));
+      }
+      async function openWorkflow(name) {
+        const cfg = workflows[name];
+        if (!cfg) return;
+        state.generation++;
+        state.selectionGeneration++;
+        state.workflow = name;
+        state.rows = [];
+        renderContext(cfg.title, []);
+        document.querySelector("#workspace").innerHTML =
+          `<p class="muted">Loading ${esc(cfg.title)}…</p>`;
+        try {
+          if (name === "providers") {
+            const value = await App.request(cfg.action, cfg.data);
+            state.rows = Array.isArray(value.providers) ? value.providers : [];
+          } else {
+            state.rows = await App.requestCollection(cfg.action, cfg.data);
+          }
+          renderContext(cfg.title, state.rows);
+          document.querySelector("#workspace").innerHTML = state.rows.length
+            ? '<p class="muted">Select an item from the context pane.</p>'
+            : '<p class="muted">No items in this queue.</p>';
+        } catch (e) {
+          if (e.name !== "AbortError")
+            document.querySelector("#workspace").textContent = e.message;
+        }
+      }
+      function detailPairs(detail) {
+        return Object.entries(detail)
+          .filter(([k, v]) => !Array.isArray(v) && typeof v !== "object")
+          .map(
+            ([k, v]) =>
+              `<dt>${esc(k.replaceAll("_", " "))}</dt><dd>${esc(v)}</dd>`,
+          )
+          .join("");
+      }
+      function renderInspector(detail) {
+        document.querySelector("#workspace").innerHTML =
+          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1><dl>${detailPairs(detail)}</dl><details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail, null, 2))}</pre></details></article>`;
+      }
+      function renderProvider(profile) {
+        const capabilities = Array.isArray(profile.capabilities)
+          ? profile.capabilities
+          : [];
+        const requirements = Array.isArray(profile.credential_requirements)
+          ? profile.credential_requirements
+          : [];
+        document.querySelector("#workspace").innerHTML = `
+          <article class="inspector provider-profile">
+            <h1>${esc(rowLabel(profile))}</h1>
+            <dl>${detailPairs(profile)}</dl>
+            <h2>Capabilities</h2>
+            ${capabilities.length ? `<ul>${capabilities.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : '<p class="muted">None advertised.</p>'}
+            <h2>Requirements</h2>
+            ${requirements.length ? `<ul>${requirements.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : '<p class="muted">None.</p>'}
+          </article>`;
+      }
+      function contexts(detail) {
+        let value = detail.contexts || detail.known_from || [];
+        return value.map((x) =>
+          typeof x === "string"
+            ? x
+            : x.title || x.movie_title || x.local_target || JSON.stringify(x),
+        );
+      }
+      function renderActorRepair(detail) {
+        let known = contexts(detail);
+        document.querySelector("#workspace").innerHTML =
+          `<article class="actor-repair"><h1>${esc(detail.name)}</h1><p class="missing-note">No local actor image.</p><div id="drop-zone" tabindex="0">Drop an image here<br><span>or</span><br><button id="choose-image">Choose Image…</button><input id="image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></div><button id="refresh-actor">Refresh from API</button><h2>Known from</h2>${known.length ? `<ul>${known.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : '<p class="muted">No saved contexts.</p>'}<dl>${detailPairs(detail)}</dl><details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail, null, 2))}</pre></details></article>`;
+        const input = document.querySelector("#image-file"),
+          zone = document.querySelector("#drop-zone");
+        document.querySelector("#choose-image").onclick = (e) => {
+          e.stopPropagation();
+          input.click();
+        };
+        input.onchange = () =>
+          input.files[0] && installFile(detail.name, input.files[0]);
+        zone.ondragover = (e) => {
+          e.preventDefault();
+          zone.classList.add("drag");
+        };
+        zone.ondragleave = () => zone.classList.remove("drag");
+        zone.ondrop = (e) => {
+          e.preventDefault();
+          zone.classList.remove("drag");
+          e.dataTransfer.files[0] &&
+            installFile(detail.name, e.dataTransfer.files[0]);
+        };
+        document.querySelector("#refresh-actor").onclick = () =>
+          repairActor("refresh.actor.image", { identifier: detail.name });
+      }
+      async function installFile(name, file) {
+        if (file.size > 8000000) {
+          showError("Image is larger than 8 MB");
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = () =>
+          repairActor("actor.install_image", {
+            identifier: name,
+            data_url: reader.result,
+          });
+        reader.onerror = () => showError("Could not read image");
+        reader.readAsDataURL(file);
+      }
+      async function repairActor(action, data) {
+        const selected = document.querySelector("[data-row].selected");
+        const selectedIndex = selected ? Number(selected.dataset.row) : 0;
+        document.querySelector("#workspace").classList.add("busy");
+        try {
+          await App.request(action, data, true);
+          await refreshInventory();
+          await openWorkflow("missing-actor-images");
+          if (state.rows.length) {
+            selectRow(Math.min(selectedIndex, state.rows.length - 1));
+          }
+        } catch (e) {
+          if (e.name !== "AbortError") showError(e.message);
+        }
+      }
+      function showError(message) {
+        document
+          .querySelector("#workspace")
+          .insertAdjacentHTML(
+            "afterbegin",
+            `<p class="error">${esc(message)}</p>`,
+          );
+      }
+      async function selectRow(index) {
+        let row = state.rows[index],
+          cfg = workflows[state.workflow];
+        if (!row) return;
+        state.selectionGeneration++;
+        document
+          .querySelectorAll("[data-row]")
+          .forEach((b, i) => b.classList.toggle("selected", i === index));
+        document.querySelector("#workspace").innerHTML =
+          '<p class="muted">Loading…</p>';
+        if (state.workflow === "providers") {
+          renderProvider(row);
+          return;
+        }
+        if (!cfg?.get) return;
+        try {
+          let detail = await App.request(
+            cfg.get,
+            { identifier: rowIdentifier(row) },
+            true,
+          );
+          cfg.repair ? renderActorRepair(detail) : renderInspector(detail);
+        } catch (e) {
+          if (e.name !== "AbortError") showError(e.message);
+        }
+      }
+      async function search(query) {
+        state.generation++;
+        state.selectionGeneration++;
+        state.workflow = "search";
+        try {
+          state.rows = await App.requestCollection("search", { query });
+          renderContext("Search results", state.rows);
+          document.querySelector("#workspace").innerHTML = state.rows.length
+            ? '<p class="muted">Select a search result.</p>'
+            : '<p class="muted">No local matches.</p>';
+          document
+            .querySelectorAll("[data-row]")
+            .forEach((b) => (b.onclick = () => selectSearch(+b.dataset.row)));
+        } catch (e) {
+          if (e.name !== "AbortError") showError(e.message);
+        }
+      }
+      async function selectSearch(i) {
+        let row = state.rows[i];
+        state.selectionGeneration++;
+        try {
+          let detail = await App.request(
+            `get.${row.kind}`,
+            { identifier: row.identifier },
+            true,
+          );
+          renderInspector(detail);
+        } catch (e) {
+          if (e.name !== "AbortError") showError(e.message);
+        }
+      }
+      async function refreshInventory() {
+        try {
+          state.inventory = await App.request("inventory");
+        } catch (e) {
+          if (e.name !== "AbortError") showError(e.message);
+        }
+      }
+      async function loadOverview() {
+        state.generation++;
+        await refreshInventory();
+        renderOverview();
+      }
+      function bindWork() {
+        document.querySelectorAll("[data-work]").forEach(
+          (b) =>
+            (b.onclick = () => {
+              closeMenus();
+              openWorkflow(b.dataset.work);
+            }),
+        );
+      }
+      bindWork();
+      document.querySelector("#search").oninput = (e) => {
+        clearTimeout(state.searchTimer);
+        let q = e.target.value.trim();
+        state.searchTimer = setTimeout(
+          () => (q ? search(q) : loadOverview()),
+          220,
+        );
+      };
+      function closeMenus() {
+        document.querySelectorAll(".menu.open").forEach((m) => {
+          m.classList.remove("open");
+          m.querySelector(".menu-label").setAttribute("aria-expanded", "false");
+        });
+      }
+      document.querySelectorAll(".menu-label").forEach(
+        (b) =>
+          (b.onclick = () => {
+            let m = b.parentElement,
+              o = !m.classList.contains("open");
+            closeMenus();
+            m.classList.toggle("open", o);
+            b.setAttribute("aria-expanded", o);
+          }),
+      );
+      document.onclick = (e) => {
+        if (!e.target.closest(".menu")) closeMenus();
+      };
+      document.onkeydown = (e) => {
+        if (e.key === "Escape") closeMenus();
+      };
+      const splitter = document.querySelector("#splitter"),
+        pane = document.querySelector("#context-pane");
+      function setWidth(w) {
+        state.leftWidth = Math.max(130, Math.min(w, innerWidth - 260));
+        pane.style.width = state.leftWidth + "px";
+      }
+      splitter.onpointerdown = (e) => {
+        splitter.setPointerCapture(e.pointerId);
+        let start = e.clientX,
+          width = state.leftWidth;
+        splitter.onpointermove = (m) => setWidth(width + m.clientX - start);
+        splitter.onpointerup = () => (splitter.onpointermove = null);
+      };
+      splitter.ondblclick = () => setWidth(184);
+      splitter.onkeydown = (e) => {
+        if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+          e.preventDefault();
+          setWidth(state.leftWidth + (e.key === "ArrowRight" ? 10 : -10));
+        }
+      };
+      document.querySelector("#reset-pane").onclick = () => {
+        setWidth(184);
+        closeMenus();
+      };
+      document.querySelector("#toggle-context").onclick = (e) => {
+        state.contextVisible = !state.contextVisible;
+        pane.hidden = !state.contextVisible;
+        splitter.hidden = !state.contextVisible;
+        e.target.textContent = state.contextVisible
+          ? "Hide Context Pane"
+          : "Show Context Pane";
+        closeMenus();
+      };
+      setWidth(184);
+      loadOverview();
+    </script>
+  </body>
+</html>

@@ -146,6 +146,20 @@ class MachineApiMovieTests(unittest.TestCase):
         self.assertEqual(found[0]["kind"], "actor")
         self.assertLessEqual(len(found), 1)
 
+    def test_failed_movie_queue_matches_combined_inventory_count(self):
+        save_json_atomic(self.state / "movie_manifest_tmdb.json", {"movies": {
+            "/error.nfo": {"status": "error", "nfo_path": "/error.nfo"},
+            "/failed.nfo": {"status": "failed", "nfo_path": "/failed.nfo"},
+            "/ok.nfo": {"status": "ok", "nfo_path": "/ok.nfo"},
+        }})
+        inventory = json.loads(self.cli("api", "inventory").stdout)["result"]
+        queue = json.loads(self.cli(
+            "api", "list", "movies", "--brief", "--status", "failed",
+        ).stdout)["result"]["items"]
+        self.assertEqual(inventory["movies"]["failed"], 2)
+        self.assertEqual(len(queue), inventory["movies"]["failed"])
+        self.assertEqual({item["status"] for item in queue}, {"error", "failed"})
+
     def test_tv_receipt_uses_materializer_filename(self):
         show = Path(self.temp.name) / "tv" / "Example"
         show.mkdir(parents=True)
