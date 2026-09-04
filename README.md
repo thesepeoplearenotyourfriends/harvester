@@ -52,3 +52,42 @@ python3 -m unittest discover -s tests -v
 ```
 
 Syntax check: `python3 -m compileall -q harvester.py harvester_core tests`.
+
+## Changelog
+
+Entries are listed newest first. Each entry describes behavior that changed rather than
+repeating commit messages.
+
+### 2026-09-04 — Initial CLI consolidation
+
+#### Added
+
+* Added one `harvester.py` command-line entry point for checking local state, finding
+  movie actor images through TMDB, and scanning or materializing TV metadata through
+  TVDB.
+* Added resumable JSON work files and provider caches. State updates use atomic file
+  replacement so an interrupted write does not leave a partly written manifest.
+* Added configuration through command-line options, environment variables, and an
+  ignored `keys_and_tokens.txt` file. Local status and help commands do not require
+  provider credentials.
+* Added callable jobs with reporter callbacks, keeping progress reporting outside the
+  harvesting work so the same jobs can be used without the CLI.
+* Added regression tests for matching, retries, cached provider responses, malformed
+  state, actor image handling, and TV NFO and poster output.
+
+#### Changed
+
+* Moved the behavior from the standalone reference scripts into provider, job,
+  configuration, image, and storage modules while keeping Python's standard library as
+  the only required runtime dependency.
+* Kept movie and TV runs restartable: existing files count as completed work, prior
+  successful matches survive transient refresh failures, and ambiguous TV title matches
+  wait for human correction.
+* Split TV harvesting into a networked scan stage and an offline materialization stage.
+  Materialization reads frozen metadata and image URLs and never creates a TVDB client.
+
+#### Fixed
+
+* Made TV materialization safe to run repeatedly without duplicating actors, artwork,
+  or XML elements, while retaining explicit controls for replacing NFO and poster files.
+* Restored the TV NFO renderer import so materialization can write `tvshow.nfo` files.
