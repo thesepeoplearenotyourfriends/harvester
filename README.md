@@ -8,11 +8,14 @@ Harvester is a small, CLI-first home for resumable movie-actor and TV metadata/i
 python3 harvester.py status
 python3 harvester.py movies scan-actors [--limit N] [--rebuild] [--refresh] [--fallback]
 python3 harvester.py movies fetch-actors [--limit N] [--retry-failed] [--overwrite]
+python3 harvester.py movies scan [--limit N] [--rebuild] [--refresh]
+python3 harvester.py movies materialize [--limit N] [--overwrite-nfo] [--overwrite-poster]
 python3 harvester.py tv scan [--limit N] [--rebuild] [--refresh] [--retry-ambiguous]
 python3 harvester.py tv materialize [--limit N] [--no-overwrite-nfo] [--no-overwrite-poster]
+python3 harvester.py api providers|get|list|inventory|refresh ...
 ```
 
-Run `python3 harvester.py --help` and nested `--help` for the complete map. Stage 1 `tv scan` resolves titles and freezes metadata/asset URLs. Stage 2 `tv materialize` consumes that file and **never creates or calls a TVDB client**. `status` is local-only and needs neither credentials nor network.
+Run `python3 harvester.py --help` and nested `--help` for the complete map. Movie and TV `scan` commands resolve identities and freeze metadata/asset URLs. Their `materialize` commands consume those files without constructing or calling a provider client. `status` and API get/list/inventory are local-only and need neither credentials nor network. Every API stdout line is a JSON object; long operations end with exactly one result or error record.
 
 ## Configuration
 
@@ -50,6 +53,7 @@ All state is ordinary atomically replaced JSON:
 * `actor_thumb_urls_tmdb.json` — frozen actor image URLs consumed by `fetch-actors`.
 * `actor_photo_download_status.json` — actor image download outcomes.
 * `tv_show_urls_tvdb.json` — Stage 1 matches, URL-free NFO payloads, separate asset URLs, and Stage 2 receipts.
+* `movie_manifest_tmdb.json` — frozen movie identity, NFO payloads, poster URLs, errors, and materialization receipts.
 * `tmdb_api_cache.json` and `tvdb_api_cache.json` — persistent raw GET response caches.
 
 Normal runs resume these files. An actor found in several NFOs is tried through those movie contexts until one resolves. Movie lookup prefers local TMDB ID, then IMDb lookup, then conservative title/year matching. Existing actor files are always receipts; NFO/poster overwrite behavior retains the reference defaults and has explicit opt-outs. Failed transfers are retried only when the corresponding retry control permits it. A transient refresh failure does not replace a prior successful match. Ambiguous title-only TV searches remain staged as ambiguous for human correction rather than selecting recklessly. CLI results are compact summaries; detailed receipts remain in these JSON files. Malformed state is never silently replaced: jobs report an actionable read error, while `status` marks the affected file unreadable and continues checking the others.

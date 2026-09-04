@@ -672,6 +672,7 @@ def run(
     sleep_between_shows=1,
     save_every=1,
     sleep=None,
+    targets=None,
 ):
     """Resolve immediate TV folders and checkpoint each result atomically."""
     work_path = config.state_path("tv_show_urls_tvdb.json")
@@ -681,9 +682,12 @@ def run(
     api_cache_hits = api_cache_misses = 0
     changed_since_save = 0
     sleep = sleep or time.sleep
+    selected = set(targets or [])
     try:
       for show_dir in directories:
         record = manifest["shows"][str(show_dir)]
+        if selected and str(show_dir) not in selected and str(record.get("tvdb_id")) not in selected:
+            continue
         status = record.get("status", "pending")
         should_run = (
             status == "pending"

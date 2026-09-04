@@ -21,6 +21,7 @@ def run(
     sleep_between=0.0,
     save_every=25,
     sleep=None,
+    targets=None,
 ):
     urls = load_json(config.state_path("actor_thumb_urls_tmdb.json"), {})
     status_path = config.state_path("actor_photo_download_status.json")
@@ -42,7 +43,10 @@ def run(
     changed = 0
     sleep = sleep or time.sleep
     counts = {"ok": 0, "failed": 0, "exists": 0}
+    selected = {value.casefold() for value in (targets or [])}
     for name in sorted(urls):
+        if selected and name.casefold() not in selected:
+            continue
         if limit is not None and processed >= limit:
             break
         output = target_dir / safe_actor_filename(name)

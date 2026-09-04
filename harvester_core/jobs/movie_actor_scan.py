@@ -779,6 +779,7 @@ def run(
     image_size="w185",
     max_images_per_actor=1,
     save_every=50,
+    targets=None,
 ):
     """Build/resume the actor-centric queue and return a compact result."""
     queue_path = config.state_path("movie_actor_queue.json")
@@ -789,8 +790,11 @@ def run(
         image_size = "w185" if "w185" in profile_sizes else (profile_sizes[-1] if profile_sizes else image_size)
 
     processed = 0
+    selected = {value.casefold() for value in (targets or [])}
     changed_since_save = 0
     for actor_name, item in queue.get("actors", {}).items():
+        if selected and actor_name.casefold() not in selected:
+            continue
         if not refresh and (config.movie_root / ".actors" / safe_actor_filename(actor_name)).is_file():
             continue
         status = item.get("status", "pending")

@@ -423,9 +423,9 @@ class HarvesterTests(unittest.TestCase):
         response.__enter__.return_value.read.return_value = b"image"
         response.__enter__.return_value.headers.get.return_value = "image/jpeg"
         error = urllib.error.URLError("wobble")
-        with patch("harvester_core.jobs.tv_materialize.urllib.request.urlopen",
+        with patch("harvester_core.downloads.urllib.request.urlopen",
                    side_effect=[error, response]), patch(
-                       "harvester_core.jobs.tv_materialize.time.sleep") as sleep:
+                       "harvester_core.downloads.time.sleep") as sleep:
             self.assertEqual(download_bytes("https://image"), (b"image", "image/jpeg"))
             sleep.assert_called_once()
 
