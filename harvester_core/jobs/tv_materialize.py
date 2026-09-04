@@ -261,14 +261,19 @@ def materialize_show(
     """Materialize one record without provider access or terminal output."""
     show_dir = Path(show_path)
     folder_name = record.get("folder_name") or show_dir.name
-    state = artifact_state(record)
+    state = record.setdefault("materialize", {})
+    if write_nfo:
+        state.setdefault("nfo", {})
+    if write_poster:
+        state.setdefault("poster", {})
     assets = record.get("assets") or {}
     if not show_dir.is_dir():
         if write_nfo:
             mark_item(state["nfo"], "error", error="show directory no longer exists")
         if write_poster:
             mark_item(state["poster"], "error", error="show directory no longer exists")
-        update_overall_status(record)
+        if write_nfo and write_poster and write_actors:
+            update_overall_status(record)
         counters["show_missing"] += 1
         emit(reporter, "error", "show directory no longer exists", show=folder_name)
         return 2
@@ -302,11 +307,11 @@ def materialize_show(
         emit(reporter, "artifact", "NFO handled", show=folder_name,
              status=state["nfo"].get("status"))
 
-    poster_jpg, poster_png = poster_paths(show_dir)
-    poster_state = state["poster"]
-    poster_url = assets.get("poster_url")
-    try:
-        if write_poster:
+    if write_poster:
+        poster_jpg, poster_png = poster_paths(show_dir)
+        poster_state = state["poster"]
+        poster_url = assets.get("poster_url")
+        try:
             existing = next((path for path in (poster_jpg, poster_png) if path.exists()), None)
             if existing and not options.overwrite_poster:
                 mark_item(poster_state, "exists", bytes=existing.stat().st_size,
@@ -332,11 +337,10 @@ def materialize_show(
                 changes += 1
             else:
                 counters["poster_skipped"] += 1
-    except Exception as error:
-        mark_item(poster_state, "error", error=repr(error), url=poster_url)
-        counters["poster_error"] += 1
-        changes += 1
-    if write_poster:
+        except Exception as error:
+            mark_item(poster_state, "error", error=repr(error), url=poster_url)
+            counters["poster_error"] += 1
+            changes += 1
         emit(reporter, "artifact", "poster handled", show=folder_name,
              status=poster_state.get("status"))
 
@@ -379,7 +383,8 @@ def materialize_show(
             changes += 1
         emit(reporter, "artifact", "actor image handled", show=folder_name,
              actor=name, status=actor_state.get("status"))
-    update_overall_status(record)
+    if write_nfo and write_poster and write_actors:
+        update_overall_status(record)
     return changes
 
 

@@ -154,9 +154,16 @@ class MachineApiMovieTests(unittest.TestCase):
         folder = self.movies / "Identity"
         folder.mkdir()
         nfo = folder / "identity.nfo"
+        nfo.write_text("<movie><title>Wrong</title><year>1900</year></movie>")
+        with mock.patch(
+            "harvester_core.jobs.movie_scan.resolve_movie_tmdb_id",
+            return_value={"ok": False, "reason": "test"},
+        ):
+            scan(self.config, MovieProvider(), targets=[str(nfo.resolve())])
+
         nfo.write_text(
             "<movie><title>Localized</title><originaltitle>Original</originaltitle>"
-            "<id>tt1234567</id></movie>"
+            "<year>2001</year><id>tt1234567</id></movie>"
         )
         record = discover_movies(self.movies)[str(nfo.resolve())]
         self.assertEqual(record["title"], "Localized")
@@ -168,8 +175,13 @@ class MachineApiMovieTests(unittest.TestCase):
         ) as resolve:
             scan(self.config, MovieProvider(), targets=[str(nfo.resolve())])
         resolver_input = resolve.call_args.args[1]
+        self.assertEqual(resolver_input["title"], "Localized")
         self.assertEqual(resolver_input["original_title"], "Original")
+        self.assertEqual(resolver_input["year"], 2001)
         self.assertEqual(resolver_input["imdb_id"], "tt1234567")
+
+        saved = load_json(self.state / "movie_manifest_tmdb.json")["movies"][str(nfo.resolve())]
+        self.assertEqual(saved["tries"], 2)
 
     def test_one_poster_is_not_assigned_to_multiple_nfos(self):
         folder = self.movies / "Anthology"
@@ -205,6 +217,13 @@ class MachineApiMovieTests(unittest.TestCase):
         actors_dir = Path(self.temp.name) / "tv" / ".actors"
         self.assertFalse(actors_dir.exists())
         self.assertTrue((show / "show.nfo").exists())
+        scoped_state = load_json(
+            self.state / "tv_show_urls_tvdb.json"
+        )["shows"][str(show)]["materialize"]
+        self.assertIn("nfo", scoped_state)
+        self.assertNotIn("poster", scoped_state)
+        self.assertNotIn("actors", scoped_state)
+        self.assertNotIn("status", scoped_state)
         (show / "show.nfo").unlink()
 
         materialize_tv(

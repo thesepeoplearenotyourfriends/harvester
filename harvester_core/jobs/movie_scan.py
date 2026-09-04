@@ -120,11 +120,15 @@ def run(config, provider, reporter=None, limit=None, rebuild=False, refresh=Fals
         if existing is None:
             manifest["movies"][key] = record
             continue
-        # Earlier manifests may contain a derived, nonexistent poster path.
-        # Re-evaluate only this local-target receipt while retaining frozen
-        # provider metadata and retry history.
-        existing["poster_path"] = record["poster_path"]
-        existing["poster_target_status"] = record["poster_target_status"]
+        # NFO identity is local source data and may have been corrected by a
+        # human since the prior scan. Provider results and receipts remain
+        # intact until the selected item is resolved/materialized again.
+        for field in (
+            "local_target", "nfo_path", "title", "original_title", "year",
+            "imdb_id", "local_tmdb_id", "poster_path",
+            "poster_target_status",
+        ):
+            existing[field] = record[field]
     selected = set(targets or [])
     processed = 0
     try:
