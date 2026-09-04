@@ -302,7 +302,10 @@ def api_main(args, config):
                     result["materialize"] = materialize(config, api_report,
                         overwrite_nfo=args.aspect in ("nfo", "all"),
                         overwrite_poster=args.aspect in ("poster", "all"),
-                        targets=targets, transport=transport)
+                        targets=targets, transport=transport,
+                        write_nfo=args.aspect in ("nfo", "all"),
+                        write_poster=args.aspect in ("poster", "all"),
+                        write_actors=args.aspect in ("actors", "all"))
             terminal(result)
         return 0
     except (ValueError, RuntimeError, FileNotFoundError, KeyError, KeyboardInterrupt) as error:

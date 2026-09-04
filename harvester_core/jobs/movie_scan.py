@@ -37,7 +37,14 @@ def discover_movies(root):
         dirs[:] = [name for name in dirs if not name.startswith(".")]
         base = Path(directory)
         nfos = sorted(base / name for name in files if name.lower().endswith(".nfo"))
-        for nfo_path in nfos:
+        videos = sorted(
+            base / name for name in files
+            if Path(name).suffix.casefold() in {".mkv", ".mp4", ".avi", ".m4v", ".mov"}
+        )
+        # A lone video supplies an unambiguous sibling NFO target. Multiple
+        # videos without an NFO remain untouched because no title owns the path.
+        targets = nfos or ([videos[0].with_suffix(".nfo")] if len(videos) == 1 else [])
+        for nfo_path in targets:
             title = nfo_path.stem
             year = clean_year(base.name) or clean_year(title)
             imdb_id = tmdb_id = None

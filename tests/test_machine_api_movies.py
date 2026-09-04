@@ -9,6 +9,9 @@ from unittest import mock
 from harvester_core.config import load_config
 from harvester_core.jobs.movie_materialize import run as materialize
 from harvester_core.jobs.movie_scan import run as scan
+from harvester_core.jobs.movie_scan import discover_movies
+from harvester_core.jobs.tv_materialize import run as materialize_tv
+from harvester_core.providers.profiles import profiles
 from harvester_core.storage import load_json, save_json_atomic
 
 
@@ -133,6 +136,43 @@ class MachineApiMovieTests(unittest.TestCase):
         })
         result = self.cli("api", "get", "show", str(show))
         self.assertTrue(json.loads(result.stdout)["result"]["local_receipts"]["nfo"])
+
+    def test_lone_video_supplies_nfo_target_but_not_poster_target(self):
+        folder = self.movies / "Needs Metadata (2024)"
+        folder.mkdir()
+        video = folder / "Needs Metadata.mkv"
+        video.write_bytes(b"video")
+        record = discover_movies(self.movies)[str(video.with_suffix(".nfo").resolve())]
+        self.assertEqual(record["nfo_path"], str(video.with_suffix(".nfo").resolve()))
+        self.assertIsNone(record["poster_path"])
+        self.assertEqual(record["poster_target_status"], "unresolved")
+
+        (folder / "part-two.mp4").write_bytes(b"video")
+        self.assertNotIn(str(video.with_suffix(".nfo").resolve()), discover_movies(self.movies))
+
+    def test_tvdb_profile_advertises_person_images(self):
+        tvdb = next(item for item in profiles(self.config) if item["key"] == "tvdb")
+        self.assertIn("person.image", tvdb["capabilities"])
+
+    def test_tv_materialization_artifact_flags_do_not_touch_siblings(self):
+        show = Path(self.temp.name) / "tv" / "Scoped"
+        show.mkdir(parents=True)
+        manifest = {"shows": {str(show): {
+            "status": "matched", "folder_name": "Scoped",
+            "nfo": {"title": "Scoped"},
+            "assets": {"poster_url": "https://poster", "actor_urls": [
+                {"name": "Actor", "url": "https://actor"}
+            ]},
+        }}}
+        save_json_atomic(self.state / "tv_show_urls_tvdb.json", manifest)
+        materialize_tv(
+            self.config, write_nfo=False, write_poster=False, write_actors=True,
+            downloader=lambda url: (b"image", "image/jpeg"),
+            sleep_between_requests=0,
+        )
+        self.assertFalse((show / "show.nfo").exists())
+        self.assertFalse((show / "poster.jpg").exists())
+        self.assertTrue((Path(self.temp.name) / "tv" / ".actors" / "Actor.jpg").exists())
 
     def test_actor_image_refresh_does_not_construct_tmdb_client(self):
         import harvester

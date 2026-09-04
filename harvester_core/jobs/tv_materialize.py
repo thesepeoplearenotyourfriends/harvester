@@ -254,6 +254,9 @@ def materialize_show(
     downloader=None,
     sleep=None,
     transport=None,
+    write_nfo=True,
+    write_poster=True,
+    write_actors=True,
 ):
     """Materialize one record without provider access or terminal output."""
     show_dir = Path(show_path)
@@ -261,8 +264,10 @@ def materialize_show(
     state = artifact_state(record)
     assets = record.get("assets") or {}
     if not show_dir.is_dir():
-        mark_item(state["nfo"], "error", error="show directory no longer exists")
-        mark_item(state["poster"], "error", error="show directory no longer exists")
+        if write_nfo:
+            mark_item(state["nfo"], "error", error="show directory no longer exists")
+        if write_poster:
+            mark_item(state["poster"], "error", error="show directory no longer exists")
         update_overall_status(record)
         counters["show_missing"] += 1
         emit(reporter, "error", "show directory no longer exists", show=folder_name)
@@ -275,64 +280,67 @@ def materialize_show(
             return downloader(url)
         return download_bytes(url, options, reporter, sleep, transport)
 
-    nfo_path = show_dir / "show.nfo"
-    try:
-        if nfo_path.exists() and not options.overwrite_nfo:
-            mark_item(state["nfo"], "exists", bytes=nfo_path.stat().st_size)
-            counters["nfo_exists"] += 1
-        elif not record.get("nfo"):
-            mark_item(state["nfo"], "error", error="matched record has no NFO payload")
+    if write_nfo:
+        nfo_path = show_dir / "show.nfo"
+        try:
+            if nfo_path.exists() and not options.overwrite_nfo:
+                mark_item(state["nfo"], "exists", bytes=nfo_path.stat().st_size)
+                counters["nfo_exists"] += 1
+            elif not record.get("nfo"):
+                mark_item(state["nfo"], "error", error="matched record has no NFO payload")
+                counters["nfo_error"] += 1
+            else:
+                xml = render_show_nfo(record["nfo"])
+                write_bytes_atomic(nfo_path, xml)
+                mark_item(state["nfo"], "ok", bytes=len(xml))
+                counters["nfo_ok"] += 1
+            changes += 1
+        except Exception as error:
+            mark_item(state["nfo"], "error", error=repr(error))
             counters["nfo_error"] += 1
-        else:
-            xml = render_show_nfo(record["nfo"])
-            write_bytes_atomic(nfo_path, xml)
-            mark_item(state["nfo"], "ok", bytes=len(xml))
-            counters["nfo_ok"] += 1
-        changes += 1
-    except Exception as error:
-        mark_item(state["nfo"], "error", error=repr(error))
-        counters["nfo_error"] += 1
-        changes += 1
-    emit(reporter, "artifact", "NFO handled", show=folder_name,
-         status=state["nfo"].get("status"))
+            changes += 1
+        emit(reporter, "artifact", "NFO handled", show=folder_name,
+             status=state["nfo"].get("status"))
 
     poster_jpg, poster_png = poster_paths(show_dir)
     poster_state = state["poster"]
     poster_url = assets.get("poster_url")
     try:
-        existing = next((path for path in (poster_jpg, poster_png) if path.exists()), None)
-        if existing and not options.overwrite_poster:
-            mark_item(poster_state, "exists", bytes=existing.stat().st_size,
-                      file=existing.name)
-            counters["poster_exists"] += 1
-        elif not poster_url:
-            mark_item(poster_state, "no_url", error="TVDB record has no poster URL")
-            counters["poster_no_url"] += 1
-        elif may_retry(poster_state, options.retry_failed):
-            data, content_type = fetch(poster_url)
-            target = show_dir / ("poster" + image_extension(data, content_type))
-            alternate = poster_png if target == poster_jpg else poster_jpg
-            write_bytes_atomic(target, data)
-            if alternate.exists():
-                try:
-                    alternate.unlink()
-                except OSError:
-                    pass
-            mark_item(poster_state, "ok", bytes=len(data), file=target.name,
-                      content_type=content_type)
-            counters["poster_ok"] += 1
-            counters["bytes"] += len(data)
-            changes += 1
-        else:
-            counters["poster_skipped"] += 1
+        if write_poster:
+            existing = next((path for path in (poster_jpg, poster_png) if path.exists()), None)
+            if existing and not options.overwrite_poster:
+                mark_item(poster_state, "exists", bytes=existing.stat().st_size,
+                          file=existing.name)
+                counters["poster_exists"] += 1
+            elif not poster_url:
+                mark_item(poster_state, "no_url", error="TVDB record has no poster URL")
+                counters["poster_no_url"] += 1
+            elif may_retry(poster_state, options.retry_failed):
+                data, content_type = fetch(poster_url)
+                target = show_dir / ("poster" + image_extension(data, content_type))
+                alternate = poster_png if target == poster_jpg else poster_jpg
+                write_bytes_atomic(target, data)
+                if alternate.exists():
+                    try:
+                        alternate.unlink()
+                    except OSError:
+                        pass
+                mark_item(poster_state, "ok", bytes=len(data), file=target.name,
+                          content_type=content_type)
+                counters["poster_ok"] += 1
+                counters["bytes"] += len(data)
+                changes += 1
+            else:
+                counters["poster_skipped"] += 1
     except Exception as error:
         mark_item(poster_state, "error", error=repr(error), url=poster_url)
         counters["poster_error"] += 1
         changes += 1
-    emit(reporter, "artifact", "poster handled", show=folder_name,
-         status=poster_state.get("status"))
+    if write_poster:
+        emit(reporter, "artifact", "poster handled", show=folder_name,
+             status=poster_state.get("status"))
 
-    for actor in assets.get("actor_urls") or []:
+    for actor in (assets.get("actor_urls") or []) if write_actors else []:
         if not isinstance(actor, dict):
             continue
         name = (actor.get("name") or "").strip()
@@ -391,6 +399,9 @@ def run(
     request_timeout=30,
     save_every_changes=25,
     targets=None,
+    write_nfo=True,
+    write_poster=True,
+    write_actors=True,
 ):
     """Materialize a frozen manifest and return a compact structured result."""
     options = MaterializeOptions(
@@ -427,6 +438,7 @@ def run(
             changes = materialize_show(
                 show_path, record, actors_dir, counters, options, reporter, downloader,
                 sleep, transport,
+                write_nfo, write_poster, write_actors,
             )
             changed_since_save += changes
             manifest.setdefault("_meta", {})["updated"] = now_iso()
