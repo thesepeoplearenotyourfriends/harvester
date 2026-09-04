@@ -13,3 +13,7 @@ actor_photo_download_status.json
 tmdb_api_cache.json
 tvdb_api_cache.json
 tv_show_urls_tvdb.json
+keys_and_tokens.txt
+state/
+__pycache__/
+*.pyc
