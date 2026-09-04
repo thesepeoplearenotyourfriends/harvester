@@ -6,6 +6,7 @@ import xml.etree.ElementTree as et
 from collections import defaultdict
 from datetime import datetime, timezone
 
+from ..images import safe_actor_filename
 from ..events import emit
 from ..storage import load_json as json_load, save_json_atomic as json_save_atomic
 
@@ -790,6 +791,8 @@ def run(
     processed = 0
     changed_since_save = 0
     for actor_name, item in queue.get("actors", {}).items():
+        if not refresh and (config.movie_root / ".actors" / safe_actor_filename(actor_name)).is_file():
+            continue
         status = item.get("status", "pending")
         if status == "ok" and not refresh:
             continue
