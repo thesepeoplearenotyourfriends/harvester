@@ -36,6 +36,12 @@ class HarvesterUIBridgeTests(unittest.TestCase):
             harvester_ui.action_argv("list.movies", {"argv": ["refresh", "movie"]})
         with self.assertRaises(harvester_ui.BridgeError):
             harvester_ui.action_argv("get.movie", {"identifier": "--help"})
+        self.assertEqual(
+            harvester_ui.action_argv("rescan", {"target": "all"})[3:],
+            ["rescan", "all"],
+        )
+        with self.assertRaises(harvester_ui.BridgeError):
+            harvester_ui.action_argv("rescan", {"target": "internet"})
 
     def test_action_allowlist_is_derived_from_the_registry(self):
         self.assertEqual(harvester_ui.BRIDGE_ACTIONS,

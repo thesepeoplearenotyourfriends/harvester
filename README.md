@@ -12,7 +12,7 @@ python3 harvester.py movies scan [--limit N] [--rebuild] [--refresh]
 python3 harvester.py movies materialize [--limit N] [--overwrite-nfo] [--overwrite-poster]
 python3 harvester.py tv scan [--limit N] [--rebuild] [--refresh] [--retry-ambiguous]
 python3 harvester.py tv materialize [--limit N] [--no-overwrite-nfo] [--no-overwrite-poster]
-python3 harvester.py api providers|get|list|search|inventory|refresh ...
+python3 harvester.py api providers|get|list|search|inventory|rescan|refresh ...
 ```
 
 Run `python3 harvester.py --help` and nested `--help` for the complete map. Movie and TV `scan` commands resolve identities and freeze metadata/asset URLs. Their `materialize` commands consume those files without constructing or calling a provider client. `status` and API get/list/inventory are local-only and need neither credentials nor network. Every API stdout line is a JSON object; long operations end with exactly one result or error record.
@@ -78,6 +78,9 @@ manifests itself.
 Queue clients can request compact records with `api list actors|movies|shows
 --brief` and apply `--status` or `--missing` filters. `api search QUERY` searches
 actor, movie, and show identities in durable state without contacting a provider.
+`api rescan actors|movies|shows|all` rebuilds the selected local census from the
+filesystem while retaining provider results for identities that still exist. It
+does not construct a provider, download an image, or materialize metadata.
 The desktop UI opens on an inventory overview. Its Work menu and resizable context
 pane open the same queues; Missing Actor Images decodes dropped or selected images
 in the browser, fits them within 185 × 278 pixels, and sends a small canonical JPEG

@@ -102,6 +102,8 @@ def parser():
     search_parser = api.add_parser("search", help="search durable records offline")
     search_parser.add_argument("query")
     search_parser.add_argument("--limit", type=int, default=50)
+    rescan_parser = api.add_parser("rescan", help="rebuild local censuses offline")
+    rescan_parser.add_argument("target", choices=("actors", "movies", "shows", "all"))
     api.add_parser("inventory", help="summarize durable state")
     refresh = api.add_parser("refresh", help="refresh explicitly named records").add_subparsers(dest="kind", required=True)
     aspects = {"actor": ("identity", "image", "all"), "movie": ("identity", "metadata", "nfo", "poster", "actors", "all"), "show": ("identity", "metadata", "nfo", "poster", "actors", "all")}
@@ -252,7 +254,7 @@ def api_main(args, config):
         if args.api_command == "providers":
             from harvester_core.providers.profiles import profiles
             terminal({"providers": profiles(config)})
-        elif args.api_command in ("get", "list", "inventory", "search"):
+        elif args.api_command in ("get", "list", "inventory", "search", "rescan"):
             from harvester_core.api import get_record, inventory, list_records, search
             if args.api_command == "get":
                 terminal(get_record(config, args.kind, args.identifier))
@@ -260,6 +262,9 @@ def api_main(args, config):
                 terminal({"items": list_records(config, args.kind, args.status, args.limit, getattr(args, "missing", None), args.brief)})
             elif args.api_command == "search":
                 terminal({"items": search(config, args.query, args.limit)})
+            elif args.api_command == "rescan":
+                from harvester_core.rescan import rescan
+                terminal(rescan(config, args.target))
             else:
                 terminal(inventory(config))
         else:

@@ -74,12 +74,19 @@ def _refresh_actor(data):
     return ("refresh", "actor", data["identifier"], "--aspect", "image")
 
 
+def _rescan(data):
+    if set(data) != {"target"} or data["target"] not in ("actors", "movies", "shows", "all"):
+        raise BridgeError("rescan requires an actors, movies, shows, or all target")
+    return ("rescan", data["target"])
+
+
 ACTION_REGISTRY = {
     "providers": _no_args(("providers",)), "inventory": _no_args(("inventory",)),
     "list.movies": _list("movie"), "list.shows": _list("show"),
     "list.actors": _list("actor"), "get.movie": _identifier("movie"),
     "get.show": _identifier("show"), "get.actor": _identifier("actor"),
-    "search": _search, "refresh.actor.image": _refresh_actor,
+    "search": _search, "rescan": _rescan,
+    "refresh.actor.image": _refresh_actor,
     "actor.install_image": None,
 }
 BRIDGE_ACTIONS = frozenset({"__ping__", *ACTION_REGISTRY})

@@ -546,6 +546,18 @@
         await refreshInventory();
         renderOverview();
       }
+      async function start() {
+        const generation = ++state.generation;
+        try {
+          await App.request("rescan", { target: "all" });
+        } catch (error) {
+          if (error.name !== "AbortError") {
+            console.warn("Local census rescan skipped:", error.message);
+          }
+        }
+        if (generation !== state.generation) return;
+        await loadOverview();
+      }
       function bindWork() {
         document.querySelectorAll("[data-work]").forEach(
           (b) =>
@@ -620,7 +632,7 @@
         closeMenus();
       };
       setWidth(184);
-      loadOverview();
+      start();
     </script>
   </body>
 </html>

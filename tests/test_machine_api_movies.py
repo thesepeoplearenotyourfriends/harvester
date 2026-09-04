@@ -12,6 +12,7 @@ from harvester_core.jobs.movie_scan import run as scan
 from harvester_core.jobs.movie_scan import discover_movies
 from harvester_core.jobs.tv_materialize import run as materialize_tv
 from harvester_core.providers.profiles import profiles
+from harvester_core.rescan import rescan
 from harvester_core.storage import load_json, save_json_atomic
 
 
@@ -159,6 +160,53 @@ class MachineApiMovieTests(unittest.TestCase):
         self.assertEqual(inventory["movies"]["failed"], 2)
         self.assertEqual(len(queue), inventory["movies"]["failed"])
         self.assertEqual({item["status"] for item in queue}, {"error", "failed"})
+
+    def test_offline_rescan_rebuilds_censuses_and_preserves_known_provider_state(self):
+        movie_nfo = self.movies / "Example (2020)" / "movie.nfo"
+        movie_nfo.write_text("""<movie><title>Example Changed</title><year>2020</year>
+            <actor><name>Known Actor</name><role>Lead</role></actor></movie>""")
+        (self.movies / ".actors").mkdir()
+        (self.movies / ".actors" / "Known_Actor.jpg").write_bytes(b"jpeg")
+        show = Path(self.temp.name) / "tv" / "Known Show (2021)"
+        show.mkdir(parents=True)
+        save_json_atomic(self.state / "movie_actor_queue.json", {"actors": {
+            "Known Actor": {"status": "ok", "tmdb_person_id": 42, "contexts": []},
+            "Removed Actor": {"status": "failed", "contexts": []},
+        }})
+        target = str(movie_nfo.resolve())
+        save_json_atomic(self.state / "movie_manifest_tmdb.json", {"movies": {
+            target: {"status": "ok", "tmdb_id": 7, "nfo_path": target},
+            "/removed.nfo": {"status": "error", "nfo_path": "/removed.nfo"},
+        }})
+        save_json_atomic(self.state / "tv_show_urls_tvdb.json", {"shows": {
+            str(show.resolve()): {"status": "matched", "tvdb_id": 9},
+            "/removed-show": {"status": "not_found"},
+        }})
+
+        with mock.patch("urllib.request.urlopen", side_effect=AssertionError("network used")):
+            result = rescan(self.config, "all")
+
+        actors = load_json(self.state / "movie_actor_queue.json")["actors"]
+        movies = load_json(self.state / "movie_manifest_tmdb.json")["movies"]
+        shows = load_json(self.state / "tv_show_urls_tvdb.json")["shows"]
+        self.assertEqual(set(actors), {"Known Actor"})
+        self.assertEqual(actors["Known Actor"]["tmdb_person_id"], 42)
+        self.assertEqual(actors["Known Actor"]["contexts"][0]["title"], "Example Changed")
+        self.assertEqual(result["inventory"]["actors"]["local"], 1)
+        self.assertEqual(set(movies), {target})
+        self.assertEqual(movies[target]["tmdb_id"], 7)
+        self.assertEqual(movies[target]["title"], "Example Changed")
+        self.assertEqual(set(shows), {str(show.resolve())})
+        self.assertEqual(shows[str(show.resolve())]["tvdb_id"], 9)
+
+    def test_api_rescan_targets_are_available(self):
+        (Path(self.temp.name) / "tv").mkdir(exist_ok=True)
+        for target in ("actors", "movies", "shows", "all"):
+            with self.subTest(target=target):
+                result = self.cli("api", "rescan", target)
+                self.assertEqual(result.returncode, 0, result.stdout)
+                payload = json.loads(result.stdout)["result"]
+                self.assertIn("inventory", payload)
 
     def test_tv_receipt_uses_materializer_filename(self):
         show = Path(self.temp.name) / "tv" / "Example"

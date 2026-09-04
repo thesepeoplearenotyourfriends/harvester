@@ -181,6 +181,13 @@ def make_actor_work_queue(DIRS, queue_file, force_rebuild=False):
         if isinstance(data, dict) and "actors" in data:
             return data
 
+    queue = build_actor_work_queue(DIRS)
+    json_save_atomic(queue_file, queue)
+    return queue
+
+
+def build_actor_work_queue(DIRS):
+    """Scan local NFOs and return a new actor census without writing it."""
     nfos = scan_nfos(DIRS)
 
     actors = defaultdict(lambda: {
@@ -224,7 +231,6 @@ def make_actor_work_queue(DIRS, queue_file, force_rebuild=False):
         "actors": dict(sorted(actors.items())),
     }
 
-    json_save_atomic(queue_file, queue)
     return queue
 
 
