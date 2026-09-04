@@ -14,6 +14,7 @@ def run(
     overwrite=False,
     downloader=None,
     normalize=True,
+    transport=None,
 ):
     urls = load_json(config.state_path("actor_thumb_urls_tmdb.json"), {})
     status_path = config.state_path("actor_photo_download_status.json")
@@ -23,7 +24,8 @@ def run(
 
     def fetch(url):
         request = urllib.request.Request(url, headers={"User-Agent": "harvester/1"})
-        with urllib.request.urlopen(request, timeout=30) as response:
+        opener = transport.open if transport else urllib.request.urlopen
+        with opener(request, timeout=30) as response:
             return response.read()
 
     fetch = downloader or fetch

@@ -1,10 +1,13 @@
 import builtins
 import inspect
 import io
+import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import urllib.error
 from pathlib import Path
@@ -28,6 +31,7 @@ from harvester_core.jobs.tv_scan import build_nfo_payload, resolve_tvdb_series
 from harvester_core.providers.tmdb import TMDBClient
 from harvester_core.providers.tvdb import TVDBClient
 from harvester_core.storage import load_json, save_json_atomic
+from harvester_core.transport import parse_socks5, socks5_connect
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -65,6 +69,49 @@ class HarvesterTests(unittest.TestCase):
             self.assertEqual(config.tmdb_api_key, "explicit")
             self.assertEqual(config.tvdb_pin, "pin")
             self.assertEqual(config.state_dir, (base / "work").resolve())
+
+    def test_socks_config_environment_and_sanitized_parse_error(self):
+        config = load_config({}, {
+            "HARVESTER_SOCKS5": "proxy-user:proxy-pass@127.0.0.1:1080",
+        })
+        settings = parse_socks5(config.socks5)
+        self.assertEqual((settings.host, settings.port), ("127.0.0.1", 1080))
+        self.assertEqual((settings.username, settings.password),
+                         ("proxy-user", "proxy-pass"))
+        with self.assertRaises(ValueError) as caught:
+            parse_socks5("user:DO_NOT_PRINT@missing-port")
+        self.assertNotIn("DO_NOT_PRINT", str(caught.exception))
+
+    def test_socks5_sends_destination_hostname_to_proxy(self):
+        ready = threading.Event()
+        destination = []
+
+        def proxy(listener):
+            ready.set()
+            connection, _ = listener.accept()
+            with connection:
+                greeting = connection.recv(3)
+                self.assertEqual(greeting, b"\x05\x01\x00")
+                connection.sendall(b"\x05\x00")
+                header = connection.recv(5)
+                self.assertEqual(header[:4], b"\x05\x01\x00\x03")
+                name = connection.recv(header[4]).decode("ascii")
+                port = int.from_bytes(connection.recv(2), "big")
+                destination.append((name, port))
+                connection.sendall(b"\x05\x00\x00\x01\x7f\x00\x00\x01\x00\x00")
+
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            thread = threading.Thread(target=proxy, args=(listener,))
+            thread.start()
+            ready.wait(1)
+            settings = parse_socks5(f"127.0.0.1:{listener.getsockname()[1]}")
+            stream = socks5_connect(settings, "api.themoviedb.org", 443, timeout=2)
+            stream.close()
+            thread.join(2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(destination, [("api.themoviedb.org", 443)])
 
     def test_atomic_json_round_trip(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -261,6 +308,19 @@ class HarvesterTests(unittest.TestCase):
         with patch("harvester_core.providers.tmdb.urllib.request.urlopen", side_effect=denied):
             with self.assertRaises(RuntimeError) as caught:
                 client.get("/denied")
+        self.assertNotIn("VERY_SECRET", str(caught.exception))
+
+        tmdb_body = io.BytesIO(json.dumps({
+            "status_code": 7, "status_message": "Invalid API key"
+        }).encode())
+        tmdb_error = urllib.error.HTTPError(
+            "https://x?api_key=VERY_SECRET", 401, "denied", {}, tmdb_body
+        )
+        with patch("harvester_core.providers.tmdb.urllib.request.urlopen",
+                   side_effect=tmdb_error):
+            with self.assertRaises(RuntimeError) as caught:
+                client.get("/unauthorized")
+        self.assertIn("HTTP 401: 7 Invalid API key", str(caught.exception))
         self.assertNotIn("VERY_SECRET", str(caught.exception))
 
         tvdb = TVDBClient("TVDB_SECRET")

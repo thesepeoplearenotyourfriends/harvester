@@ -182,7 +182,7 @@ class MaterializeOptions:
     sleep_between_requests: float = 0.5
 
 
-def download_bytes(url, options=None, reporter=None, sleep=None):
+def download_bytes(url, options=None, reporter=None, sleep=None, transport=None):
     """Download one image with bounded retries for transient failures."""
     options = options or MaterializeOptions()
     sleep = sleep or time.sleep
@@ -198,7 +198,8 @@ def download_bytes(url, options=None, reporter=None, sleep=None):
     last_error = None
     for attempt in range(options.request_attempts):
         try:
-            with urllib.request.urlopen(request, timeout=options.request_timeout) as response:
+            opener = transport.open if transport else urllib.request.urlopen
+            with opener(request, timeout=options.request_timeout) as response:
                 content_type = response.headers.get("Content-Type", "")
                 data = response.read()
             if not data:
@@ -289,6 +290,7 @@ def materialize_show(
     reporter=None,
     downloader=None,
     sleep=None,
+    transport=None,
 ):
     """Materialize one record without provider access or terminal output."""
     show_dir = Path(show_path)
@@ -306,7 +308,7 @@ def materialize_show(
     def fetch(url):
         if downloader:
             return downloader(url)
-        return download_bytes(url, options, reporter, sleep)
+        return download_bytes(url, options, reporter, sleep, transport)
 
     nfo_path = show_dir / "show.nfo"
     try:
@@ -410,6 +412,7 @@ def run(
     request_attempts=4,
     sleep_between_requests=0.5,
     sleep=None,
+    transport=None,
 ):
     """Materialize a frozen manifest and return a compact structured result."""
     options = MaterializeOptions(
@@ -438,7 +441,8 @@ def run(
             break
         counters["shows_seen"] += 1
         materialize_show(
-            show_path, record, actors_dir, counters, options, reporter, downloader, sleep
+            show_path, record, actors_dir, counters, options, reporter, downloader, sleep,
+            transport,
         )
         manifest.setdefault("_meta", {})["updated"] = now_iso()
         save_json_atomic(work_path, manifest)
