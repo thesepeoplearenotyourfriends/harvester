@@ -6,6 +6,7 @@ standard-library-only required path.
 """
 
 import json
+import base64
 import os
 import subprocess
 import sys
@@ -26,6 +27,62 @@ _cache_lock = threading.Lock()
 
 class BridgeError(RuntimeError):
     """An invalid request or failed Harvester machine API operation."""
+
+
+def _no_args(suffix):
+    def build(data):
+        if data:
+            raise BridgeError("action does not accept arguments")
+        return suffix
+    return build
+
+
+def _identifier(kind):
+    def build(data):
+        if set(data) != {"identifier"} or not isinstance(data["identifier"], str):
+            raise BridgeError(f"get.{kind} requires one string identifier")
+        value = data["identifier"]
+        if not value or "\0" in value or value.startswith("-"):
+            raise BridgeError("invalid record identifier")
+        return ("get", kind, value)
+    return build
+
+
+def _list(kind):
+    def build(data):
+        allowed = {"status", "missing"}
+        if not set(data) <= allowed or not all(isinstance(v, str) for v in data.values()):
+            raise BridgeError(f"list.{kind}s accepts string status/missing filters only")
+        suffix = ["list", kind + "s", "--brief"]
+        for option in ("status", "missing"):
+            if data.get(option):
+                suffix += ["--" + option, data[option]]
+        return tuple(suffix)
+    return build
+
+
+def _search(data):
+    if set(data) != {"query"} or not isinstance(data["query"], str):
+        raise BridgeError("search requires one string query")
+    return ("search", data["query"], "--limit", "50")
+
+
+def _refresh_actor(data):
+    if set(data) != {"identifier"} or not isinstance(data["identifier"], str):
+        raise BridgeError("refresh.actor.image requires one string identifier")
+    _identifier("actor")({"identifier": data["identifier"]})
+    return ("refresh", "actor", data["identifier"], "--aspect", "image")
+
+
+ACTION_REGISTRY = {
+    "providers": _no_args(("providers",)), "inventory": _no_args(("inventory",)),
+    "list.movies": _list("movie"), "list.shows": _list("show"),
+    "list.actors": _list("actor"), "get.movie": _identifier("movie"),
+    "get.show": _identifier("show"), "get.actor": _identifier("actor"),
+    "search": _search, "refresh.actor.image": _refresh_actor,
+    "actor.install_image": None,
+}
+BRIDGE_ACTIONS = frozenset({"__ping__", *ACTION_REGISTRY})
 
 
 def decode_message(json_text):
@@ -52,27 +109,40 @@ def decode_message(json_text):
 
 def action_argv(action, data):
     """Translate a semantic capability into a fixed Harvester argv shape."""
-    fixed = {
-        "providers": ("providers",),
-        "inventory": ("inventory",),
-        "list.movies": ("list", "movies"),
-        "list.shows": ("list", "shows"),
-        "list.actors": ("list", "actors"),
-    }
-    if action in fixed:
-        if data:
-            raise BridgeError(f"{action} does not accept arguments")
-        suffix = fixed[action]
-    elif action in ("get.movie", "get.show", "get.actor"):
-        if set(data) != {"identifier"} or not isinstance(data["identifier"], str):
-            raise BridgeError(f"{action} requires one string identifier")
-        identifier = data["identifier"]
-        if not identifier or "\0" in identifier or identifier.startswith("-"):
-            raise BridgeError("invalid record identifier")
-        suffix = ("get", action.removeprefix("get."), identifier)
-    else:
+    if action not in ACTION_REGISTRY or ACTION_REGISTRY[action] is None:
         raise BridgeError(f"unknown bridge action: {action}")
+    builder = ACTION_REGISTRY[action]
+    suffix = builder(data)
     return [sys.executable, str(HARVESTER_PATH), "api", *suffix]
+
+
+def install_actor_image(data):
+    """Install one known actor image at its canonical destination."""
+    if set(data) != {"identifier", "data_url"} or not all(isinstance(v, str) for v in data.values()):
+        raise BridgeError("actor.install_image requires identifier and data_url")
+    from harvester_core.api import get_record
+    from harvester_core.config import load_config
+    from harvester_core.images import normalize_actor_image, safe_actor_filename
+    from harvester_core.storage import write_bytes_atomic
+    config = load_config()
+    actor = get_record(config, "actor", data["identifier"])
+    try:
+        header, encoded = data["data_url"].split(",", 1)
+        mime = header[5:].split(";", 1)[0].lower()
+        if ";base64" not in header or len(encoded) > 12_000_000:
+            raise ValueError
+        source = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError) as error:
+        raise BridgeError("invalid or oversized image data") from error
+    if not source or len(source) > 8_000_000:
+        raise BridgeError("image must be between 1 byte and 8 MB")
+    is_jpeg = source.startswith(b"\xff\xd8\xff")
+    output = source if is_jpeg else normalize_actor_image(source)
+    if not output.startswith(b"\xff\xd8\xff"):
+        raise BridgeError(f"{mime or 'image'} needs Pillow conversion to canonical JPEG")
+    destination = config.movie_root / ".actors" / safe_actor_filename(actor["name"])
+    write_bytes_atomic(destination, output)
+    return {"actor": actor["name"], "local_file": str(destination), "bytes": len(output)}
 
 
 def parse_ndjson(output):
@@ -106,6 +176,12 @@ def run_action(action, data):
         if data:
             raise BridgeError("__ping__ does not accept arguments")
         return {"package_id": PACKAGE_ID}
+    if action not in ACTION_REGISTRY:
+        raise BridgeError(f"unknown bridge action: {action}")
+    if action == "actor.install_image":
+        result = install_actor_image(data)
+        cache_result(action, result)
+        return result
     argv = action_argv(action, data)
     completed = subprocess.run(
         argv, cwd=PROJECT_DIR, text=True, capture_output=True, check=False,
@@ -207,9 +283,3 @@ def make_bridge_callback(app_box):
         ).start()
         return None
     return bridge
-
-
-BRIDGE_ACTIONS = frozenset({
-    "__ping__", "providers", "inventory", "list.movies", "list.shows",
-    "list.actors", "get.movie", "get.show", "get.actor",
-})

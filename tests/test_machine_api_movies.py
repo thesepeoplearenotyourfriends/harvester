@@ -127,6 +127,25 @@ class MachineApiMovieTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)["type"], "result")
 
+    def test_brief_lists_and_offline_search_return_compact_typed_records(self):
+        save_json_atomic(self.state / "movie_actor_queue.json", {"actors": {
+            "Aaron Paul": {"status": "ok", "contexts": ["large", "detail"],
+                           "tmdb": {"frozen": True}}
+        }})
+        save_json_atomic(self.state / "movie_manifest_tmdb.json", {"movies": {
+            "/one.nfo": {"status": "unresolved", "title": "Aaron's Movie",
+                          "nfo_path": "/one.nfo", "poster_url": "https://remote"}
+        }})
+        listed = json.loads(self.cli("api", "list", "actors", "--brief", "--missing", "image").stdout)["result"]["items"]
+        self.assertEqual(listed, [{"kind": "actor", "name": "Aaron Paul", "status": "ok", "local_file": False}])
+        self.assertNotIn("contexts", listed[0])
+        with mock.patch("harvester_core.providers.tmdb.TMDBClient", side_effect=AssertionError("network adapter constructed")):
+            result = self.cli("api", "search", "aaron", "--limit", "1")
+        found = json.loads(result.stdout)["result"]["items"]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["kind"], "actor")
+        self.assertLessEqual(len(found), 1)
+
     def test_tv_receipt_uses_materializer_filename(self):
         show = Path(self.temp.name) / "tv" / "Example"
         show.mkdir(parents=True)

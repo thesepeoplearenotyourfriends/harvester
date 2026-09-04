@@ -12,7 +12,7 @@ python3 harvester.py movies scan [--limit N] [--rebuild] [--refresh]
 python3 harvester.py movies materialize [--limit N] [--overwrite-nfo] [--overwrite-poster]
 python3 harvester.py tv scan [--limit N] [--rebuild] [--refresh] [--retry-ambiguous]
 python3 harvester.py tv materialize [--limit N] [--no-overwrite-nfo] [--no-overwrite-poster]
-python3 harvester.py api providers|get|list|inventory|refresh ...
+python3 harvester.py api providers|get|list|search|inventory|refresh ...
 ```
 
 Run `python3 harvester.py --help` and nested `--help` for the complete map. Movie and TV `scan` commands resolve identities and freeze metadata/asset URLs. Their `materialize` commands consume those files without constructing or calling a provider client. `status` and API get/list/inventory are local-only and need neither credentials nor network. Every API stdout line is a JSON object; long operations end with exactly one result or error record.
@@ -74,6 +74,14 @@ Syntax check: `python3 -m compileall -q harvester.py harvester-ui.py harvester_u
 optional `severin` package and a graphical session are available. The Overview,
 Movies, TV, Actors, and Providers sections are read-only views backed by
 `harvester.py api`; the UI host does not read Harvester manifests itself.
+
+Queue clients can request compact records with `api list actors|movies|shows
+--brief` and apply `--status` or `--missing` filters. `api search QUERY` searches
+actor, movie, and show identities in durable state without contacting a provider.
+The desktop UI opens on an inventory overview. Its Work menu and resizable context
+pane open the same queues; Missing Actor Images accepts a JPEG by drop or file
+picker (other formats require optional Pillow) and writes the canonical `.actors`
+file. Refresh from API invokes the existing targeted actor image refresh.
 
 The renderer can read its last derived snapshot at
 `asset://com.harvester.app/.cache/ui/snapshot.json`. Python writes that

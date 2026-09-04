@@ -4,10 +4,13 @@ import shutil
 import sys
 import tempfile
 import unittest
+import base64
 from pathlib import Path
 from unittest import mock
 
 import harvester_ui
+from harvester_core.config import load_config
+from harvester_core.storage import save_json_atomic
 
 
 class HarvesterUIBridgeTests(unittest.TestCase):
@@ -34,6 +37,36 @@ class HarvesterUIBridgeTests(unittest.TestCase):
             harvester_ui.action_argv("list.movies", {"argv": ["refresh", "movie"]})
         with self.assertRaises(harvester_ui.BridgeError):
             harvester_ui.action_argv("get.movie", {"identifier": "--help"})
+
+    def test_action_allowlist_is_derived_from_the_registry(self):
+        self.assertEqual(harvester_ui.BRIDGE_ACTIONS,
+                         frozenset({"__ping__", *harvester_ui.ACTION_REGISTRY}))
+        with self.assertRaises(harvester_ui.BridgeError):
+            harvester_ui.action_argv("actor.install_image", {"path": "/tmp/escape"})
+
+    def test_manual_jpeg_install_uses_canonical_actor_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = load_config({"state_dir": root / "state", "movie_root": root / "movies",
+                                  "tv_root": root / "tv"}, environ={}, app_dir=root)
+            save_json_atomic(config.state_path("movie_actor_queue.json"),
+                             {"actors": {"Actor / Name": {"status": "ok"}}})
+            jpeg = b"\xff\xd8\xffmanual-jpeg"
+            payload = "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()
+            with mock.patch("harvester_core.config.load_config", return_value=config), \
+                    mock.patch("harvester_core.images.normalize_actor_image",
+                               side_effect=AssertionError("JPEG must not require Pillow")):
+                result = harvester_ui.install_actor_image(
+                    {"identifier": "Actor / Name", "data_url": payload})
+            destination = config.movie_root / ".actors" / "Actor___Name.jpg"
+            self.assertEqual(destination.read_bytes(), jpeg)
+            self.assertEqual(result["local_file"], str(destination))
+            self.assertFalse((root / "escape").exists())
+
+    def test_manual_install_rejects_unknown_actor_and_arbitrary_fields(self):
+        with self.assertRaisesRegex(harvester_ui.BridgeError, "requires identifier"):
+            harvester_ui.install_actor_image(
+                {"identifier": "Nobody", "data_url": "data:image/jpeg;base64,/9j/", "path": "/tmp/x"})
 
     def test_ndjson_result_ignores_events(self):
         output = '\n'.join((

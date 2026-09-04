@@ -40,13 +40,61 @@ def get_record(config, kind, identifier):
     raise KeyError(f"{kind} not found: {identifier}")
 
 
-def list_records(config, kind, status=None, limit=None, missing=None):
-    values = [decorate(config, kind, key, value) for key, value in records(config, kind).items()]
+def brief_record(config, kind, key, record):
+    """Return only fields useful for queue display, never frozen provider data."""
+    decorated = decorate(config, kind, key, record)
+    if kind == "actor":
+        return {"kind": kind, "name": decorated["name"],
+                "status": decorated.get("status", "pending"),
+                "local_file": bool(decorated["local_file"])}
+    receipts = decorated["local_receipts"]
+    return {"kind": kind, "local_target": decorated["local_target"],
+            "label": record.get("title") or record.get("name") or Path(key).name,
+            "status": decorated.get("status", "pending"),
+            "local_receipts": receipts,
+            **({"tmdb_id": record.get("tmdb_id")} if kind == "movie" else
+               {"tvdb_id": record.get("tvdb_id")})}
+
+
+def list_records(config, kind, status=None, limit=None, missing=None, brief=False):
+    source = records(config, kind)
+    values = [(key, record, decorate(config, kind, key, record))
+              for key, record in source.items()]
     if status:
-        values = [value for value in values if value.get("status") == status]
+        values = [item for item in values if item[2].get("status") == status]
     if missing:
-        values = [value for value in values if not value.get("local_receipts", {}).get(missing)]
+        if kind == "actor":
+            values = [item for item in values if not item[2].get("local_file")]
+        else:
+            values = [item for item in values
+                      if not item[2].get("local_receipts", {}).get(missing)]
+    if brief:
+        values = [brief_record(config, kind, key, record)
+                  for key, record, decorated in values]
+    else:
+        values = [decorated for key, record, decorated in values]
     return values[:limit] if limit is not None else values
+
+
+def search(config, query, limit=50):
+    """Search durable identities only. No provider is constructed or contacted."""
+    needle = query.strip().casefold()
+    if not needle:
+        return []
+    found = []
+    for kind in ("actor", "movie", "show"):
+        for key, record in records(config, kind).items():
+            identity = [key, record.get("name"), record.get("title"),
+                        record.get("tmdb_id"), record.get("tvdb_id"), record.get("imdb_id")]
+            if not any(needle in str(value).casefold() for value in identity if value is not None):
+                continue
+            item = brief_record(config, kind, key, record)
+            label = item.get("name") or item.get("label") or Path(key).name
+            missing = kind == "actor" and not item["local_file"]
+            found.append({"kind": kind, "identifier": key, "label": label,
+                          "secondary": kind + (" · image missing" if missing else ""),
+                          "status": item.get("status", "pending")})
+    return found[:max(0, min(limit, 100))]
 
 
 def _movie_poster_exists(record):
