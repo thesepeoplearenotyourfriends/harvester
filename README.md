@@ -69,6 +69,21 @@ Syntax check: `python3 -m compileall -q harvester.py harvester_core tests`.
 Entries are listed newest first. Each entry describes behavior that changed rather than
 repeating commit messages.
 
+### 2026-09-04 — Reference parity audit
+
+#### Fixed
+
+* Restored the reference checkpoint cadences, request throttles, timeouts, attempt
+  counts, TVDB User-Agent, and actor-image request headers. TMDB requests use the
+  current `harvester/1` identifier rather than the historical reference string.
+* TV scan and materialization now save their manifests when interrupted.
+* Actor download receipts again include timestamps, source URLs, and content types.
+* TV materialization no longer reports a downloaded poster as failed only because a
+  stale alternate-format poster could not be removed.
+
+The mechanical comparison and the deliberately retained integration differences are
+recorded in [`reference/PARITY_AUDIT.md`](reference/PARITY_AUDIT.md).
+
 ### 2026-09-04 — Optional SOCKS5 transport
 
 #### Added
