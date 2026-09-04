@@ -25,11 +25,22 @@ TMDB_API_KEY=...
 TMDB_BEARER_TOKEN=...
 TVDB_API_KEY=...
 TVDB_PIN=...
+HARVESTER_SOCKS5=127.0.0.1:1080
+HARVESTER_SOCKS5_USERNAME=...
+HARVESTER_SOCKS5_PASSWORD=...
 ```
 
 Blank lines, comments beginning with `#`, and unknown keys are ignored. Precedence is explicit command/runtime override, then same-named environment variable, then the file, then defaults. Secrets and provider bearer tokens are not stored in caches or normal output.
 
 Pillow is optional and imported only while treating actor images. Without it, downloaded bytes are preserved unchanged.
+
+Network requests use direct sockets by default. Set `HARVESTER_SOCKS5=127.0.0.1:1080`
+or pass `--socks5 127.0.0.1:1080` to route TMDB, TVDB, and image downloads through
+SOCKS5. Hostnames are resolved by the proxy, as with `curl --socks5-hostname`; Harvester
+does not replace sockets globally. Authenticated proxies accept
+`--socks5 user:password@host:port`, or the `HARVESTER_SOCKS5_USERNAME` and
+`HARVESTER_SOCKS5_PASSWORD` environment variables. Do not put a password directly on
+the command line on a multi-user system because process listings may expose it.
 
 ## Durable state and restart behavior
 
@@ -57,6 +68,20 @@ Syntax check: `python3 -m compileall -q harvester.py harvester_core tests`.
 
 Entries are listed newest first. Each entry describes behavior that changed rather than
 repeating commit messages.
+
+### 2026-09-04 — Optional SOCKS5 transport
+
+#### Added
+
+* Added stdlib-only SOCKS5 transport selection for TMDB, TVDB, actor images, and TV
+  artwork. SOCKS5 requests send destination hostnames to the proxy for remote DNS.
+* Added optional SOCKS5 username/password authentication. Direct sockets remain the
+  default.
+
+#### Fixed
+
+* TMDB HTTP failures now retain the API's sanitized `status_code` and `status_message`
+  while omitting API keys from raised errors.
 
 ### 2026-09-04 — Initial CLI consolidation
 

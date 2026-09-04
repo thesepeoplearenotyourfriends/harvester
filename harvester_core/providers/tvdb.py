@@ -11,7 +11,7 @@ from ..storage import load_json, save_json_atomic
 class TVDBClient:
     BASE = "https://api4.thetvdb.com/v4"
 
-    def __init__(self, api_key=None, pin=None, cache_file=None):
+    def __init__(self, api_key=None, pin=None, cache_file=None, transport=None):
         if not api_key:
             raise ValueError("TVDB capability unavailable: set TVDB_API_KEY")
         self.api_key = api_key
@@ -19,6 +19,7 @@ class TVDBClient:
         self.token = None
         self.cache_file = cache_file
         self.cache = load_json(cache_file, {}) if cache_file else {}
+        self.transport = transport
 
     def _request(self, method, path, params=None, payload=None, authenticated=True):
         headers = {"Accept": "application/json", "User-Agent": "harvester/1"}
@@ -34,7 +35,8 @@ class TVDBClient:
         if params:
             url += "?" + urllib.parse.urlencode(sorted(params.items()), doseq=True)
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
-        with urllib.request.urlopen(request, timeout=20) as response:
+        opener = self.transport.open if self.transport else urllib.request.urlopen
+        with opener(request, timeout=20) as response:
             return json.loads(response.read().decode("utf-8"))
 
     def login(self):

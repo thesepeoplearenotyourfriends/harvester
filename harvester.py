@@ -24,6 +24,12 @@ def parser():
     root.add_argument("--tmdb-bearer-token", help=argparse.SUPPRESS)
     root.add_argument("--tvdb-api-key", help=argparse.SUPPRESS)
     root.add_argument("--tvdb-pin", help=argparse.SUPPRESS)
+    root.add_argument(
+        "--socks5", metavar="[USER:PASS@]HOST:PORT",
+        help="route provider and image requests through SOCKS5 (remote DNS)",
+    )
+    root.add_argument("--socks5-username", help=argparse.SUPPRESS)
+    root.add_argument("--socks5-password", help=argparse.SUPPRESS)
     commands = root.add_subparsers(dest="command", required=True)
     commands.add_parser("status", help="inspect local durable state (offline)")
 
@@ -75,7 +81,8 @@ def main(argv=None):
     values = vars(args)
     fields = (
         "state_dir", "movie_root", "tv_root", "tmdb_api_key",
-        "tmdb_bearer_token", "tvdb_api_key", "tvdb_pin",
+        "tmdb_bearer_token", "tvdb_api_key", "tvdb_pin", "socks5",
+        "socks5_username", "socks5_password",
     )
     config = load_config({field: values.get(field) for field in fields})
     try:
@@ -95,12 +102,16 @@ def main(argv=None):
                 print(f"{name}: {state}")
             return 0
 
+        from harvester_core.transport import transport_from_config
+        transport = transport_from_config(config)
+
         if args.command == "movies" and args.movie_command == "scan-actors":
             from harvester_core.jobs.movie_actor_scan import run
             from harvester_core.providers.tmdb import TMDBClient
             provider = TMDBClient(
                 config.tmdb_api_key, config.tmdb_bearer_token,
                 config.state_path("tmdb_api_cache.json"),
+                transport,
             )
             result = run(
                 config, provider, report, args.limit, args.rebuild,
@@ -109,7 +120,8 @@ def main(argv=None):
         elif args.command == "movies":
             from harvester_core.jobs.movie_actor_fetch import run
             result = run(
-                config, report, args.limit, args.retry_failed, args.overwrite
+                config, report, args.limit, args.retry_failed, args.overwrite,
+                transport=transport,
             )
         elif args.tv_command == "scan":
             from harvester_core.jobs.tv_scan import run
@@ -117,6 +129,7 @@ def main(argv=None):
             provider = TVDBClient(
                 config.tvdb_api_key, config.tvdb_pin,
                 config.state_path("tvdb_api_cache.json"),
+                transport,
             )
             result = run(
                 config, provider, report, args.limit, args.rebuild, args.refresh,
@@ -128,6 +141,7 @@ def main(argv=None):
             result = run(
                 config, report, args.limit, not args.no_overwrite_nfo,
                 not args.no_overwrite_poster, not args.no_retry_failed,
+                transport=transport,
             )
         print(json.dumps(result, indent=2, default=str))
         return 0

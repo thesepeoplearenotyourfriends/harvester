@@ -5,7 +5,11 @@ from pathlib import Path
 from typing import Mapping
 
 APP_DIR = Path(__file__).resolve().parent.parent
-SECRET_NAMES = ("TMDB_API_KEY", "TMDB_BEARER_TOKEN", "TVDB_API_KEY", "TVDB_PIN")
+SECRET_NAMES = (
+    "TMDB_API_KEY", "TMDB_BEARER_TOKEN", "TVDB_API_KEY", "TVDB_PIN",
+    "HARVESTER_SOCKS5", "HARVESTER_SOCKS5_USERNAME",
+    "HARVESTER_SOCKS5_PASSWORD",
+)
 
 
 def parse_key_file(path: Path) -> dict[str, str]:
@@ -36,6 +40,9 @@ class Config:
     tmdb_bearer_token: str | None = None
     tvdb_api_key: str | None = None
     tvdb_pin: str | None = None
+    socks5: str | None = None
+    socks5_username: str | None = None
+    socks5_password: str | None = None
 
     def state_path(self, name: str) -> Path:
         return self.state_dir / name
@@ -71,4 +78,7 @@ def load_config(overrides: Mapping[str, object] | None = None,
         tmdb_bearer_token=choose("tmdb_bearer_token", "TMDB_BEARER_TOKEN"),
         tvdb_api_key=choose("tvdb_api_key", "TVDB_API_KEY"),
         tvdb_pin=choose("tvdb_pin", "TVDB_PIN"),
+        socks5=choose("socks5", "HARVESTER_SOCKS5"),
+        socks5_username=choose("socks5_username", "HARVESTER_SOCKS5_USERNAME"),
+        socks5_password=choose("socks5_password", "HARVESTER_SOCKS5_PASSWORD"),
     )
