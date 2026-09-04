@@ -6,6 +6,8 @@ standard-library-only required path.
 """
 
 import json
+import base64
+import hashlib
 import os
 import subprocess
 import sys
@@ -17,15 +19,77 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent
 HARVESTER_PATH = PROJECT_DIR / "harvester.py"
 PACKAGE_ID = "com.harvester.app"
-CACHE_VERSION = 1
 CACHE_DIR = PROJECT_DIR / ".cache" / "ui"
-SNAPSHOT_PATH = CACHE_DIR / "snapshot.json"
+COLLECTION_CACHE_VERSION = 1
 
 _cache_lock = threading.Lock()
 
 
 class BridgeError(RuntimeError):
     """An invalid request or failed Harvester machine API operation."""
+
+
+def _no_args(suffix):
+    def build(data):
+        if data:
+            raise BridgeError("action does not accept arguments")
+        return suffix
+    return build
+
+
+def _identifier(kind):
+    def build(data):
+        if set(data) != {"identifier"} or not isinstance(data["identifier"], str):
+            raise BridgeError(f"get.{kind} requires one string identifier")
+        value = data["identifier"]
+        if not value or "\0" in value or value.startswith("-"):
+            raise BridgeError("invalid record identifier")
+        return ("get", kind, value)
+    return build
+
+
+def _list(kind):
+    def build(data):
+        allowed = {"status", "missing"}
+        if not set(data) <= allowed or not all(isinstance(v, str) for v in data.values()):
+            raise BridgeError(f"list.{kind}s accepts string status/missing filters only")
+        suffix = ["list", kind + "s", "--brief"]
+        for option in ("status", "missing"):
+            if data.get(option):
+                suffix += ["--" + option, data[option]]
+        return tuple(suffix)
+    return build
+
+
+def _search(data):
+    if set(data) != {"query"} or not isinstance(data["query"], str):
+        raise BridgeError("search requires one string query")
+    return ("search", data["query"], "--limit", "50")
+
+
+def _refresh_actor(data):
+    if set(data) != {"identifier"} or not isinstance(data["identifier"], str):
+        raise BridgeError("refresh.actor.image requires one string identifier")
+    _identifier("actor")({"identifier": data["identifier"]})
+    return ("refresh", "actor", data["identifier"], "--aspect", "image")
+
+
+def _rescan(data):
+    if data:
+        raise BridgeError("rescan does not accept arguments")
+    return ("rescan",)
+
+
+ACTION_REGISTRY = {
+    "providers": _no_args(("providers",)), "inventory": _no_args(("inventory",)),
+    "list.movies": _list("movie"), "list.shows": _list("show"),
+    "list.actors": _list("actor"), "get.movie": _identifier("movie"),
+    "get.show": _identifier("show"), "get.actor": _identifier("actor"),
+    "search": _search, "rescan": _rescan,
+    "refresh.actor.image": _refresh_actor,
+    "actor.install_image": None,
+}
+BRIDGE_ACTIONS = frozenset({"__ping__", *ACTION_REGISTRY})
 
 
 def decode_message(json_text):
@@ -52,27 +116,38 @@ def decode_message(json_text):
 
 def action_argv(action, data):
     """Translate a semantic capability into a fixed Harvester argv shape."""
-    fixed = {
-        "providers": ("providers",),
-        "inventory": ("inventory",),
-        "list.movies": ("list", "movies"),
-        "list.shows": ("list", "shows"),
-        "list.actors": ("list", "actors"),
-    }
-    if action in fixed:
-        if data:
-            raise BridgeError(f"{action} does not accept arguments")
-        suffix = fixed[action]
-    elif action in ("get.movie", "get.show", "get.actor"):
-        if set(data) != {"identifier"} or not isinstance(data["identifier"], str):
-            raise BridgeError(f"{action} requires one string identifier")
-        identifier = data["identifier"]
-        if not identifier or "\0" in identifier or identifier.startswith("-"):
-            raise BridgeError("invalid record identifier")
-        suffix = ("get", action.removeprefix("get."), identifier)
-    else:
+    if action not in ACTION_REGISTRY or ACTION_REGISTRY[action] is None:
         raise BridgeError(f"unknown bridge action: {action}")
+    builder = ACTION_REGISTRY[action]
+    suffix = builder(data)
     return [sys.executable, str(HARVESTER_PATH), "api", *suffix]
+
+
+def install_actor_image(data):
+    """Install one known actor image at its canonical destination."""
+    if set(data) != {"identifier", "data_url"} or not all(isinstance(v, str) for v in data.values()):
+        raise BridgeError("actor.install_image requires identifier and data_url")
+    from harvester_core.api import get_record
+    from harvester_core.config import load_config
+    from harvester_core.images import safe_actor_filename
+    from harvester_core.storage import write_bytes_atomic
+    config = load_config()
+    actor = get_record(config, "actor", data["identifier"])
+    try:
+        header, encoded = data["data_url"].split(",", 1)
+        mime = header[5:].split(";", 1)[0].lower()
+        if ";base64" not in header or len(encoded) > 700_000:
+            raise ValueError
+        source = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError) as error:
+        raise BridgeError("invalid or oversized image data") from error
+    if not source or len(source) > 512_000:
+        raise BridgeError("canonical actor JPEG must be between 1 byte and 512 KB")
+    if mime not in ("image/jpeg", "image/jpg") or not source.startswith(b"\xff\xd8\xff"):
+        raise BridgeError("actor.install_image accepts a canonical JPEG only")
+    destination = config.movie_root / ".actors" / safe_actor_filename(actor["name"])
+    write_bytes_atomic(destination, source)
+    return {"actor": actor["name"], "local_file": str(destination), "bytes": len(source)}
 
 
 def parse_ndjson(output):
@@ -106,6 +181,10 @@ def run_action(action, data):
         if data:
             raise BridgeError("__ping__ does not accept arguments")
         return {"package_id": PACKAGE_ID}
+    if action not in ACTION_REGISTRY:
+        raise BridgeError(f"unknown bridge action: {action}")
+    if action == "actor.install_image":
+        return install_actor_image(data)
     argv = action_argv(action, data)
     completed = subprocess.run(
         argv, cwd=PROJECT_DIR, text=True, capture_output=True, check=False,
@@ -116,20 +195,36 @@ def run_action(action, data):
         raise
     if completed.returncode:
         raise BridgeError(f"Harvester API exited with status {completed.returncode}")
-    cache_result(action, result)
+    if action.startswith("list.") or action == "search":
+        return publish_collection(action, data, result)
     return result
 
 
-def read_snapshot(path=SNAPSHOT_PATH):
-    try:
-        value = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, TypeError, ValueError):
-        return None
-    if not isinstance(value, dict) or value.get("version") != CACHE_VERSION:
-        return None
-    if not isinstance(value.get("views"), dict):
-        return None
-    return value
+def publish_collection(action, data, result):
+    """Publish large queue payloads outside Severin's bounded reply frame."""
+    if not isinstance(result, dict) or not isinstance(result.get("items"), list):
+        raise BridgeError(f"{action} returned an invalid collection")
+    identity = json.dumps(
+        {"version": COLLECTION_CACHE_VERSION, "action": action, "data": data},
+        ensure_ascii=True, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    cache_name = f"collection-v{COLLECTION_CACHE_VERSION}-{hashlib.sha256(identity).hexdigest()[:20]}.json"
+    path = CACHE_DIR / cache_name
+    generation = hashlib.sha256(json.dumps(
+        result["items"], ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")).hexdigest()[:20]
+    payload = {"version": COLLECTION_CACHE_VERSION, "generation": generation,
+               "items": result["items"]}
+    with _cache_lock:
+        _prepare_cache_directory()
+        atomic_write_json(path, payload)
+    return {
+        "asset": f"asset://{PACKAGE_ID}/.cache/ui/{cache_name}",
+        "count": len(result["items"]),
+        "generation": generation,
+        "version": COLLECTION_CACHE_VERSION,
+    }
 
 
 def atomic_write_json(path, value):
@@ -161,18 +256,6 @@ def _prepare_cache_directory():
         current.mkdir(mode=0o700, exist_ok=True)
     if CACHE_DIR.resolve() != current.resolve() or PROJECT_DIR.resolve() not in CACHE_DIR.resolve().parents:
         raise OSError("UI cache path is outside the package")
-
-
-def cache_result(action, result):
-    """Best-effort cache update; an API result never depends on this write."""
-    with _cache_lock:
-        try:
-            _prepare_cache_directory()
-            snapshot = read_snapshot() or {"version": CACHE_VERSION, "views": {}}
-            snapshot["views"][action] = result
-            atomic_write_json(SNAPSHOT_PATH, snapshot)
-        except OSError as error:
-            print(f"Harvester UI cache write skipped: {error}", file=sys.stderr)
 
 
 def make_reply(message_id, *, result=None, error=None):
@@ -207,9 +290,3 @@ def make_bridge_callback(app_box):
         ).start()
         return None
     return bridge
-
-
-BRIDGE_ACTIONS = frozenset({
-    "__ping__", "providers", "inventory", "list.movies", "list.shows",
-    "list.actors", "get.movie", "get.show", "get.actor",
-})

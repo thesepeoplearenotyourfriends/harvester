@@ -12,7 +12,7 @@ python3 harvester.py movies scan [--limit N] [--rebuild] [--refresh]
 python3 harvester.py movies materialize [--limit N] [--overwrite-nfo] [--overwrite-poster]
 python3 harvester.py tv scan [--limit N] [--rebuild] [--refresh] [--retry-ambiguous]
 python3 harvester.py tv materialize [--limit N] [--no-overwrite-nfo] [--no-overwrite-poster]
-python3 harvester.py api providers|get|list|inventory|refresh ...
+python3 harvester.py api providers|get|list|search|inventory|rescan|refresh ...
 ```
 
 Run `python3 harvester.py --help` and nested `--help` for the complete map. Movie and TV `scan` commands resolve identities and freeze metadata/asset URLs. Their `materialize` commands consume those files without constructing or calling a provider client. `status` and API get/list/inventory are local-only and need neither credentials nor network. Every API stdout line is a JSON object; long operations end with exactly one result or error record.
@@ -70,16 +70,30 @@ Syntax check: `python3 -m compileall -q harvester.py harvester-ui.py harvester_u
 
 ## Optional desktop UI
 
-`python3 harvester-ui.py` opens the compact Severin desktop browser when the
-optional `severin` package and a graphical session are available. The Overview,
-Movies, TV, Actors, and Providers sections are read-only views backed by
-`harvester.py api`; the UI host does not read Harvester manifests itself.
+`python3 harvester-ui.py` opens the compact Severin workbench when the optional
+`severin` package and a graphical session are available. Overview and its work
+queues are backed by `harvester.py api`; the UI host does not read Harvester
+manifests itself.
 
-The renderer can read its last derived snapshot at
-`asset://com.harvester.app/.cache/ui/snapshot.json`. Python writes that
-versioned snapshot atomically under `.cache/ui/` after successful API requests.
-The cache is not authoritative and `rm -rf .cache/` is always safe; a missing,
-malformed, or incompatible snapshot produces a normal cold start.
+Queue clients can request compact records with `api list actors|movies|shows
+--brief` and apply `--status` or `--missing` filters. `api search QUERY` searches
+actor, movie, and show identities in durable state without contacting a provider.
+`api rescan` rebuilds all local censuses while retaining provider results for
+identities that still exist. It refuses unavailable or suspiciously empty library
+roots before writing state, retains manifest run history, and prunes frozen actor
+URL work to the actors still in local NFOs. It
+does not construct a provider, download an image, or materialize metadata.
+The desktop UI opens on an inventory overview. Its Work menu and resizable context
+pane open the same queues; Missing Actor Images decodes dropped or selected images
+in the browser, fits them within 185 × 278 pixels, and sends a small canonical JPEG
+for the `.actors` file. Refresh from API invokes the existing targeted actor image
+refresh.
+
+List and search results are written atomically to filter-specific, versioned files
+under `.cache/ui/`. Only an asset descriptor crosses the Severin bridge, and the
+renderer reads the collection through `asset://com.harvester.app/`. The cache is
+not authoritative and `rm -rf .cache/` is always safe; the next request recreates
+any missing collection file.
 
 ## Changelog
 
@@ -94,9 +108,10 @@ repeating commit messages.
   browser for inventory, provider, movie, TV, and actor records.
 * Added a capability-only deferred bridge that invokes the existing
   `harvester.py api` NDJSON interface with fixed argument shapes.
-* Added a versioned, disposable `.cache/ui/` snapshot for cache-first startup.
-  Python owns atomic cache writes and the renderer reads the snapshot through
-  the Harvester package's `asset://` namespace.
+* Added versioned, disposable `.cache/ui/collection-*.json` files for list and
+  search results that would exceed Severin's bridge frame. Python owns atomic
+  writes and the renderer reads collections through the package's `asset://`
+  namespace.
 
 ### 2026-09-04 — Reference parity audit
 

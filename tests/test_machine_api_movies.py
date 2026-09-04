@@ -12,6 +12,7 @@ from harvester_core.jobs.movie_scan import run as scan
 from harvester_core.jobs.movie_scan import discover_movies
 from harvester_core.jobs.tv_materialize import run as materialize_tv
 from harvester_core.providers.profiles import profiles
+from harvester_core.rescan import rescan
 from harvester_core.storage import load_json, save_json_atomic
 
 
@@ -126,6 +127,161 @@ class MachineApiMovieTests(unittest.TestCase):
             result = self.cli(*command)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)["type"], "result")
+
+    def test_brief_lists_and_offline_search_return_compact_typed_records(self):
+        save_json_atomic(self.state / "movie_actor_queue.json", {"actors": {
+            "Aaron Paul": {"status": "ok", "contexts": ["large", "detail"],
+                           "tmdb": {"frozen": True}}
+        }})
+        save_json_atomic(self.state / "movie_manifest_tmdb.json", {"movies": {
+            "/one.nfo": {"status": "unresolved", "title": "Aaron's Movie",
+                          "nfo_path": "/one.nfo", "poster_url": "https://remote"}
+        }})
+        listed = json.loads(self.cli("api", "list", "actors", "--brief", "--missing", "image").stdout)["result"]["items"]
+        self.assertEqual(listed, [{"kind": "actor", "name": "Aaron Paul", "status": "ok", "local_file": False}])
+        self.assertNotIn("contexts", listed[0])
+        with mock.patch("harvester_core.providers.tmdb.TMDBClient", side_effect=AssertionError("network adapter constructed")):
+            result = self.cli("api", "search", "aaron", "--limit", "1")
+        found = json.loads(result.stdout)["result"]["items"]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["kind"], "actor")
+        self.assertLessEqual(len(found), 1)
+
+    def test_failed_movie_queue_matches_combined_inventory_count(self):
+        save_json_atomic(self.state / "movie_manifest_tmdb.json", {"movies": {
+            "/error.nfo": {"status": "error", "nfo_path": "/error.nfo"},
+            "/failed.nfo": {"status": "failed", "nfo_path": "/failed.nfo"},
+            "/ok.nfo": {"status": "ok", "nfo_path": "/ok.nfo"},
+        }})
+        inventory = json.loads(self.cli("api", "inventory").stdout)["result"]
+        queue = json.loads(self.cli(
+            "api", "list", "movies", "--brief", "--status", "failed",
+        ).stdout)["result"]["items"]
+        self.assertEqual(inventory["movies"]["failed"], 2)
+        self.assertEqual(len(queue), inventory["movies"]["failed"])
+        self.assertEqual({item["status"] for item in queue}, {"error", "failed"})
+
+    def test_offline_rescan_rebuilds_censuses_and_preserves_known_provider_state(self):
+        movie_nfo = self.movies / "Example (2020)" / "movie.nfo"
+        movie_nfo.write_text("""<movie><title>Example Changed</title><year>2020</year>
+            <actor><name>Known Actor</name><role>Lead</role></actor></movie>""")
+        (self.movies / ".actors").mkdir()
+        (self.movies / ".actors" / "Known_Actor.jpg").write_bytes(b"jpeg")
+        show = Path(self.temp.name) / "tv" / "Known Show (2021)"
+        show.mkdir(parents=True)
+        save_json_atomic(self.state / "movie_actor_queue.json", {"_meta": {
+            "created": "actor-created", "image_size": "w342",
+            "max_images_per_actor": 3, "last_run": {"processed": 2},
+        }, "actors": {
+            "Known Actor": {"status": "ok", "tmdb_person_id": 42,
+                            "urls": ["https://known"], "contexts": []},
+            "Removed Actor": {"status": "ok", "urls": ["https://removed"], "contexts": []},
+        }})
+        save_json_atomic(self.state / "actor_thumb_urls_tmdb.json", {
+            "Known Actor": ["https://known"], "Removed Actor": ["https://removed"],
+        })
+        target = str(movie_nfo.resolve())
+        save_json_atomic(self.state / "movie_manifest_tmdb.json", {"_meta": {
+            "created": "movie-created", "last_materialize": {"written": 4},
+        }, "movies": {
+            target: {"status": "ok", "tmdb_id": 7, "nfo_path": target},
+            "/removed.nfo": {"status": "error", "nfo_path": "/removed.nfo"},
+        }})
+        save_json_atomic(self.state / "tv_show_urls_tvdb.json", {"_meta": {
+            "created": "tv-created", "last_run": {"matched": 8},
+            "last_materialize_run": {"written": 6},
+        }, "shows": {
+            str(show.resolve()): {"status": "matched", "tvdb_id": 9},
+            "/removed-show": {"status": "not_found"},
+        }})
+
+        with mock.patch("urllib.request.urlopen", side_effect=AssertionError("network used")):
+            result = rescan(self.config)
+
+        actors = load_json(self.state / "movie_actor_queue.json")["actors"]
+        movies = load_json(self.state / "movie_manifest_tmdb.json")["movies"]
+        shows = load_json(self.state / "tv_show_urls_tvdb.json")["shows"]
+        actor_state = load_json(self.state / "movie_actor_queue.json")
+        movie_state = load_json(self.state / "movie_manifest_tmdb.json")
+        show_state = load_json(self.state / "tv_show_urls_tvdb.json")
+        actor_urls = load_json(self.state / "actor_thumb_urls_tmdb.json")
+        self.assertEqual(set(actors), {"Known Actor"})
+        self.assertEqual(actors["Known Actor"]["tmdb_person_id"], 42)
+        self.assertEqual(actors["Known Actor"]["contexts"][0]["title"], "Example Changed")
+        self.assertEqual(result["inventory"]["actors"]["local"], 1)
+        self.assertEqual(actor_state["_meta"]["created"], "actor-created")
+        self.assertEqual(actor_state["_meta"]["image_size"], "w342")
+        self.assertEqual(actor_state["_meta"]["max_images_per_actor"], 3)
+        self.assertEqual(actor_state["_meta"]["last_run"], {"processed": 2})
+        self.assertEqual(actor_urls, {"Known Actor": ["https://known"]})
+        self.assertEqual(set(movies), {target})
+        self.assertEqual(movies[target]["tmdb_id"], 7)
+        self.assertEqual(movies[target]["title"], "Example Changed")
+        self.assertEqual(movie_state["_meta"]["created"], "movie-created")
+        self.assertEqual(movie_state["_meta"]["last_materialize"], {"written": 4})
+        self.assertEqual(set(shows), {str(show.resolve())})
+        self.assertEqual(shows[str(show.resolve())]["tvdb_id"], 9)
+        self.assertEqual(show_state["_meta"]["created"], "tv-created")
+        self.assertEqual(show_state["_meta"]["last_run"], {"matched": 8})
+        self.assertEqual(show_state["_meta"]["last_materialize_run"], {"written": 6})
+
+    def test_rescan_missing_roots_leave_existing_state_unchanged(self):
+        files = {
+            "movie_actor_queue.json": {"_meta": {"history": "actor"}, "actors": {"Old": {}}},
+            "actor_thumb_urls_tmdb.json": {"Old": ["https://old"]},
+            "movie_manifest_tmdb.json": {"_meta": {"history": "movie"}, "movies": {"old": {}}},
+            "tv_show_urls_tvdb.json": {"_meta": {"history": "tv"}, "shows": {"old": {}}},
+        }
+        for name, value in files.items():
+            save_json_atomic(self.state / name, value)
+        before = {name: (self.state / name).read_bytes() for name in files}
+
+        missing_movie = load_config({"state_dir": self.state,
+                                     "movie_root": Path(self.temp.name) / "missing-movies",
+                                     "tv_root": Path(self.temp.name) / "tv"},
+                                    environ={}, app_dir=ROOT)
+        with self.assertRaisesRegex(FileNotFoundError, "MOVIE_ROOT"):
+            rescan(missing_movie)
+        self.assertEqual(before, {name: (self.state / name).read_bytes() for name in files})
+
+        missing_tv = load_config({"state_dir": self.state, "movie_root": self.movies,
+                                  "tv_root": Path(self.temp.name) / "missing-tv"},
+                                 environ={}, app_dir=ROOT)
+        with self.assertRaisesRegex(FileNotFoundError, "TV_ROOT"):
+            rescan(missing_tv)
+        self.assertEqual(before, {name: (self.state / name).read_bytes() for name in files})
+
+    def test_api_rescan_is_whole_library_only(self):
+        (Path(self.temp.name) / "tv").mkdir(exist_ok=True)
+        result = self.cli("api", "rescan")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        payload = json.loads(result.stdout)["result"]
+        self.assertEqual(set(payload["rescanned"]), {"actors", "movies", "shows"})
+        self.assertTrue(load_json(self.state / "movie_manifest_tmdb.json")["_meta"]["created"])
+        rejected = self.cli("api", "rescan", "actors")
+        self.assertNotEqual(rejected.returncode, 0)
+
+    def test_rescan_readable_empty_roots_leave_all_state_unchanged(self):
+        empty_movies = Path(self.temp.name) / "empty-movies"
+        empty_tv = Path(self.temp.name) / "empty-tv"
+        empty_movies.mkdir()
+        empty_tv.mkdir()
+        files = {
+            "movie_actor_queue.json": {"actors": {"Existing Actor": {}}},
+            "actor_thumb_urls_tmdb.json": {"Existing Actor": ["https://old"]},
+            "movie_manifest_tmdb.json": {"movies": {"existing": {}}},
+            "tv_show_urls_tvdb.json": {"shows": {"existing": {}}},
+        }
+        for name, value in files.items():
+            save_json_atomic(self.state / name, value)
+        before = {name: (self.state / name).read_bytes() for name in files}
+        config = load_config({"state_dir": self.state, "movie_root": empty_movies,
+                              "tv_root": empty_tv}, environ={}, app_dir=ROOT)
+
+        with self.assertRaisesRegex(RuntimeError, "empty discovery"):
+            rescan(config)
+
+        self.assertEqual(before, {name: (self.state / name).read_bytes() for name in files})
 
     def test_tv_receipt_uses_materializer_filename(self):
         show = Path(self.temp.name) / "tv" / "Example"

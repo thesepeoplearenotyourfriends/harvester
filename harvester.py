@@ -94,8 +94,15 @@ def parser():
         item.set_defaults(kind=kind)
         item.add_argument("--status")
         item.add_argument("--limit", type=int)
-        if kind in ("movie", "show"):
+        item.add_argument("--brief", action="store_true")
+        if kind == "actor":
+            item.add_argument("--missing", choices=("image",))
+        else:
             item.add_argument("--missing", choices=("nfo", "poster"))
+    search_parser = api.add_parser("search", help="search durable records offline")
+    search_parser.add_argument("query")
+    search_parser.add_argument("--limit", type=int, default=50)
+    api.add_parser("rescan", help="rebuild all local censuses offline")
     api.add_parser("inventory", help="summarize durable state")
     refresh = api.add_parser("refresh", help="refresh explicitly named records").add_subparsers(dest="kind", required=True)
     aspects = {"actor": ("identity", "image", "all"), "movie": ("identity", "metadata", "nfo", "poster", "actors", "all"), "show": ("identity", "metadata", "nfo", "poster", "actors", "all")}
@@ -246,12 +253,17 @@ def api_main(args, config):
         if args.api_command == "providers":
             from harvester_core.providers.profiles import profiles
             terminal({"providers": profiles(config)})
-        elif args.api_command in ("get", "list", "inventory"):
-            from harvester_core.api import get_record, inventory, list_records
+        elif args.api_command in ("get", "list", "inventory", "search", "rescan"):
+            from harvester_core.api import get_record, inventory, list_records, search
             if args.api_command == "get":
                 terminal(get_record(config, args.kind, args.identifier))
             elif args.api_command == "list":
-                terminal({"items": list_records(config, args.kind, args.status, args.limit, getattr(args, "missing", None))})
+                terminal({"items": list_records(config, args.kind, args.status, args.limit, getattr(args, "missing", None), args.brief)})
+            elif args.api_command == "search":
+                terminal({"items": search(config, args.query, args.limit)})
+            elif args.api_command == "rescan":
+                from harvester_core.rescan import rescan
+                terminal(rescan(config))
             else:
                 terminal(inventory(config))
         else:
