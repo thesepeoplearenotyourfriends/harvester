@@ -406,14 +406,51 @@
           showError("Image is larger than 8 MB");
           return;
         }
-        const reader = new FileReader();
-        reader.onload = () =>
-          repairActor("actor.install_image", {
+        try {
+          const dataUrl = await normalizeActorImage(file);
+          await repairActor("actor.install_image", {
             identifier: name,
-            data_url: reader.result,
+            data_url: dataUrl,
           });
-        reader.onerror = () => showError("Could not read image");
-        reader.readAsDataURL(file);
+        } catch (error) {
+          showError(error.message || "Could not prepare image");
+        }
+      }
+      function normalizeActorImage(file) {
+        return new Promise((resolve, reject) => {
+          const sourceUrl = URL.createObjectURL(file);
+          const image = new Image();
+          image.onload = () => {
+            URL.revokeObjectURL(sourceUrl);
+            const scale = Math.min(1, 185 / image.width, 278 / image.height);
+            const canvas = document.createElement("canvas");
+            canvas.width = Math.max(1, Math.round(image.width * scale));
+            canvas.height = Math.max(1, Math.round(image.height * scale));
+            canvas
+              .getContext("2d")
+              .drawImage(image, 0, 0, canvas.width, canvas.height);
+            canvas.toBlob(
+              (blob) => {
+                if (!blob) {
+                  reject(Error("Browser could not encode the image as JPEG"));
+                  return;
+                }
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = () =>
+                  reject(Error("Could not read normalized JPEG"));
+                reader.readAsDataURL(blob);
+              },
+              "image/jpeg",
+              0.75,
+            );
+          };
+          image.onerror = () => {
+            URL.revokeObjectURL(sourceUrl);
+            reject(Error("The selected file is not a readable image"));
+          };
+          image.src = sourceUrl;
+        });
       }
       async function repairActor(action, data) {
         const selected = document.querySelector("[data-row].selected");
@@ -428,6 +465,8 @@
           }
         } catch (e) {
           if (e.name !== "AbortError") showError(e.message);
+        } finally {
+          document.querySelector("#workspace").classList.remove("busy");
         }
       }
       function showError(message) {

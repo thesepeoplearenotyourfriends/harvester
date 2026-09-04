@@ -19,9 +19,7 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent
 HARVESTER_PATH = PROJECT_DIR / "harvester.py"
 PACKAGE_ID = "com.harvester.app"
-CACHE_VERSION = 1
 CACHE_DIR = PROJECT_DIR / ".cache" / "ui"
-SNAPSHOT_PATH = CACHE_DIR / "snapshot.json"
 COLLECTION_CACHE_VERSION = 1
 
 _cache_lock = threading.Lock()
@@ -124,27 +122,25 @@ def install_actor_image(data):
         raise BridgeError("actor.install_image requires identifier and data_url")
     from harvester_core.api import get_record
     from harvester_core.config import load_config
-    from harvester_core.images import normalize_actor_image, safe_actor_filename
+    from harvester_core.images import safe_actor_filename
     from harvester_core.storage import write_bytes_atomic
     config = load_config()
     actor = get_record(config, "actor", data["identifier"])
     try:
         header, encoded = data["data_url"].split(",", 1)
         mime = header[5:].split(";", 1)[0].lower()
-        if ";base64" not in header or len(encoded) > 12_000_000:
+        if ";base64" not in header or len(encoded) > 700_000:
             raise ValueError
         source = base64.b64decode(encoded, validate=True)
     except (ValueError, TypeError) as error:
         raise BridgeError("invalid or oversized image data") from error
-    if not source or len(source) > 8_000_000:
-        raise BridgeError("image must be between 1 byte and 8 MB")
-    is_jpeg = source.startswith(b"\xff\xd8\xff")
-    output = source if is_jpeg else normalize_actor_image(source)
-    if not output.startswith(b"\xff\xd8\xff"):
-        raise BridgeError(f"{mime or 'image'} needs Pillow conversion to canonical JPEG")
+    if not source or len(source) > 512_000:
+        raise BridgeError("canonical actor JPEG must be between 1 byte and 512 KB")
+    if mime not in ("image/jpeg", "image/jpg") or not source.startswith(b"\xff\xd8\xff"):
+        raise BridgeError("actor.install_image accepts a canonical JPEG only")
     destination = config.movie_root / ".actors" / safe_actor_filename(actor["name"])
-    write_bytes_atomic(destination, output)
-    return {"actor": actor["name"], "local_file": str(destination), "bytes": len(output)}
+    write_bytes_atomic(destination, source)
+    return {"actor": actor["name"], "local_file": str(destination), "bytes": len(source)}
 
 
 def parse_ndjson(output):
@@ -181,9 +177,7 @@ def run_action(action, data):
     if action not in ACTION_REGISTRY:
         raise BridgeError(f"unknown bridge action: {action}")
     if action == "actor.install_image":
-        result = install_actor_image(data)
-        cache_result(action, result)
-        return result
+        return install_actor_image(data)
     argv = action_argv(action, data)
     completed = subprocess.run(
         argv, cwd=PROJECT_DIR, text=True, capture_output=True, check=False,
@@ -196,7 +190,6 @@ def run_action(action, data):
         raise BridgeError(f"Harvester API exited with status {completed.returncode}")
     if action.startswith("list.") or action == "search":
         return publish_collection(action, data, result)
-    cache_result(action, result)
     return result
 
 
@@ -225,18 +218,6 @@ def publish_collection(action, data, result):
         "generation": generation,
         "version": COLLECTION_CACHE_VERSION,
     }
-
-
-def read_snapshot(path=SNAPSHOT_PATH):
-    try:
-        value = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, TypeError, ValueError):
-        return None
-    if not isinstance(value, dict) or value.get("version") != CACHE_VERSION:
-        return None
-    if not isinstance(value.get("views"), dict):
-        return None
-    return value
 
 
 def atomic_write_json(path, value):
@@ -268,18 +249,6 @@ def _prepare_cache_directory():
         current.mkdir(mode=0o700, exist_ok=True)
     if CACHE_DIR.resolve() != current.resolve() or PROJECT_DIR.resolve() not in CACHE_DIR.resolve().parents:
         raise OSError("UI cache path is outside the package")
-
-
-def cache_result(action, result):
-    """Best-effort cache update; an API result never depends on this write."""
-    with _cache_lock:
-        try:
-            _prepare_cache_directory()
-            snapshot = read_snapshot() or {"version": CACHE_VERSION, "views": {}}
-            snapshot["views"][action] = result
-            atomic_write_json(SNAPSHOT_PATH, snapshot)
-        except OSError as error:
-            print(f"Harvester UI cache write skipped: {error}", file=sys.stderr)
 
 
 def make_reply(message_id, *, result=None, error=None):

@@ -79,9 +79,10 @@ Queue clients can request compact records with `api list actors|movies|shows
 --brief` and apply `--status` or `--missing` filters. `api search QUERY` searches
 actor, movie, and show identities in durable state without contacting a provider.
 The desktop UI opens on an inventory overview. Its Work menu and resizable context
-pane open the same queues; Missing Actor Images accepts a JPEG by drop or file
-picker (other formats require optional Pillow) and writes the canonical `.actors`
-file. Refresh from API invokes the existing targeted actor image refresh.
+pane open the same queues; Missing Actor Images decodes dropped or selected images
+in the browser, fits them within 185 × 278 pixels, and sends a small canonical JPEG
+for the `.actors` file. Refresh from API invokes the existing targeted actor image
+refresh.
 
 List and search results are written atomically to filter-specific, versioned files
 under `.cache/ui/`. Only an asset descriptor crosses the Severin bridge, and the
@@ -102,9 +103,10 @@ repeating commit messages.
   browser for inventory, provider, movie, TV, and actor records.
 * Added a capability-only deferred bridge that invokes the existing
   `harvester.py api` NDJSON interface with fixed argument shapes.
-* Added a versioned, disposable `.cache/ui/` snapshot for cache-first startup.
-  Python owns atomic cache writes and the renderer reads the snapshot through
-  the Harvester package's `asset://` namespace.
+* Added versioned, disposable `.cache/ui/collection-*.json` files for list and
+  search results that would exceed Severin's bridge frame. Python owns atomic
+  writes and the renderer reads collections through the package's `asset://`
+  namespace.
 
 ### 2026-09-04 — Reference parity audit
 
