@@ -8,9 +8,6 @@ from ..events import emit
 from ..storage import load_json, save_json_atomic
 from .movie_actor_scan import clean_year, resolve_movie_tmdb_id
 
-VIDEO_SUFFIXES = {".mkv", ".mp4", ".avi", ".m4v", ".mov"}
-
-
 def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -40,11 +37,7 @@ def discover_movies(root):
         dirs[:] = [name for name in dirs if not name.startswith(".")]
         base = Path(directory)
         nfos = sorted(base / name for name in files if name.lower().endswith(".nfo"))
-        videos = sorted(base / name for name in files if Path(name).suffix.lower() in VIDEO_SUFFIXES)
-        targets = nfos
-        if not nfos and len(videos) == 1:
-            targets = [videos[0].with_suffix(".nfo")]
-        for nfo_path in targets:
+        for nfo_path in nfos:
             title = nfo_path.stem
             year = clean_year(base.name) or clean_year(title)
             imdb_id = tmdb_id = None
@@ -57,12 +50,20 @@ def discover_movies(root):
                     tmdb_id = _id(node, "tmdb") or _text(node, "tmdbid")
                 except (ET.ParseError, OSError):
                     pass
-            poster = nfo_path.with_name(nfo_path.stem + "-poster.jpg")
-            if nfo_path.name.casefold() in ("movie.nfo", "video.nfo"):
-                poster = base / "poster.jpg"
+            # Existing paths are receipts. There is no repository-wide movie
+            # poster naming rule, so only retain a unique existing poster and
+            # leave a missing/ambiguous target unresolved for later policy.
+            posters = sorted(
+                path for path in base.iterdir()
+                if path.is_file() and "poster" in path.stem.casefold()
+                and path.suffix.casefold() in (".jpg", ".jpeg", ".png")
+            )
+            poster = posters[0].resolve() if len(posters) == 1 else None
             found[str(nfo_path.resolve())] = {
                 "kind": "movie", "local_target": str(nfo_path.resolve()),
-                "nfo_path": str(nfo_path.resolve()), "poster_path": str(poster.resolve()),
+                "nfo_path": str(nfo_path.resolve()),
+                "poster_path": str(poster) if poster else None,
+                "poster_target_status": "resolved" if poster else "unresolved",
                 "title": title, "year": year, "imdb_id": imdb_id,
                 "local_tmdb_id": int(tmdb_id) if str(tmdb_id or "").isdigit() else None,
                 "status": "pending", "tries": 0, "tmdb_id": None, "match": None,
@@ -98,7 +99,15 @@ def run(config, provider, reporter=None, limit=None, rebuild=False, refresh=Fals
         manifest = {"_meta": {"version": 1, "created": now_iso(), "source": "TMDB"}, "movies": {}}
     discovered = discover_movies(config.movie_root)
     for key, record in discovered.items():
-        manifest["movies"].setdefault(key, record)
+        existing = manifest["movies"].get(key)
+        if existing is None:
+            manifest["movies"][key] = record
+            continue
+        # Earlier manifests may contain a derived, nonexistent poster path.
+        # Re-evaluate only this local-target receipt while retaining frozen
+        # provider metadata and retry history.
+        existing["poster_path"] = record["poster_path"]
+        existing["poster_target_status"] = record["poster_target_status"]
     selected = set(targets or [])
     processed = 0
     try:
@@ -112,7 +121,8 @@ def run(config, provider, reporter=None, limit=None, rebuild=False, refresh=Fals
                 continue
             if not refresh and record.get("status") == "ok":
                 continue
-            if not refresh and Path(record["nfo_path"]).exists() and (Path(record["poster_path"]).exists() or Path(record["poster_path"]).with_suffix(".png").exists()):
+            poster_path = Path(record["poster_path"]) if record.get("poster_path") else None
+            if not refresh and Path(record["nfo_path"]).exists() and poster_path and poster_path.exists():
                 continue
             if limit is not None and processed >= limit:
                 break

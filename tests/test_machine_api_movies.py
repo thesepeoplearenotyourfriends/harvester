@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from harvester_core.config import load_config
 from harvester_core.jobs.movie_materialize import run as materialize
@@ -27,6 +28,28 @@ class MovieProvider:
         if path == "/movie/7/credits":
             return {"cast": [{"name": "Actor", "character": "Role", "order": 0}], "crew": [{"name": "Director", "job": "Director"}]}
         raise AssertionError(path)
+
+
+class Response:
+    headers = {"Content-Type": "image/jpeg"}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self):
+        return b"\xff\xd8poster"
+
+
+class RecordingTransport:
+    def __init__(self):
+        self.user_agent = None
+
+    def open(self, request, timeout=None):
+        self.user_agent = request.get_header("User-agent")
+        return Response()
 
 
 class MachineApiMovieTests(unittest.TestCase):
@@ -75,6 +98,14 @@ class MachineApiMovieTests(unittest.TestCase):
         self.assertEqual(record["tmdb_id"], 7)
         self.assertEqual(record["poster_url"], "https://images/w780/poster.jpg")
         self.assertNotIn("poster_url", record["nfo"])
+        self.assertIsNone(record["poster_path"])
+        self.assertEqual(record["poster_target_status"], "unresolved")
+
+        # Materialization receives an explicit local poster target; discovery
+        # does not invent one for an arbitrary NFO.
+        record["poster_path"] = str(Path(record["nfo_path"]).parent / "chosen-poster.jpg")
+        record["poster_target_status"] = "resolved"
+        save_json_atomic(self.state / "movie_manifest_tmdb.json", manifest)
 
         old = Path(record["nfo_path"]).read_bytes()
         materialize(self.config, downloader=lambda url: (b"\xff\xd8poster", "image/jpeg"))
@@ -92,6 +123,54 @@ class MachineApiMovieTests(unittest.TestCase):
             result = self.cli(*command)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)["type"], "result")
+
+    def test_tv_receipt_uses_materializer_filename(self):
+        show = Path(self.temp.name) / "tv" / "Example"
+        show.mkdir(parents=True)
+        (show / "show.nfo").write_text("<tvshow/>")
+        save_json_atomic(self.state / "tv_show_urls_tvdb.json", {
+            "shows": {str(show): {"status": "matched"}}
+        })
+        result = self.cli("api", "get", "show", str(show))
+        self.assertTrue(json.loads(result.stdout)["result"]["local_receipts"]["nfo"])
+
+    def test_actor_image_refresh_does_not_construct_tmdb_client(self):
+        import harvester
+        args = harvester.parser().parse_args([
+            "--state-dir", str(self.state), "--movie-root", str(self.movies),
+            "api", "refresh", "actor", "Actor", "--aspect", "image",
+        ])
+        with mock.patch("harvester_core.jobs.movie_actor_fetch.run", return_value={"processed": 1}) as fetch:
+            with mock.patch("harvester_core.providers.tmdb.TMDBClient", side_effect=AssertionError("TMDB used")):
+                with mock.patch("sys.stdout"):
+                    self.assertEqual(harvester.api_main(args, self.config), 0)
+        fetch.assert_called_once()
+
+    def test_movie_download_identity_and_stale_cleanup_failure(self):
+        target = self.movies / "Example (2020)" / "selected.jpg"
+        stale = target.with_suffix(".png")
+        stale.write_bytes(b"old")
+        save_json_atomic(self.state / "movie_manifest_tmdb.json", {"movies": {
+            "movie": {"status": "ok", "nfo_path": str(target.with_suffix(".nfo")),
+                      "poster_path": str(target), "poster_url": "https://images/poster",
+                      "nfo": {"title": "Example"}}
+        }})
+        transport = RecordingTransport()
+        original_unlink = Path.unlink
+
+        def fail_stale(path, *args, **kwargs):
+            if path == stale:
+                raise PermissionError("busy")
+            return original_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", fail_stale):
+            materialize(self.config, overwrite_poster=True, write_nfo=False,
+                        transport=transport)
+        record = load_json(self.state / "movie_manifest_tmdb.json")["movies"]["movie"]
+        self.assertEqual(transport.user_agent, "local-tmdb-movie-materializer/1.0")
+        self.assertEqual(record["materialize"]["poster"]["status"], "ok")
+        self.assertIn("cleanup_error", record["materialize"]["poster"])
+        self.assertEqual(target.read_bytes(), b"\xff\xd8poster")
 
 
 if __name__ == "__main__":

@@ -258,10 +258,12 @@ def api_main(args, config):
             from harvester_core.transport import transport_from_config
             transport = transport_from_config(config)
             if args.kind == "actor":
-                from harvester_core.jobs.movie_actor_scan import run
-                from harvester_core.providers.tmdb import TMDBClient
-                provider = TMDBClient(config.tmdb_api_key, config.tmdb_bearer_token, config.state_path("tmdb_api_cache.json"), transport)
-                result = run(config, provider, api_report, refresh=True, retry_failed=True, targets=args.identifiers)
+                result = {"processed": 0}
+                if args.aspect in ("identity", "all"):
+                    from harvester_core.jobs.movie_actor_scan import run
+                    from harvester_core.providers.tmdb import TMDBClient
+                    provider = TMDBClient(config.tmdb_api_key, config.tmdb_bearer_token, config.state_path("tmdb_api_cache.json"), transport)
+                    result = run(config, provider, api_report, refresh=True, retry_failed=True, targets=args.identifiers)
                 if args.aspect in ("image", "all"):
                     from harvester_core.jobs.movie_actor_fetch import run as fetch
                     result["materialize"] = fetch(config, api_report, retry_failed=True, overwrite=True, transport=transport, targets=args.identifiers)

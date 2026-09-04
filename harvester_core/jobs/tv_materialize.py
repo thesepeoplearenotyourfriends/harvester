@@ -4,10 +4,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import time
-import urllib.error
-import urllib.request
 import xml.etree.ElementTree as ET
 
+from ..downloads import download_image
 from ..events import emit
 from ..images import normalize_actor_image, safe_actor_filename
 from ..storage import load_json, save_json_atomic, write_bytes_atomic
@@ -185,48 +184,12 @@ class MaterializeOptions:
 def download_bytes(url, options=None, reporter=None, sleep=None, transport=None):
     """Download one image with bounded retries for transient failures."""
     options = options or MaterializeOptions()
-    sleep = sleep or time.sleep
-    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
-        raise ValueError(f"not an HTTP image URL: {url!r}")
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "image/jpeg,image/png,image/webp,image/*,*/*",
-        },
+    return download_image(
+        url, user_agent=USER_AGENT,
+        request_attempts=options.request_attempts,
+        request_timeout=options.request_timeout,
+        reporter=reporter, sleep=sleep, transport=transport,
     )
-    last_error = None
-    for attempt in range(options.request_attempts):
-        try:
-            opener = transport.open if transport else urllib.request.urlopen
-            with opener(request, timeout=options.request_timeout) as response:
-                content_type = response.headers.get("Content-Type", "")
-                data = response.read()
-            if not data:
-                raise RuntimeError("downloaded zero bytes")
-            return data, content_type
-        except urllib.error.HTTPError as error:
-            if error.code == 404:
-                raise RuntimeError("HTTP 404") from None
-            last_error = error
-            retryable = error.code == 429 or 500 <= error.code <= 599
-            if not retryable or attempt == options.request_attempts - 1:
-                break
-            retry_after = error.headers.get("Retry-After")
-            delay = (
-                float(retry_after)
-                if retry_after and retry_after.replace(".", "", 1).isdigit()
-                else min(2 ** attempt, 20)
-            )
-        except (urllib.error.URLError, TimeoutError, OSError) as error:
-            last_error = error
-            if attempt == options.request_attempts - 1:
-                break
-            delay = min(2 ** attempt, 20)
-        emit(reporter, "retry", "image request retry", attempt=attempt + 1, delay=delay)
-        sleep(delay)
-    error_name = type(last_error).__name__ if last_error else "unknown error"
-    raise RuntimeError(f"image request failed after retries: {error_name}")
 
 
 def image_extension(data, content_type):

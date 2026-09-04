@@ -4,9 +4,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
+from ..downloads import download_image
 from ..events import emit
 from ..storage import load_json, save_json_atomic, write_bytes_atomic
-from .tv_materialize import download_bytes, image_extension
+from .tv_materialize import image_extension
+
+USER_AGENT = "local-tmdb-movie-materializer/1.0"
 
 
 def now_iso():
@@ -70,8 +73,18 @@ def run(config, reporter=None, limit=None, overwrite_nfo=False, overwrite_poster
                     data = render_movie_nfo(record.get("nfo"))
                     write_bytes_atomic(nfo_path, data)
                     state["nfo"] = {"status": "ok", "file": str(nfo_path), "bytes": len(data), "updated": now_iso()}
-            poster = Path(record["poster_path"])
-            existing = poster if poster.exists() else poster.with_suffix(".png")
+            poster_value = record.get("poster_path")
+            poster = Path(poster_value) if poster_value else None
+            if write_poster and poster is None:
+                state["poster"] = {"status": "unresolved_target", "updated": now_iso()}
+                processed += 1
+                if write_nfo:
+                    counts[state["nfo"]["status"]] += 1
+                save_json_atomic(path, manifest)
+                emit(reporter, "progress", key, status="unresolved_target",
+                     target_kind="movie", id=key)
+                continue
+            existing = poster if poster and poster.exists() else poster.with_suffix(".png") if poster else None
             if write_poster:
                 if existing.exists() and not overwrite_poster:
                     state["poster"] = {"status": "exists", "file": str(existing), "bytes": existing.stat().st_size, "updated": now_iso()}
@@ -79,13 +92,22 @@ def run(config, reporter=None, limit=None, overwrite_nfo=False, overwrite_poster
                     state["poster"] = {"status": "no_url", "updated": now_iso()}
                 else:
                     try:
-                        fetched = downloader(record["poster_url"]) if downloader else download_bytes(record["poster_url"], transport=transport)
+                        fetched = downloader(record["poster_url"]) if downloader else download_image(
+                            record["poster_url"], user_agent=USER_AGENT,
+                            transport=transport,
+                        )
                         data, content_type = fetched if isinstance(fetched, tuple) else (fetched, "")
                         output = poster.with_suffix(image_extension(data, content_type))
                         write_bytes_atomic(output, data)
-                        if existing.exists() and existing != output:
-                            existing.unlink()
+                        cleanup_error = None
+                        if existing and existing.exists() and existing != output:
+                            try:
+                                existing.unlink()
+                            except OSError as error:
+                                cleanup_error = f"{type(error).__name__}: {error}"
                         state["poster"] = {"status": "ok", "file": str(output), "bytes": len(data), "content_type": content_type, "source_url": record["poster_url"], "updated": now_iso()}
+                        if cleanup_error:
+                            state["poster"]["cleanup_error"] = cleanup_error
                     except Exception as error:
                         state["poster"] = {"status": "error", "error": f"{type(error).__name__}: {error}", "source_url": record["poster_url"], "updated": now_iso()}
             processed += 1
