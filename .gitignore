@@ -1,0 +1,15 @@
+# Local credentials / overrides
+keys_and_tokens.txt
+.env
+
+# Python runtime debris
+__pycache__/
+*.py[cod]
+
+# Harvester work state and provider caches
+actor_thumb_urls_tmdb.json
+actor_thumb_work_queue.json
+actor_photo_download_status.json
+tmdb_api_cache.json
+tvdb_api_cache.json
+tv_show_urls_tvdb.json
