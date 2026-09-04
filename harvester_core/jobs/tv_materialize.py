@@ -427,6 +427,7 @@ def run(
     transport=None,
     request_timeout=30,
     save_every_changes=25,
+    targets=None,
 ):
     """Materialize a frozen manifest and return a compact structured result."""
     options = MaterializeOptions(
@@ -450,6 +451,7 @@ def run(
     matched = [
         (path, record) for path, record in manifest["shows"].items()
         if record.get("status") == "matched" and record.get("nfo")
+        and (not targets or path in set(targets) or str(record.get("tvdb_id")) in set(targets))
     ]
     matched.sort(key=lambda pair: (pair[1].get("folder_name") or pair[0]).casefold())
     counters = Counter()
