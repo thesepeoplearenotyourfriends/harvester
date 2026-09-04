@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
@@ -31,7 +32,7 @@ from harvester_core.jobs.tv_scan import build_nfo_payload, resolve_tvdb_series
 from harvester_core.providers.tmdb import TMDBClient
 from harvester_core.providers.tvdb import TVDBClient
 from harvester_core.storage import load_json, save_json_atomic
-from harvester_core.transport import parse_socks5, socks5_connect
+from harvester_core.transport import Transport, parse_socks5
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -82,23 +83,38 @@ class HarvesterTests(unittest.TestCase):
             parse_socks5("user:DO_NOT_PRINT@missing-port")
         self.assertNotIn("DO_NOT_PRINT", str(caught.exception))
 
-    def test_socks5_sends_destination_hostname_to_proxy(self):
+    def test_socks_transport_opens_http_url_with_remote_hostname(self):
         ready = threading.Event()
         destination = []
+        requests = []
 
         def proxy(listener):
+            def receive_exact(connection, length):
+                data = b""
+                while len(data) < length:
+                    data += connection.recv(length - len(data))
+                return data
+
             ready.set()
             connection, _ = listener.accept()
             with connection:
-                greeting = connection.recv(3)
+                greeting = receive_exact(connection, 3)
                 self.assertEqual(greeting, b"\x05\x01\x00")
                 connection.sendall(b"\x05\x00")
-                header = connection.recv(5)
+                header = receive_exact(connection, 5)
                 self.assertEqual(header[:4], b"\x05\x01\x00\x03")
-                name = connection.recv(header[4]).decode("ascii")
-                port = int.from_bytes(connection.recv(2), "big")
+                name = receive_exact(connection, header[4]).decode("ascii")
+                port = int.from_bytes(receive_exact(connection, 2), "big")
                 destination.append((name, port))
                 connection.sendall(b"\x05\x00\x00\x01\x7f\x00\x00\x01\x00\x00")
+                request = b""
+                while b"\r\n\r\n" not in request:
+                    request += connection.recv(4096)
+                requests.append(request)
+                connection.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n"
+                    b"Content-Type: text/plain\r\nConnection: close\r\n\r\npong"
+                )
 
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
@@ -107,11 +123,14 @@ class HarvesterTests(unittest.TestCase):
             thread.start()
             ready.wait(1)
             settings = parse_socks5(f"127.0.0.1:{listener.getsockname()[1]}")
-            stream = socks5_connect(settings, "api.themoviedb.org", 443, timeout=2)
-            stream.close()
+            transport = Transport(settings)
+            request = urllib.request.Request("http://example.test/status")
+            with transport.open(request, timeout=2) as response:
+                self.assertEqual(response.read(), b"pong")
             thread.join(2)
         self.assertFalse(thread.is_alive())
-        self.assertEqual(destination, [("api.themoviedb.org", 443)])
+        self.assertEqual(destination, [("example.test", 80)])
+        self.assertTrue(requests[0].startswith(b"GET /status HTTP/1.1\r\n"))
 
     def test_atomic_json_round_trip(self):
         with tempfile.TemporaryDirectory() as temporary:
