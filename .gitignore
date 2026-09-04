@@ -1,6 +1,7 @@
 # Local credentials / overrides
 keys_and_tokens.txt
 .env
+.cache/
 
 # Python runtime debris
 __pycache__/

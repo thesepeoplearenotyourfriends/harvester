@@ -1,0 +1,56 @@
+:root {
+  --background: #2e2e2e;
+  --toolbar: #30302d;
+  --well: #292a27;
+  --line: #4b4b45;
+  --text: #f3f3ec;
+  --muted: #c8c8bd;
+  --accent: #787e5b;
+  --accent-hot: #a7b47b;
+}
+
+* { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+body { background: var(--background); color: var(--text); color-scheme: dark; font: 12px/1.35 "Segoe UI", Tahoma, sans-serif; }
+button, input { color: inherit; font: inherit; }
+
+#menu-bar {
+  position: fixed; z-index: 10; inset: 0 0 auto; display: flex; align-items: stretch;
+  height: 31px; padding: 0 8px; gap: 20px; background: var(--toolbar);
+  border-bottom: 1px solid var(--line); box-shadow: 0 1px 5px #0006;
+}
+.app-name { align-self: center; color: var(--muted); }
+.menu { position: relative; display: flex; }
+.menu-label { padding: 0 4px; border: 0; border-radius: 3px; background: transparent; }
+.menu-label:hover, .menu.open .menu-label { background: #44443f; }
+.menu-items { position: absolute; display: none; top: 29px; left: 0; width: 145px; padding: 5px 0; background: var(--toolbar); border: 1px solid #55584c; border-radius: 3px; box-shadow: 0 4px 12px #0007; }
+.menu.open .menu-items { display: block; }
+.menu-items button { display: block; width: 100%; padding: 4px 10px; text-align: left; border: 0; background: transparent; }
+.menu-items button:hover { background: #ffffff14; }
+#search-box { display: flex; align-items: center; gap: 7px; margin-left: auto; }
+#search-box span { color: var(--muted); }
+#filter { width: 155px; height: 23px; padding: 2px 7px; border: 1px solid #55594f; border-radius: 4px; outline: 0; background: #252622; }
+#filter:focus { border-color: var(--accent-hot); box-shadow: 0 0 0 1px #a7b47b59; }
+
+#app-shell { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 31px); margin-top: 31px; overflow: hidden; }
+#browser-pane { display: flex; flex: 1 1 auto; min-height: 80px; padding: 8px 8px 5px; overflow: hidden; border-bottom: 1px solid var(--line); }
+#navigation { flex: 0 0 145px; padding: 4px 13px 4px 1px; overflow-y: auto; border-right: 1px solid var(--line); }
+#navigation button { display: block; width: 100%; margin: 1px 0; padding: 3px 7px; text-align: left; border: 0; border-radius: 3px; background: transparent; }
+#navigation button:hover, #navigation button.selected { background: var(--accent); color: white; }
+#content-pane { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; padding-left: 12px; overflow: hidden; }
+#section-heading { display: flex; flex: 0 0 25px; align-items: baseline; border-bottom: 1px solid var(--line); }
+h1, h2 { margin: 0; font-size: 12px; font-weight: 600; }
+#status { margin-left: auto; color: var(--muted); }
+#item-list { flex: 1 1 auto; margin: 4px 0 0; padding: 0 3px 0 0; overflow: auto; list-style: none; outline: none; }
+#item-list li { display: grid; grid-template-columns: minmax(120px, .55fr) minmax(0, 1fr); gap: 12px; margin: 1px 0; padding: 2px 7px; border-radius: 3px; cursor: default; }
+#item-list li:hover { background: #ffffff0f; }
+#item-list li.focused { background: var(--accent); color: white; font-weight: 600; }
+#item-list li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.secondary { color: var(--muted); font-weight: normal; }
+#detail-pane { flex: 0 0 125px; min-height: 90px; max-height: 42%; margin: 6px 8px 8px; padding: 8px 11px; overflow: auto; background: var(--well); border: 1px solid var(--line); border-radius: 4px; outline: none; }
+#detail-pane h2 { margin-bottom: 5px; color: var(--accent-hot); }
+#detail-content { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); }
+
+#navigation::-webkit-scrollbar, #item-list::-webkit-scrollbar, #detail-pane::-webkit-scrollbar { width: 9px; }
+#navigation::-webkit-scrollbar-track, #item-list::-webkit-scrollbar-track, #detail-pane::-webkit-scrollbar-track { background: var(--well); }
+#navigation::-webkit-scrollbar-thumb, #item-list::-webkit-scrollbar-thumb, #detail-pane::-webkit-scrollbar-thumb { background: #56594d; border-radius: 4px; }

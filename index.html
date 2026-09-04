@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Cache-Control" content="no-store">
+  <title>Harvester</title>
+  <link rel="stylesheet" href="css/my.css">
+</head>
+<body>
+  <header id="menu-bar">
+    <div class="menu">
+      <button class="menu-label" type="button" aria-expanded="false">File</button>
+      <div class="menu-items"><button type="button" data-command="close-menu">Close menu</button></div>
+    </div>
+    <div class="menu">
+      <button class="menu-label" type="button" aria-expanded="false">View</button>
+      <div class="menu-items"><button type="button" data-view="overview">Overview</button><button type="button" data-view="providers">Providers</button></div>
+    </div>
+    <span class="app-name">Harvester</span>
+    <label id="search-box"><span>Search</span><input id="filter" type="search" autocomplete="off"></label>
+  </header>
+
+  <main id="app-shell">
+    <section id="browser-pane">
+      <nav id="navigation" aria-label="Harvester sections">
+        <button class="selected" type="button" data-view="overview">Overview</button>
+        <button type="button" data-view="movies">Movies</button>
+        <button type="button" data-view="shows">TV</button>
+        <button type="button" data-view="actors">Actors</button>
+        <button type="button" data-view="providers">Providers</button>
+      </nav>
+      <section id="content-pane" aria-live="polite">
+        <div id="section-heading"><h1>Overview</h1><span id="status">Starting…</span></div>
+        <ul id="item-list" tabindex="0" aria-label="Items"></ul>
+      </section>
+    </section>
+    <section id="detail-pane" tabindex="0">
+      <h2>Details</h2>
+      <div id="detail-content">Select an item to inspect Harvester's saved record.</div>
+    </section>
+  </main>
+
+<script>
+"use strict";
+const PACKAGE_ID = "com.harvester.app";
+const CACHE_URI = `asset://${PACKAGE_ID}/.cache/ui/snapshot.json`;
+const CACHE_VERSION = 1;
+const viewConfig = {
+  overview: {title: "Overview", action: "inventory"},
+  movies: {title: "Movies", action: "list.movies", get: "get.movie"},
+  shows: {title: "TV", action: "list.shows", get: "get.show"},
+  actors: {title: "Actors", action: "list.actors", get: "get.actor"},
+  providers: {title: "Providers", action: "providers"}
+};
+const state = {view: "overview", generation: 0, values: {}, rows: [], selected: -1};
+
+const App = {
+  nextRequestId: 1,
+  async request(action, data = {}) {
+    const generation = state.generation;
+    const context = state.view;
+    if (!globalThis.severin || typeof globalThis.severin.send !== "function") {
+      throw new Error("Severin bridge is not available");
+    }
+    let reply = await globalThis.severin.send({id: this.nextRequestId++, action, data});
+    if (generation !== state.generation || context !== state.view) {
+      throw new DOMException("Ignored response from inactive view", "AbortError");
+    }
+    if (typeof reply === "string") reply = JSON.parse(reply);
+    if (!reply || typeof reply !== "object" || typeof reply.ok !== "boolean") {
+      throw new Error("Severin bridge returned an invalid response");
+    }
+    if (!reply.ok) throw new Error(reply.error || "Bridge request failed");
+    if (!("result" in reply)) throw new Error("Bridge response has no result");
+    return reply.result;
+  }
+};
+
+function labelFor(record, fallback = "") {
+  if (typeof record !== "object" || !record) return fallback;
+  return String(record.title || record.name || record.local_target || record.provider || fallback);
+}
+
+function rowsFor(view, value) {
+  if (view === "movies" || view === "shows" || view === "actors") return value?.items || [];
+  if (view === "providers") {
+    const providers = value?.providers || value || {};
+    return Array.isArray(providers) ? providers : Object.entries(providers).map(([name, details]) => ({name, details}));
+  }
+  return Object.entries(value || {}).map(([name, details]) => ({name, details}));
+}
+
+function secondaryFor(row) {
+  if (row.status) return row.status;
+  if (row.details && typeof row.details === "object") return Object.keys(row.details).join(", ");
+  return "";
+}
+
+function render(value) {
+  state.values[state.view] = value;
+  const query = document.querySelector("#filter").value.trim().toLocaleLowerCase();
+  state.rows = rowsFor(state.view, value).filter(row => labelFor(row).toLocaleLowerCase().includes(query));
+  state.selected = -1;
+  const list = document.querySelector("#item-list");
+  list.replaceChildren(...state.rows.map((row, index) => {
+    const item = document.createElement("li");
+    item.dataset.index = index;
+    item.tabIndex = -1;
+    const primary = document.createElement("span");
+    primary.textContent = labelFor(row, `Item ${index + 1}`);
+    const secondary = document.createElement("span");
+    secondary.className = "secondary";
+    secondary.textContent = secondaryFor(row);
+    item.append(primary, secondary);
+    item.addEventListener("click", () => selectRow(index));
+    return item;
+  }));
+  document.querySelector("#status").textContent = `${state.rows.length} item${state.rows.length === 1 ? "" : "s"}`;
+  document.querySelector("#detail-content").textContent = state.rows.length ? "Select an item to inspect Harvester's saved record." : "No saved items.";
+}
+
+async function selectRow(index) {
+  if (!state.rows[index]) return;
+  state.selected = index;
+  document.querySelectorAll("#item-list li").forEach((item, itemIndex) => item.classList.toggle("focused", itemIndex === index));
+  const row = state.rows[index];
+  document.querySelector("#detail-content").textContent = JSON.stringify(row, null, 2);
+  const getAction = viewConfig[state.view].get;
+  if (!getAction) return;
+  const identifier = state.view === "actors" ? row.name : row.local_target;
+  if (typeof identifier !== "string" || !identifier) return;
+  try {
+    const detail = await App.request(getAction, {identifier});
+    document.querySelector("#detail-content").textContent = JSON.stringify(detail, null, 2);
+  } catch (error) {
+    if (error.name !== "AbortError") document.querySelector("#detail-content").textContent = error.message;
+  }
+}
+
+async function activateView(view) {
+  if (!viewConfig[view]) return;
+  state.view = view;
+  state.generation += 1;
+  document.querySelectorAll("[data-view]").forEach(button => button.classList.toggle("selected", button.dataset.view === view));
+  document.querySelector("h1").textContent = viewConfig[view].title;
+  document.querySelector("#filter").value = "";
+  document.querySelector("#status").textContent = "Loading…";
+  render(state.values[view] || {});
+  try {
+    const value = await App.request(viewConfig[view].action);
+    render(value);
+  } catch (error) {
+    if (error.name !== "AbortError") document.querySelector("#status").textContent = error.message;
+  }
+}
+
+document.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => { closeMenus(); activateView(button.dataset.view); }));
+document.querySelector("#filter").addEventListener("input", () => render(state.values[state.view] || {}));
+document.querySelector("#item-list").addEventListener("keydown", event => {
+  if (!state.rows.length || !["ArrowDown", "ArrowUp"].includes(event.key)) return;
+  event.preventDefault();
+  selectRow(Math.max(0, Math.min(state.rows.length - 1, state.selected + (event.key === "ArrowDown" ? 1 : -1))));
+});
+function closeMenus() { document.querySelectorAll(".menu.open").forEach(menu => { menu.classList.remove("open"); menu.querySelector(".menu-label").setAttribute("aria-expanded", "false"); }); }
+document.querySelectorAll(".menu-label").forEach(button => button.addEventListener("click", event => { const menu = event.currentTarget.parentElement; const opening = !menu.classList.contains("open"); closeMenus(); menu.classList.toggle("open", opening); button.setAttribute("aria-expanded", String(opening)); }));
+document.addEventListener("keydown", event => { if (event.key === "Escape") closeMenus(); });
+document.addEventListener("click", event => { if (!event.target.closest(".menu")) closeMenus(); });
+
+(async function start() {
+  try {
+    const response = await fetch(CACHE_URI, {cache: "no-store"});
+    if (response.ok) {
+      const snapshot = await response.json();
+      if (snapshot?.version === CACHE_VERSION && snapshot.views && typeof snapshot.views === "object") state.values = snapshot.views;
+    }
+  } catch (_) { /* A deleted or malformed disposable cache is a cold start. */ }
+  activateView("overview");
+})();
+</script>
+</body>
+</html>

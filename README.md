@@ -66,12 +66,37 @@ No live provider or real library is used by the suite:
 python3 -m unittest discover -s tests -v
 ```
 
-Syntax check: `python3 -m compileall -q harvester.py harvester_core tests`.
+Syntax check: `python3 -m compileall -q harvester.py harvester-ui.py harvester_ui.py harvester_core tests`.
+
+## Optional desktop UI
+
+`python3 harvester-ui.py` opens the compact Severin desktop browser when the
+optional `severin` package and a graphical session are available. The Overview,
+Movies, TV, Actors, and Providers sections are read-only views backed by
+`harvester.py api`; the UI host does not read Harvester manifests itself.
+
+The renderer can read its last derived snapshot at
+`asset://com.harvester.app/.cache/ui/snapshot.json`. Python writes that
+versioned snapshot atomically under `.cache/ui/` after successful API requests.
+The cache is not authoritative and `rm -rf .cache/` is always safe; a missing,
+malformed, or incompatible snapshot produces a normal cold start.
 
 ## Changelog
 
 Entries are listed newest first. Each entry describes behavior that changed rather than
 repeating commit messages.
+
+### 2026-09-04 — Initial Severin desktop UI
+
+#### Added
+
+* Added an optional 800 × 400 Severin launcher and a plain HTML/CSS desktop
+  browser for inventory, provider, movie, TV, and actor records.
+* Added a capability-only deferred bridge that invokes the existing
+  `harvester.py api` NDJSON interface with fixed argument shapes.
+* Added a versioned, disposable `.cache/ui/` snapshot for cache-first startup.
+  Python owns atomic cache writes and the renderer reads the snapshot through
+  the Harvester package's `asset://` namespace.
 
 ### 2026-09-04 — Reference parity audit
 
