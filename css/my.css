@@ -206,6 +206,14 @@ hr {
   gap: 2px;
   margin-top: 7px;
 }
+.context-nav {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--well);
+}
 .queue button {
   min-width: 0;
   padding: 4px 6px;

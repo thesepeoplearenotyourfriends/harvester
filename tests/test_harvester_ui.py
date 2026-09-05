@@ -40,6 +40,15 @@ class HarvesterUIBridgeTests(unittest.TestCase):
             harvester_ui.action_argv("rescan", {})[3:],
             ["rescan"],
         )
+        self.assertEqual(
+            harvester_ui.action_argv("inspect.movie", {"identifier": "/movies/Alien"})[3:],
+            ["inspect", "movie", "/movies/Alien"],
+        )
+        self.assertIn("--artifacts", harvester_ui.action_argv("list.movies", {})[3:])
+        self.assertNotIn("--group-directories",
+                         harvester_ui.action_argv("list.movies", {"status": "failed"})[3:])
+        self.assertIn("--group-directories",
+                      harvester_ui.action_argv("list.movies", {"missing": "poster"})[3:])
         with self.assertRaises(harvester_ui.BridgeError):
             harvester_ui.action_argv("rescan", {"target": "actors"})
 
@@ -170,6 +179,18 @@ class HarvesterUICacheTests(unittest.TestCase):
         self.assertIn('querySelector("#search").disabled = scanning', page)
         self.assertIn("showStartupRescanFailure(error)", page)
         self.assertIn("Work queues and Search remain unavailable", page)
+
+    def test_movie_and_tv_renderers_use_artifact_inspection(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        css = (harvester_ui.PROJECT_DIR / "css" / "my.css").read_text(encoding="utf-8")
+        self.assertIn('inspect: "inspect.movie"', page)
+        self.assertIn('inspect: "inspect.show"', page)
+        self.assertIn('artifactLine("Poster", detail.poster)', page)
+        self.assertIn("manifest_identities", page)
+        self.assertIn("renderRecordInspector(detail)", page)
+        self.assertIn("row.grouped", page)
+        self.assertIn("await rawRecords(detail.kind, rawIds)", page)
+        self.assertIn("position: sticky", css)
 
 
 if __name__ == "__main__":

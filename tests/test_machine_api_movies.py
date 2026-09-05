@@ -14,6 +14,8 @@ from harvester_core.jobs.tv_materialize import run as materialize_tv
 from harvester_core.providers.profiles import profiles
 from harvester_core.rescan import rescan
 from harvester_core.storage import load_json, save_json_atomic
+from harvester_core.api import inspect_item, list_artifacts
+import harvester_core.api as machine_api
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -127,6 +129,111 @@ class MachineApiMovieTests(unittest.TestCase):
             result = self.cli(*command)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)["type"], "result")
+
+    def test_artifact_inspection_reads_current_files_not_frozen_work_fields(self):
+        folder = self.movies / "Example (2020)"
+        nfo = folder / "movie.nfo"
+        poster = folder / "poster.png"
+        video = folder / "Example.mkv"
+        poster.write_bytes(b"png")
+        video.write_bytes(b"video")
+        save_json_atomic(self.state / "movie_manifest_tmdb.json", {"movies": {
+            str(nfo): {"status": "failed", "title": "Stale title", "tries": 99,
+                       "nfo_path": str(nfo), "poster_target_status": "unresolved"}
+        }})
+
+        before = (self.state / "movie_manifest_tmdb.json").read_bytes()
+        with mock.patch("urllib.request.urlopen", side_effect=AssertionError("network used")):
+            item = inspect_item(self.config, "movie", str(nfo))
+
+        self.assertEqual(item["nfo"]["fields"]["title"], "Example")
+        self.assertEqual(item["nfo"]["fields"]["unique_ids"], {"tmdb": "7"})
+        self.assertEqual(item["poster"], {"present": True, "path": str(poster),
+                                           "candidates": [str(poster)]})
+        self.assertEqual(item["video_files"], [str(video)])
+        self.assertNotIn("tries", item)
+        self.assertNotIn("poster_target_status", item)
+        self.assertEqual((self.state / "movie_manifest_tmdb.json").read_bytes(), before)
+
+    def test_missing_poster_projection_groups_shared_directory_and_marks_ambiguity(self):
+        folder = self.movies / "Shared"
+        folder.mkdir()
+        first = folder / "first.nfo"
+        second = folder / "second.nfo"
+        first.write_text("<movie><title>First</title></movie>")
+        second.write_text("<movie><title>Second</title></movie>")
+        save_json_atomic(self.state / "movie_manifest_tmdb.json", {"movies": {
+            str(first): {"nfo_path": str(first)},
+            str(second): {"nfo_path": str(second)},
+        }})
+
+        items = list_artifacts(self.config, "movie", missing="poster",
+                               group_directories=True)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["manifest_identities"], [str(first), str(second)])
+        self.assertEqual(items[0]["ownership"], "ambiguous")
+        self.assertTrue(items[0]["nfo_present"])
+        self.assertNotIn("nfo", items[0])
+        self.assertNotIn("video_files", items[0])
+
+    def test_grouped_artifact_listing_reads_durable_collection_once(self):
+        source = {
+            str(self.movies / "One" / "first.nfo"): {
+                "nfo_path": str(self.movies / "One" / "first.nfo")},
+            str(self.movies / "One" / "second.nfo"): {
+                "nfo_path": str(self.movies / "One" / "second.nfo")},
+            str(self.movies / "Two" / "movie.nfo"): {
+                "nfo_path": str(self.movies / "Two" / "movie.nfo")},
+        }
+        with mock.patch.object(machine_api, "records", return_value=source) as read:
+            items = list_artifacts(self.config, "movie", missing="poster",
+                                   group_directories=True)
+
+        read.assert_called_once_with(self.config, "movie")
+        self.assertEqual(len(items), 2)
+
+    def test_state_workflow_projection_preserves_matching_movie_identity(self):
+        folder = self.movies / "Mixed"
+        folder.mkdir()
+        ok = folder / "ok.nfo"
+        failed = folder / "failed.nfo"
+        ok.write_text("<movie><title>Okay</title></movie>")
+        failed.write_text("<movie><title>Failed</title></movie>")
+        save_json_atomic(self.state / "movie_manifest_tmdb.json", {"movies": {
+            str(ok): {"status": "ok", "title": "Okay", "nfo_path": str(ok)},
+            str(failed): {"status": "failed", "title": "Failed", "nfo_path": str(failed)},
+        }})
+
+        items = list_artifacts(self.config, "movie", status="failed")
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["identifier"], str(failed))
+        self.assertEqual(items[0]["manifest_identities"], [str(failed)])
+        detail = inspect_item(self.config, "movie", items[0]["identifier"])
+        self.assertEqual(detail["selected_manifest_identity"], str(failed))
+        self.assertEqual(detail["label"], "Failed")
+
+    def test_nonstandard_poster_candidate_prevents_missing_directory(self):
+        folder = self.movies / "Shared Poster"
+        folder.mkdir()
+        first = folder / "first.nfo"
+        second = folder / "second.nfo"
+        first.write_text("<movie><title>First</title></movie>")
+        second.write_text("<movie><title>Second</title></movie>")
+        candidate = folder / "First Movie-poster.jpg"
+        candidate.write_bytes(b"poster")
+        save_json_atomic(self.state / "movie_manifest_tmdb.json", {"movies": {
+            str(first): {"nfo_path": str(first)},
+            str(second): {"nfo_path": str(second)},
+        }})
+
+        detail = inspect_item(self.config, "movie", str(folder))
+
+        self.assertEqual(detail["ownership"]["status"], "ambiguous")
+        self.assertEqual(detail["poster"]["candidates"], [str(candidate)])
+        self.assertEqual(list_artifacts(self.config, "movie", missing="poster",
+                                        group_directories=True), [])
 
     def test_brief_lists_and_offline_search_return_compact_typed_records(self):
         save_json_atomic(self.state / "movie_actor_queue.json", {"actors": {

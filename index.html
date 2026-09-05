@@ -90,6 +90,7 @@
           action: "list.movies",
           data: { missing: "nfo" },
           get: "get.movie",
+          inspect: "inspect.movie",
           kind: "movie",
         },
         "missing-posters": {
@@ -97,6 +98,7 @@
           action: "list.movies",
           data: { missing: "poster" },
           get: "get.movie",
+          inspect: "inspect.movie",
           kind: "movie",
         },
         "unresolved-movies": {
@@ -104,6 +106,7 @@
           action: "list.movies",
           data: { status: "unresolved" },
           get: "get.movie",
+          inspect: "inspect.movie",
           kind: "movie",
         },
         "failed-movies": {
@@ -111,6 +114,7 @@
           action: "list.movies",
           data: { status: "failed" },
           get: "get.movie",
+          inspect: "inspect.movie",
           kind: "movie",
         },
         "ambiguous-tv": {
@@ -118,6 +122,7 @@
           action: "list.shows",
           data: { status: "ambiguous" },
           get: "get.show",
+          inspect: "inspect.show",
           kind: "show",
         },
         "not-found-tv": {
@@ -125,6 +130,7 @@
           action: "list.shows",
           data: { status: "not_found" },
           get: "get.show",
+          inspect: "inspect.show",
           kind: "show",
         },
         "tv-errors": {
@@ -132,6 +138,7 @@
           action: "list.shows",
           data: { status: "error" },
           get: "get.show",
+          inspect: "inspect.show",
           kind: "show",
         },
         "all-actors": {
@@ -146,6 +153,7 @@
           action: "list.movies",
           data: {},
           get: "get.movie",
+          inspect: "inspect.movie",
           kind: "movie",
         },
         "all-tv": {
@@ -153,6 +161,7 @@
           action: "list.shows",
           data: {},
           get: "get.show",
+          inspect: "inspect.show",
           kind: "show",
         },
         providers: { title: "Providers", action: "providers", data: {} },
@@ -310,7 +319,7 @@
       }
       function renderContext(title, rows) {
         document.querySelector("#context-pane").innerHTML =
-          `<button id="back-overview">⮪ Overview</button><hr><h1>${esc(title)}</h1><div class="queue">${rows.map((r, i) => `<button data-row="${i}"><span>${r.kind ? `<small>${esc(r.kind.toUpperCase())}</small>` : ""}${esc(rowLabel(r))}</span></button>`).join("")}</div>`;
+          `<div class="context-nav"><button id="back-overview">⮪ Overview</button></div><h1>${esc(title)}</h1><div class="queue">${rows.map((r, i) => `<button data-row="${i}"><span>${r.kind ? `<small>${esc(r.kind.toUpperCase())}</small>` : ""}${esc(rowLabel(r))}</span></button>`).join("")}</div>`;
         document.querySelector("#back-overview").onclick = () => loadOverview();
         document
           .querySelectorAll("[data-row]")
@@ -351,9 +360,27 @@
           )
           .join("");
       }
-      function renderInspector(detail) {
+      function artifactLine(name, artifact) {
+        return `<dt>${esc(name)}</dt><dd>${artifact?.present ? `Present${artifact.path ? ` · ${esc(artifact.path)}` : ""}` : "Missing"}</dd>`;
+      }
+      function renderInspector(detail, raw = null) {
+        const fields = detail.nfo?.fields || detail.nfos?.find((item) => item.present)?.fields || {};
+        const identityNote = detail.ownership?.status === "ambiguous"
+          ? `<p class="error"><strong>Ambiguous poster ownership.</strong> ${esc(detail.ownership.reason)}</p>` : "";
         document.querySelector("#workspace").innerHTML =
-          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1><dl>${detailPairs(detail)}</dl><details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail, null, 2))}</pre></details></article>`;
+          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${identityNote}<dl><dt>Directory</dt><dd>${esc(detail.directory)}</dd>${artifactLine("NFO", detail.nfo)}${artifactLine("Poster", detail.poster)}<dt>Video files</dt><dd>${esc(detail.video_count)}</dd>${Object.entries(fields).map(([key, value]) => `<dt>${esc(key.replaceAll("_", " "))}</dt><dd>${esc(typeof value === "object" ? JSON.stringify(value) : value)}</dd>`).join("")}</dl>${raw ? `<details><summary>Raw state</summary><pre>${esc(JSON.stringify(raw, null, 2))}</pre></details>` : ""}</article>`;
+      }
+      function renderRecordInspector(detail) {
+        const known = contexts(detail);
+        document.querySelector("#workspace").innerHTML =
+          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1><dl>${detailPairs(detail)}</dl><h2>Known from</h2>${known.length ? `<ul>${known.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : '<p class="muted">No saved contexts.</p>'}<details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail, null, 2))}</pre></details></article>`;
+      }
+      async function rawRecords(kind, identifiers) {
+        const values = [];
+        for (const identifier of identifiers) {
+          values.push(await App.request(`get.${kind}`, { identifier }, true));
+        }
+        return values.length === 1 ? values[0] : values;
       }
       function renderProvider(profile) {
         const capabilities = Array.isArray(profile.capabilities)
@@ -499,11 +526,18 @@
         if (!cfg?.get) return;
         try {
           let detail = await App.request(
-            cfg.get,
+            cfg.inspect || cfg.get,
             { identifier: rowIdentifier(row) },
             true,
           );
-          cfg.repair ? renderActorRepair(detail) : renderInspector(detail);
+          if (!cfg.inspect) {
+            cfg.repair ? renderActorRepair(detail) : renderRecordInspector(detail);
+            return;
+          }
+          const rawIds = row.grouped
+            ? detail.manifest_identities
+            : [row.identifier || detail.selected_manifest_identity];
+          renderInspector(detail, await rawRecords(detail.kind, rawIds));
         } catch (e) {
           if (e.name !== "AbortError") showError(e.message);
         }
@@ -529,12 +563,17 @@
         let row = state.rows[i];
         state.selectionGeneration++;
         try {
+          const inspectable = row.kind === "movie" || row.kind === "show";
           let detail = await App.request(
-            `get.${row.kind}`,
+            `${inspectable ? "inspect" : "get"}.${row.kind}`,
             { identifier: row.identifier },
             true,
           );
-          renderInspector(detail);
+          if (!inspectable) {
+            renderRecordInspector(detail);
+            return;
+          }
+          renderInspector(detail, await rawRecords(row.kind, [row.identifier]));
         } catch (e) {
           if (e.name !== "AbortError") showError(e.message);
         }

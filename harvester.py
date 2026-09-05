@@ -88,6 +88,10 @@ def parser():
     for kind in ("actor", "movie", "show"):
         item = get.add_parser(kind)
         item.add_argument("identifier")
+    inspect = api.add_parser("inspect", help="inspect current local artifacts offline").add_subparsers(dest="kind", required=True)
+    for kind in ("movie", "show"):
+        item = inspect.add_parser(kind)
+        item.add_argument("identifier")
     listing = api.add_parser("list", help="list durable records").add_subparsers(dest="kind", required=True)
     for plural, kind in (("actors", "actor"), ("movies", "movie"), ("shows", "show")):
         item = listing.add_parser(plural)
@@ -95,6 +99,11 @@ def parser():
         item.add_argument("--status")
         item.add_argument("--limit", type=int)
         item.add_argument("--brief", action="store_true")
+        if kind in ("movie", "show"):
+            item.add_argument("--artifacts", action="store_true",
+                              help="project records onto current filesystem artifacts")
+            item.add_argument("--group-directories", action="store_true",
+                              help="group movie rows by shared filesystem directory")
         if kind == "actor":
             item.add_argument("--missing", choices=("image",))
         else:
@@ -253,12 +262,22 @@ def api_main(args, config):
         if args.api_command == "providers":
             from harvester_core.providers.profiles import profiles
             terminal({"providers": profiles(config)})
-        elif args.api_command in ("get", "list", "inventory", "search", "rescan"):
-            from harvester_core.api import get_record, inventory, list_records, search
+        elif args.api_command in ("get", "inspect", "list", "inventory", "search", "rescan"):
+            from harvester_core.api import get_record, inspect_item, inventory, list_artifacts, list_records, search
             if args.api_command == "get":
                 terminal(get_record(config, args.kind, args.identifier))
+            elif args.api_command == "inspect":
+                terminal(inspect_item(config, args.kind, args.identifier))
             elif args.api_command == "list":
-                terminal({"items": list_records(config, args.kind, args.status, args.limit, getattr(args, "missing", None), args.brief)})
+                if getattr(args, "artifacts", False):
+                    items = list_artifacts(config, args.kind, args.status,
+                                           getattr(args, "missing", None),
+                                           getattr(args, "group_directories", False))
+                    items = items[:args.limit] if args.limit is not None else items
+                else:
+                    items = list_records(config, args.kind, args.status, args.limit,
+                                         getattr(args, "missing", None), args.brief)
+                terminal({"items": items})
             elif args.api_command == "search":
                 terminal({"items": search(config, args.query, args.limit)})
             elif args.api_command == "rescan":
