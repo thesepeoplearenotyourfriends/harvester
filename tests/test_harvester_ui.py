@@ -58,6 +58,20 @@ class HarvesterUIBridgeTests(unittest.TestCase):
         with self.assertRaises(harvester_ui.BridgeError):
             harvester_ui.action_argv("actor.install_image", {"path": "/tmp/escape"})
 
+    def test_bulk_workflow_is_semantic_bounded_and_preserves_artifacts(self):
+        argv = harvester_ui.action_argv(
+            "bulk.workflow",
+            {"workflow": "missing-posters", "identities": ["movie one", "movie two"]},
+        )
+        self.assertEqual(argv[3:7], ["refresh", "movie", "movie one", "movie two"])
+        self.assertEqual(argv[-4:], ["movie two", "--aspect", "poster", "--preserve"])
+        for payload in (
+                {"workflow": "shell", "identities": ["x"]},
+                {"workflow": "missing-posters", "identities": []},
+                {"workflow": "missing-posters", "identities": ["--all"]}):
+            with self.subTest(payload=payload), self.assertRaises(harvester_ui.BridgeError):
+                harvester_ui.action_argv("bulk.workflow", payload)
+
     def test_manual_jpeg_install_uses_canonical_actor_path(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -179,6 +193,16 @@ class HarvesterUICacheTests(unittest.TestCase):
         self.assertIn('querySelector("#search").disabled = scanning', page)
         self.assertIn("showStartupRescanFailure(error)", page)
         self.assertIn("Work queues and Search remain unavailable", page)
+
+    def test_bulk_drawer_and_workspace_share_navigation_safe_frozen_state(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        self.assertIn('bulk: { job: null, drawerOpen: false }', page)
+        self.assertIn('state.bulk.job = {', page)
+        self.assertIn('identities,', page)
+        self.assertIn('App.request("bulk.workflow", { workflow, identities }, false, true)', page)
+        self.assertIn('if (state.workflow === "bulk")', page)
+        self.assertIn('state.bulk.drawerOpen = false', page)
+        self.assertNotIn('state.bulk.job = null', page)
 
     def test_movie_and_tv_renderers_use_artifact_inspection(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")

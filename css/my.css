@@ -40,7 +40,7 @@ button {
   z-index: 10;
   inset: 0 0 auto;
   display: flex;
-  align-items: stretch;
+  align-items: center;
   height: 31px;
   padding: 0 8px;
   gap: 20px;
@@ -61,6 +61,8 @@ button {
 .menu {
   position: relative;
   display: flex;
+  height: 100%;
+  align-items: center;
 }
 .menu-items {
   position: absolute;
@@ -147,10 +149,64 @@ button {
 }
 #job-strip {
   flex: 0 0 22px;
+  width: 100%;
   padding: 3px 8px;
   background: var(--toolbar);
   border-top: 1px solid var(--line);
+  border-right: 0;
+  border-bottom: 0;
+  border-left: 0;
   color: var(--muted);
+  text-align: left;
+}
+#job-strip:hover {
+  background: #3a3a36;
+}
+#bulk-drawer {
+  position: absolute;
+  z-index: 6;
+  right: 0;
+  bottom: 22px;
+  left: 0;
+  min-height: 150px;
+  max-height: min(45vh, 330px);
+  padding: 13px 17px;
+  overflow: auto;
+  background: #292a27f7;
+  border-top: 1px solid var(--accent);
+  box-shadow: 0 -6px 18px #0008;
+}
+#bulk-drawer[hidden] {
+  display: none;
+}
+.bulk-content {
+  max-width: 620px;
+}
+.bulk-title,
+.workflow-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.bulk-title h1,
+.workflow-heading h1 {
+  margin-bottom: 0;
+}
+#close-bulk,
+.compact-action {
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #3a3a35;
+}
+#close-bulk {
+  font-size: 16px;
+  line-height: 16px;
+}
+.bulk-content progress {
+  width: min(100%, 430px);
+  height: 9px;
 }
 h1,
 h2 {

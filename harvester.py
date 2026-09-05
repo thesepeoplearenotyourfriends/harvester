@@ -119,6 +119,7 @@ def parser():
         item = refresh.add_parser(kind)
         item.add_argument("identifiers", nargs="+")
         item.add_argument("--aspect", choices=choices, default="all")
+        item.add_argument("--preserve", action="store_true", help=argparse.SUPPRESS)
     return root
 
 
@@ -297,7 +298,7 @@ def api_main(args, config):
                     result = run(config, provider, api_report, refresh=True, retry_failed=True, targets=args.identifiers)
                 if args.aspect in ("image", "all"):
                     from harvester_core.jobs.movie_actor_fetch import run as fetch
-                    result["materialize"] = fetch(config, api_report, retry_failed=True, overwrite=True, transport=transport, targets=args.identifiers)
+                    result["materialize"] = fetch(config, api_report, retry_failed=True, overwrite=not args.preserve, transport=transport, targets=args.identifiers)
             elif args.kind == "movie":
                 from harvester_core.api import get_record
                 targets = [get_record(config, "movie", value)["local_target"] for value in args.identifiers]
@@ -312,8 +313,8 @@ def api_main(args, config):
                     from harvester_core.jobs.movie_materialize import run as materialize
                     result["materialize"] = materialize(
                         config, api_report,
-                        overwrite_nfo=args.aspect in ("nfo", "all"),
-                        overwrite_poster=args.aspect in ("poster", "all"),
+                        overwrite_nfo=not args.preserve and args.aspect in ("nfo", "all"),
+                        overwrite_poster=not args.preserve and args.aspect in ("poster", "all"),
                         targets=targets, transport=transport,
                         write_nfo=args.aspect in ("nfo", "all"),
                         write_poster=args.aspect in ("poster", "all"),
@@ -331,8 +332,8 @@ def api_main(args, config):
                 if args.aspect in ("nfo", "poster", "actors", "all"):
                     from harvester_core.jobs.tv_materialize import run as materialize
                     result["materialize"] = materialize(config, api_report,
-                        overwrite_nfo=args.aspect in ("nfo", "all"),
-                        overwrite_poster=args.aspect in ("poster", "all"),
+                        overwrite_nfo=not args.preserve and args.aspect in ("nfo", "all"),
+                        overwrite_poster=not args.preserve and args.aspect in ("poster", "all"),
                         targets=targets, transport=transport,
                         write_nfo=args.aspect in ("nfo", "all"),
                         write_poster=args.aspect in ("poster", "all"),

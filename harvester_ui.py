@@ -91,6 +91,34 @@ def _rescan(data):
     return ("rescan",)
 
 
+BULK_WORKFLOWS = {
+    "missing-actor-images": ("actor", "image"),
+    "failed-actors": ("actor", "identity"),
+    "lost-found": ("movie", "nfo"),
+    "missing-posters": ("movie", "poster"),
+    "unresolved-movies": ("movie", "identity"),
+    "failed-movies": ("movie", "identity"),
+    "ambiguous-tv": ("show", "identity"),
+    "not-found-tv": ("show", "identity"),
+    "tv-errors": ("show", "identity"),
+}
+
+
+def _bulk_workflow(data):
+    """Accept only a frozen set of identities for a known workflow operation."""
+    if set(data) != {"workflow", "identities"} or data.get("workflow") not in BULK_WORKFLOWS:
+        raise BridgeError("bulk.workflow requires a known workflow and identities")
+    identities = data["identities"]
+    if (not isinstance(identities, list) or len(identities) > 100_000 or
+            not all(isinstance(value, str) and value and "\0" not in value and
+                    not value.startswith("-") for value in identities)):
+        raise BridgeError("bulk.workflow identities must be a bounded list of record identifiers")
+    if not identities:
+        raise BridgeError("bulk.workflow requires at least one identity")
+    kind, aspect = BULK_WORKFLOWS[data["workflow"]]
+    return ("refresh", kind, *identities, "--aspect", aspect, "--preserve")
+
+
 ACTION_REGISTRY = {
     "providers": _no_args(("providers",)), "inventory": _no_args(("inventory",)),
     "list.movies": _list("movie"), "list.shows": _list("show"),
@@ -99,6 +127,7 @@ ACTION_REGISTRY = {
     "inspect.movie": _inspect("movie"), "inspect.show": _inspect("show"),
     "search": _search, "rescan": _rescan,
     "refresh.actor.image": _refresh_actor,
+    "bulk.workflow": _bulk_workflow,
     "actor.install_image": None,
 }
 BRIDGE_ACTIONS = frozenset({"__ping__", *ACTION_REGISTRY})

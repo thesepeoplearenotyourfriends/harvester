@@ -99,6 +99,14 @@ in the browser, fits them within 185 × 278 pixels, and sends a small canonical 
 for the `.actors` file. Refresh from API invokes the existing targeted actor image
 refresh.
 
+Bulk work has one application-level state shown either in the persistent bottom strip,
+its slide-up drawer, or the full **Work → Bulk** workspace. Problem queues expose
+**Scan All**, which freezes that queue's current record identities before starting a
+semantic, allowlisted operation. Leaving the queue or closing the drawer does not stop
+the work. Broad materialization preserves files that already exist rather than treating
+the workflow as an overwrite request; Bulk state is session-only and is not a job-history
+store.
+
 List and search results are written atomically to filter-specific, versioned files
 under `.cache/ui/`. Only an asset descriptor crosses the Severin bridge, and the
 renderer reads the collection through `asset://com.harvester.app/`. The cache is
