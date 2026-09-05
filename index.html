@@ -369,6 +369,18 @@
         document.querySelector("#workspace").innerHTML =
           `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${identityNote}<dl><dt>Directory</dt><dd>${esc(detail.directory)}</dd>${artifactLine("NFO", detail.nfo)}${artifactLine("Poster", detail.poster)}<dt>Video files</dt><dd>${esc(detail.video_count)}</dd>${Object.entries(fields).map(([key, value]) => `<dt>${esc(key.replaceAll("_", " "))}</dt><dd>${esc(typeof value === "object" ? JSON.stringify(value) : value)}</dd>`).join("")}</dl>${raw ? `<details><summary>Raw state</summary><pre>${esc(JSON.stringify(raw, null, 2))}</pre></details>` : ""}</article>`;
       }
+      function renderRecordInspector(detail) {
+        const known = contexts(detail);
+        document.querySelector("#workspace").innerHTML =
+          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1><dl>${detailPairs(detail)}</dl><h2>Known from</h2>${known.length ? `<ul>${known.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : '<p class="muted">No saved contexts.</p>'}<details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail, null, 2))}</pre></details></article>`;
+      }
+      async function rawRecords(kind, identifiers) {
+        const values = [];
+        for (const identifier of identifiers) {
+          values.push(await App.request(`get.${kind}`, { identifier }, true));
+        }
+        return values.length === 1 ? values[0] : values;
+      }
       function renderProvider(profile) {
         const capabilities = Array.isArray(profile.capabilities)
           ? profile.capabilities
@@ -517,11 +529,14 @@
             { identifier: rowIdentifier(row) },
             true,
           );
-          let raw = null;
-          if (cfg.inspect && detail.manifest_identities?.length) {
-            raw = await App.request(cfg.get, { identifier: detail.manifest_identities[0] }, true);
+          if (!cfg.inspect) {
+            cfg.repair ? renderActorRepair(detail) : renderRecordInspector(detail);
+            return;
           }
-          cfg.repair ? renderActorRepair(detail) : renderInspector(detail, raw);
+          const rawIds = row.grouped
+            ? detail.manifest_identities
+            : [row.identifier || detail.selected_manifest_identity];
+          renderInspector(detail, await rawRecords(detail.kind, rawIds));
         } catch (e) {
           if (e.name !== "AbortError") showError(e.message);
         }
@@ -553,10 +568,11 @@
             { identifier: row.identifier },
             true,
           );
-          let raw = inspectable && detail.manifest_identities?.length
-            ? await App.request(`get.${row.kind}`, {identifier: detail.manifest_identities[0]}, true)
-            : null;
-          renderInspector(detail, raw);
+          if (!inspectable) {
+            renderRecordInspector(detail);
+            return;
+          }
+          renderInspector(detail, await rawRecords(row.kind, [row.identifier]));
         } catch (e) {
           if (e.name !== "AbortError") showError(e.message);
         }

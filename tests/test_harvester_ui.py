@@ -45,6 +45,10 @@ class HarvesterUIBridgeTests(unittest.TestCase):
             ["inspect", "movie", "/movies/Alien"],
         )
         self.assertIn("--artifacts", harvester_ui.action_argv("list.movies", {})[3:])
+        self.assertNotIn("--group-directories",
+                         harvester_ui.action_argv("list.movies", {"status": "failed"})[3:])
+        self.assertIn("--group-directories",
+                      harvester_ui.action_argv("list.movies", {"missing": "poster"})[3:])
         with self.assertRaises(harvester_ui.BridgeError):
             harvester_ui.action_argv("rescan", {"target": "actors"})
 
@@ -183,6 +187,9 @@ class HarvesterUICacheTests(unittest.TestCase):
         self.assertIn('inspect: "inspect.show"', page)
         self.assertIn('artifactLine("Poster", detail.poster)', page)
         self.assertIn("manifest_identities", page)
+        self.assertIn("renderRecordInspector(detail)", page)
+        self.assertIn("row.grouped", page)
+        self.assertIn("await rawRecords(detail.kind, rawIds)", page)
         self.assertIn("position: sticky", css)
         self.assertNotIn("Bulk: idle", page)
 

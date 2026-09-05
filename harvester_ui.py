@@ -56,6 +56,8 @@ def _list(kind):
         suffix = ["list", kind + "s", "--brief"]
         if kind in ("movie", "show"):
             suffix.append("--artifacts")
+        if kind == "movie" and data.get("missing") == "poster":
+            suffix.append("--group-directories")
         for option in ("status", "missing"):
             if data.get(option):
                 suffix += ["--" + option, data[option]]

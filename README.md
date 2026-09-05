@@ -62,10 +62,11 @@ For offline integrations, `api get movie|show IDENTIFIER` remains the raw durabl
 primitive. `api inspect movie|show IDENTIFIER` instead reports the artifacts currently
 on disk: the owning directory, parsed local NFO fields, poster and video presence, and
 the manifest identities behind that view. `api list movies|shows --artifacts` provides
-the same presentation projection for queues. Movie entries sharing a directory are
-grouped and reported with ambiguous ownership rather than pretending each NFO owns the
-same missing poster. These inspection operations make no provider requests and do not
-change durable state.
+compact presentation rows for queues. Records remain identity-based unless the caller
+also supplies `--group-directories`; the UI uses that grouping only for Missing Poster.
+Grouped movie entries retain every underlying identity and report ambiguous ownership
+rather than pretending each NFO owns the same poster context. These inspection
+operations make no provider requests and do not change durable state.
 
 ## Validation
 

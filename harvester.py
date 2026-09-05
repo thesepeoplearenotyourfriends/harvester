@@ -102,6 +102,8 @@ def parser():
         if kind in ("movie", "show"):
             item.add_argument("--artifacts", action="store_true",
                               help="project records onto current filesystem artifacts")
+            item.add_argument("--group-directories", action="store_true",
+                              help="group movie rows by shared filesystem directory")
         if kind == "actor":
             item.add_argument("--missing", choices=("image",))
         else:
@@ -269,7 +271,8 @@ def api_main(args, config):
             elif args.api_command == "list":
                 if getattr(args, "artifacts", False):
                     items = list_artifacts(config, args.kind, args.status,
-                                           getattr(args, "missing", None))
+                                           getattr(args, "missing", None),
+                                           getattr(args, "group_directories", False))
                     items = items[:args.limit] if args.limit is not None else items
                 else:
                     items = list_records(config, args.kind, args.status, args.limit,
