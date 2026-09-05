@@ -70,12 +70,12 @@ def run(config, reporter=None, limit=None, overwrite_nfo=False, overwrite_poster
             state = record.setdefault("materialize", {})
             nfo_path = Path(record["nfo_path"])
             if write_nfo:
-                if nfo_path.exists() and not overwrite_nfo:
-                    state["nfo"] = {"status": "exists", "file": str(nfo_path), "bytes": nfo_path.stat().st_size, "updated": now_iso()}
+                if committer.exists(nfo_path) and not overwrite_nfo:
+                    state["nfo"] = {"status": "exists", "file": str(nfo_path), "bytes": committer.stat(nfo_path).st_size, "updated": now_iso()}
                 else:
                     data = render_movie_nfo(record.get("nfo"))
                     committer.write(nfo_path, data)
-                    state["nfo"] = {"status": "ok", "file": str(nfo_path), "bytes": len(data), "updated": now_iso()}
+                    state["nfo"] = {"status": "ok" if committer.committing else "planned", "file": str(nfo_path), "bytes": len(data), "updated": now_iso()}
             poster_value = record.get("poster_path")
             poster = Path(poster_value) if poster_value else None
             if write_poster and poster is None:
@@ -89,10 +89,10 @@ def run(config, reporter=None, limit=None, overwrite_nfo=False, overwrite_poster
                 emit(reporter, "progress", key, status="unresolved_target",
                      target_kind="movie", id=key)
                 continue
-            existing = poster if poster and poster.exists() else poster.with_suffix(".png") if poster else None
+            existing = poster if poster and committer.exists(poster) else poster.with_suffix(".png") if poster else None
             if write_poster:
-                if existing.exists() and not overwrite_poster:
-                    state["poster"] = {"status": "exists", "file": str(existing), "bytes": existing.stat().st_size, "updated": now_iso()}
+                if committer.exists(existing) and not overwrite_poster:
+                    state["poster"] = {"status": "exists", "file": str(existing), "bytes": committer.stat(existing).st_size, "updated": now_iso()}
                 elif not record.get("poster_url"):
                     state["poster"] = {"status": "no_url", "updated": now_iso()}
                 else:
@@ -105,12 +105,12 @@ def run(config, reporter=None, limit=None, overwrite_nfo=False, overwrite_poster
                         output = poster.with_suffix(image_extension(data, content_type))
                         committer.write(output, data)
                         cleanup_error = None
-                        if existing and existing.exists() and existing != output:
+                        if existing and committer.exists(existing) and existing != output:
                             try:
                                 committer.unlink(existing)
                             except OSError as error:
                                 cleanup_error = f"{type(error).__name__}: {error}"
-                        state["poster"] = {"status": "ok", "file": str(output), "bytes": len(data), "content_type": content_type, "source_url": record["poster_url"], "updated": now_iso()}
+                        state["poster"] = {"status": "ok" if committer.committing else "planned", "file": str(output), "bytes": len(data), "content_type": content_type, "source_url": record["poster_url"], "updated": now_iso()}
                         if cleanup_error:
                             state["poster"]["cleanup_error"] = cleanup_error
                     except Exception as error:
@@ -122,7 +122,9 @@ def run(config, reporter=None, limit=None, overwrite_nfo=False, overwrite_poster
                 counts[f"poster_{state['poster']['status']}"] += 1
             if committer.committing:
                 save_json_atomic(path, manifest)
-            emit(reporter, "progress", key, status="materialized", target_kind="movie", id=key)
+            emit(reporter, "progress" if committer.committing else "prepared", key,
+                 status="materialized" if committer.committing else "planned",
+                 target_kind="movie", id=key)
     except KeyboardInterrupt:
         if committer.committing:
             save_json_atomic(path, manifest)

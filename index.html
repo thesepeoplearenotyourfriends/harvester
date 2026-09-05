@@ -403,7 +403,7 @@
         try {
           const result = await App.request("bulk.workflow", { workflow, scope }, false, true);
           Object.assign(state.bulk.job, {
-            status: result?.ok === false ? "attention" : "complete",
+            status: result?.ok === false ? "attention" : result?.preparation ? "prepared" : "complete",
             processed: Number.isInteger(result?.processed) ? result.processed : null,
             counts: result?.counts || {},
             message: result?.message || "Finished",

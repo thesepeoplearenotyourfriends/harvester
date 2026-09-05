@@ -54,10 +54,10 @@ def run(
         if limit is not None and processed >= limit:
             break
         output = target_dir / safe_actor_filename(name)
-        if output.exists() and not overwrite:
+        if committer.exists(output) and not overwrite:
             statuses[name] = {
                 "status": "exists", "file": str(output),
-                "bytes": output.stat().st_size, "updated": now_iso(),
+                "bytes": committer.stat(output).st_size, "updated": now_iso(),
             }
             counts["exists"] += 1
             changed += 1
@@ -76,11 +76,13 @@ def run(
             data = normalize_actor_image(source, normalize)
             committer.write(output, data)
             statuses[name] = {
-                "status": "ok", "file": str(output), "bytes": len(data),
+                "status": "ok" if committer.committing else "planned",
+                "file": str(output), "bytes": len(data),
                 "source_bytes": len(source), "url": urls[name][0],
                 "content_type": content_type, "updated": now_iso(),
             }
-            counts["ok"] += 1
+            outcome = "ok" if committer.committing else "planned"
+            counts[outcome] = counts.get(outcome, 0) + 1
         except Exception as error:
             statuses[name] = {
                 "status": "failed", "error": repr(error),
@@ -93,7 +95,8 @@ def run(
             if committer.committing:
                 save_json_atomic(status_path, statuses)
             changed = 0
-        emit(reporter, "progress", name, status=statuses[name]["status"])
+        emit(reporter, "progress" if committer.committing else "prepared", name,
+             status=statuses[name]["status"])
         if sleep_between:
             sleep(sleep_between)
     if committer.committing:

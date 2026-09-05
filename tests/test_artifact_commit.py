@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harvester_core.artifacts import RecordingCommitter
+from harvester_core.artifacts import RecordingCommitter, persist_preparation
 from harvester_core.config import load_config
 from harvester_core.jobs.movie_actor_fetch import run as fetch_actors
 from harvester_core.jobs.movie_materialize import run as materialize_movies
@@ -68,7 +68,8 @@ class ArtifactCommitSeamTests(unittest.TestCase):
                 {"name": "Actor", "url": "https://images/actor"}]}}}})
         before = manifest_path.read_bytes()
         recorder = RecordingCommitter()
-        result = materialize_tv(self.config,
+        events = []
+        result = materialize_tv(self.config, reporter=events.append,
                                 downloader=lambda _url: (b"\xff\xd8image", "image/jpeg"),
                                 normalize=False, sleep_between_requests=0,
                                 committer=recorder)
@@ -79,6 +80,42 @@ class ArtifactCommitSeamTests(unittest.TestCase):
         self.assertEqual({Path(action["path"]).name for action in result["planned"]
                           if action["action"] == "write"},
                          {"show.nfo", "poster.jpg", "Actor.jpg"})
+        self.assertTrue(events)
+        self.assertNotIn("artifact", {event.kind for event in events})
+        self.assertIn("prepared", {event.kind for event in events})
+
+    def test_tv_prepare_overlay_plans_shared_actor_only_once(self):
+        shows = {}
+        for name in ("One", "Two"):
+            path = self.tv / name
+            path.mkdir()
+            shows[str(path)] = {"status": "matched", "folder_name": name,
+                                "nfo": {"title": name}, "assets": {"actor_urls": [
+                                    {"name": "Shared Actor", "url": "https://images/actor"}]}}
+        save_json_atomic(self.config.state_path("tv_show_urls_tvdb.json"), {"shows": shows})
+        recorder = RecordingCommitter()
+        result = materialize_tv(self.config, write_nfo=False, write_poster=False,
+                                downloader=lambda _url: (b"actor", "image/jpeg"),
+                                normalize=False, sleep_between_requests=0,
+                                committer=recorder)
+        actor_writes = [action for action in result["planned"]
+                        if action["action"] == "write" and
+                        action["path"].endswith("Shared_Actor.jpg")]
+        self.assertEqual(len(actor_writes), 1)
+
+    def test_preparation_persists_manifest_and_blob_outside_library(self):
+        recorder = RecordingCommitter()
+        destination = self.movies / "Movie" / "movie.nfo"
+        recorder.write(destination, b"prepared nfo")
+        plan = persist_preparation(self.config, "lost-found", ["movie"], recorder)
+        manifest_path = (self.root / ".cache" / "bulk" / plan["plan_id"] /
+                         "manifest.json")
+        manifest = json.loads(manifest_path.read_text())
+        action = manifest["actions"][0]
+        self.assertNotIn("bytes", action)
+        self.assertEqual((manifest_path.parent / action["blob"]).read_bytes(),
+                         b"prepared nfo")
+        self.assertFalse(destination.exists())
 
 
 if __name__ == "__main__":

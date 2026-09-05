@@ -107,9 +107,15 @@ queue or closing the drawer does not stop the work. While a Bulk writer is activ
 navigation and inspection remain available but other UI write controls are disabled.
 Broad materialization preserves files that already exist rather than treating the
 workflow as an overwrite request; Bulk state is session-only and is not a job-history
-store. Lost & Found resolves provider metadata before writing an NFO. Missing Poster
+store. Lost & Found resolves provider metadata before preparing an NFO. Missing Poster
 reports records without an already-safe poster target as unresolved rather than
 inventing a filename.
+
+`Re-fetch from web` is preparation-only: provider work may update Harvester manifests
+and caches, but its artifact recipes never mutate the configured media roots. Prepared
+bytes and an atomic review manifest live under disposable `.cache/bulk/<plan-id>/` data;
+the Bulk summary reports prepared, attention, and applied counts, with applied fixed at
+zero until a future inspectable review/apply surface exists.
 
 Movie discovery treats only immediate, non-hidden children of `MOVIE_ROOT` as movie
 containers, so nested sample/extras/disc directories cannot become census records.

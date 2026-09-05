@@ -11,6 +11,7 @@ from collections import Counter
 from pathlib import Path
 
 from ..api import get_record
+from ..artifacts import RecordingCommitter, persist_preparation
 from ..storage import load_json
 
 
@@ -65,7 +66,8 @@ def _combined(*results, message="Finished"):
     processed = 0
     for prefix, result in results:
         processed += int(result.get("processed", 0))
-        phase_counts = result.get("counts") or result.get("status_counts") or {}
+        phase_counts = (result.get("counts") or result.get("status_counts") or
+                        result.get("planned_counts") or {})
         for name, value in phase_counts.items():
             counts[name if name.startswith(prefix + "_") else f"{prefix}_{name}"] += value
     return {"processed": processed, "counts": dict(counts), "message": message}
@@ -78,10 +80,24 @@ def _item_result(identities, *results, message="Finished"):
     return combined
 
 
+def _finish(config, workflow, identities, recorder, result, attention=0):
+    plan = persist_preparation(config, workflow, identities, recorder)
+    detail = result.get("message")
+    detail = f"\n\n{detail}" if detail and detail != "Finished" else ""
+    result["counts"].update({"prepared": plan["prepared"],
+                             "needs_attention": attention, "applied": 0})
+    result.update({"preparation": plan,
+                   "message": (f"Prepared: {plan['prepared']}\nNeeds attention: {attention}\n"
+                               "Applied: 0\n\nNothing has been written to the media library."
+                               f"{detail}")})
+    return result
+
+
 def run(config, workflow, identities, reporter=None):
     """Run the allowlisted recipe while preserving pre-existing artifacts."""
     if workflow not in WORKFLOWS:
         raise ValueError("unknown Bulk workflow")
+    recorder = RecordingCommitter()
     if workflow == "missing-actor-images":
         from .movie_actor_scan import run as scan
         from .movie_actor_fetch import run as fetch
@@ -101,11 +117,11 @@ def run(config, workflow, identities, reporter=None):
         unresolved = len(identities) - len(available)
         fetched = ({"processed": 0, "counts": {}} if not available else
                    fetch(config, reporter, retry_failed=True, overwrite=False,
-                         targets=available, transport=transport))
+                         targets=available, transport=transport, committer=recorder))
         fetched.setdefault("counts", {})["unresolved_source"] = unresolved
-        return _item_result(identities, ("identity", scanned), ("image", fetched),
-                            message=(f"{unresolved} actor(s) have no image source"
-                                     if unresolved else "Finished"))
+        return _finish(config, workflow, identities, recorder,
+                       _item_result(identities, ("identity", scanned), ("image", fetched)),
+                       unresolved)
     if workflow == "failed-actors":
         from .movie_actor_scan import run as scan
         from ..providers.tmdb import TMDBClient
@@ -113,8 +129,9 @@ def run(config, workflow, identities, reporter=None):
         transport = transport_from_config(config)
         provider = TMDBClient(config.tmdb_api_key, config.tmdb_bearer_token,
                               config.state_path("tmdb_api_cache.json"), transport)
-        return _item_result(identities, ("identity", scan(
-            config, provider, reporter, refresh=True, retry_failed=True, targets=identities)))
+        return _finish(config, workflow, identities, recorder, _item_result(
+            identities, ("identity", scan(config, provider, reporter, refresh=True,
+                                            retry_failed=True, targets=identities))))
     if workflow in {"lost-found", "unresolved-movies", "failed-movies"}:
         from .movie_scan import run as scan
         from ..providers.tmdb import TMDBClient
@@ -125,12 +142,14 @@ def run(config, workflow, identities, reporter=None):
                               config.state_path("tmdb_api_cache.json"), transport)
         scanned = scan(config, provider, reporter, refresh=True, targets=targets)
         if workflow != "lost-found":
-            return _item_result(identities, ("identity", scanned))
+            return _finish(config, workflow, identities, recorder,
+                           _item_result(identities, ("identity", scanned)))
         from .movie_materialize import run as materialize
         written = materialize(config, reporter, overwrite_nfo=False, overwrite_poster=False,
                               targets=targets, transport=transport, write_nfo=True,
-                              write_poster=False)
-        return _item_result(identities, ("identity", scanned), ("nfo", written))
+                              write_poster=False, committer=recorder)
+        return _finish(config, workflow, identities, recorder,
+                       _item_result(identities, ("identity", scanned), ("nfo", written)))
     if workflow == "missing-posters":
         from .movie_materialize import run as materialize
         from ..transport import transport_from_config
@@ -140,21 +159,21 @@ def run(config, workflow, identities, reporter=None):
         result = ({"processed": 0, "counts": {}} if not targets else
                   materialize(config, reporter, overwrite_nfo=False, overwrite_poster=False,
                               targets=targets, transport=transport_from_config(config),
-                              write_nfo=False, write_poster=True))
+                              write_nfo=False, write_poster=True, committer=recorder))
         result["processed"] = int(result.get("processed", 0)) + unresolved
         result.setdefault("counts", {})["poster_unresolved_target"] = unresolved
         message = (f"{unresolved} item(s) have no safe poster target" if unresolved
                    else "Finished")
         combined = _item_result(identities, ("poster", result), message=message)
         combined["ok"] = not unresolved
-        return combined
+        return _finish(config, workflow, identities, recorder, combined, unresolved)
     from .tv_scan import run as scan
     from ..providers.tvdb import TVDBClient
     from ..transport import transport_from_config
     transport = transport_from_config(config)
     provider = TVDBClient(config.tvdb_api_key, config.tvdb_pin,
                           config.state_path("tvdb_api_cache.json"), transport)
-    return _item_result(identities, ("identity", scan(
+    return _finish(config, workflow, identities, recorder, _item_result(identities, ("identity", scan(
         config, provider, reporter, refresh=True, retry_errors=True,
         retry_ambiguous=True, retry_not_found=True, targets=_show_targets(config, identities),
-    )))
+    ))))

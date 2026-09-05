@@ -220,17 +220,22 @@ class BulkRecipeTests(unittest.TestCase):
         config = mock.Mock(tmdb_api_key="key", tmdb_bearer_token=None)
         config.state_path.return_value = Path("cache.json")
         calls = []
+        committers = []
         with mock.patch.object(bulk, "get_record", return_value={"local_target": "movie.nfo"}), \
                 mock.patch("harvester_core.transport.transport_from_config", return_value=object()), \
                 mock.patch("harvester_core.providers.tmdb.TMDBClient", return_value=object()), \
                 mock.patch("harvester_core.jobs.movie_scan.run",
                            side_effect=lambda *a, **k: calls.append("scan") or {"processed": 1}), \
                 mock.patch("harvester_core.jobs.movie_materialize.run",
-                           side_effect=lambda *a, **k: calls.append("materialize") or
-                           {"processed": 1, "counts": {"ok": 1}}):
+                           side_effect=lambda *a, **k: (calls.append("materialize"),
+                                                        committers.append(k["committer"])) and
+                           {"processed": 1, "counts": {"ok": 1}}), \
+                mock.patch.object(bulk, "persist_preparation",
+                                  return_value={"prepared": 1}):
             result = bulk.run(config, "lost-found", ["movie"], None)
         self.assertEqual(calls, ["scan", "materialize"])
         self.assertEqual(result["processed"], 1)
+        self.assertFalse(committers[0].committing)
 
     def test_missing_actor_bulk_uses_transport_and_accounts_for_missing_source(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -264,13 +269,18 @@ class BulkRecipeTests(unittest.TestCase):
             self.assertEqual(transport.user_agent, "local-tmdb-actor-photo-gulper/1.0")
             self.assertEqual(result["processed"], 2)
             self.assertEqual(result["counts"]["image_unresolved_source"], 1)
+            self.assertFalse((config.movie_root / ".actors").exists())
+            self.assertEqual(result["counts"]["applied"], 0)
+            self.assertIn("Nothing has been written", result["message"])
 
     def test_missing_poster_reports_unresolved_target(self):
         config = mock.Mock()
         with mock.patch.object(bulk, "get_record", return_value={"local_target": "movie.nfo"}), \
                 mock.patch("harvester_core.transport.transport_from_config", return_value=object()), \
                 mock.patch("harvester_core.jobs.movie_materialize.run", return_value={
-                    "processed": 1, "counts": {"poster_unresolved_target": 1}}):
+                    "processed": 1, "counts": {"poster_unresolved_target": 1}}), \
+                mock.patch.object(bulk, "persist_preparation",
+                                  return_value={"prepared": 0}):
             result = bulk.run(config, "missing-posters", ["movie"], None)
         self.assertFalse(result["ok"])
         self.assertIn("no safe poster target", result["message"])

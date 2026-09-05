@@ -292,8 +292,8 @@ def materialize_show(
     if write_nfo:
         nfo_path = show_dir / "show.nfo"
         try:
-            if nfo_path.exists() and not options.overwrite_nfo:
-                mark_item(state["nfo"], "exists", bytes=nfo_path.stat().st_size)
+            if committer.exists(nfo_path) and not options.overwrite_nfo:
+                mark_item(state["nfo"], "exists", bytes=committer.stat(nfo_path).st_size)
                 counters["nfo_exists"] += 1
             elif not record.get("nfo"):
                 mark_item(state["nfo"], "error", error="matched record has no NFO payload")
@@ -301,14 +301,14 @@ def materialize_show(
             else:
                 xml = render_show_nfo(record["nfo"])
                 committer.write(nfo_path, xml)
-                mark_item(state["nfo"], "ok", bytes=len(xml))
+                mark_item(state["nfo"], "ok" if committer.committing else "planned", bytes=len(xml))
                 counters["nfo_ok"] += 1
             changes += 1
         except Exception as error:
             mark_item(state["nfo"], "error", error=repr(error))
             counters["nfo_error"] += 1
             changes += 1
-        emit(reporter, "artifact", "NFO handled", show=folder_name,
+        emit(reporter, "artifact" if committer.committing else "prepared", "NFO handled", show=folder_name,
              status=state["nfo"].get("status"))
 
     if write_poster:
@@ -316,9 +316,10 @@ def materialize_show(
         poster_state = state["poster"]
         poster_url = assets.get("poster_url")
         try:
-            existing = next((path for path in (poster_jpg, poster_png) if path.exists()), None)
+            existing = next((path for path in (poster_jpg, poster_png)
+                             if committer.exists(path)), None)
             if existing and not options.overwrite_poster:
-                mark_item(poster_state, "exists", bytes=existing.stat().st_size,
+                mark_item(poster_state, "exists", bytes=committer.stat(existing).st_size,
                           file=existing.name)
                 counters["poster_exists"] += 1
             elif not poster_url:
@@ -329,12 +330,13 @@ def materialize_show(
                 target = show_dir / ("poster" + image_extension(data, content_type))
                 alternate = poster_png if target == poster_jpg else poster_jpg
                 committer.write(target, data)
-                if alternate.exists():
+                if committer.exists(alternate):
                     try:
                         committer.unlink(alternate)
                     except OSError:
                         pass
-                mark_item(poster_state, "ok", bytes=len(data), file=target.name,
+                mark_item(poster_state, "ok" if committer.committing else "planned",
+                          bytes=len(data), file=target.name,
                           content_type=content_type)
                 counters["poster_ok"] += 1
                 counters["bytes"] += len(data)
@@ -345,7 +347,7 @@ def materialize_show(
             mark_item(poster_state, "error", error=repr(error), url=poster_url)
             counters["poster_error"] += 1
             changes += 1
-        emit(reporter, "artifact", "poster handled", show=folder_name,
+        emit(reporter, "artifact" if committer.committing else "prepared", "poster handled", show=folder_name,
              status=poster_state.get("status"))
 
     for actor in (assets.get("actor_urls") or []) if write_actors else []:
@@ -359,8 +361,8 @@ def materialize_show(
             # Path creation belongs inside this boundary: malformed actor data
             # must not abort all remaining shows and actors.
             output = actors_dir / safe_actor_filename(name)
-            if output.exists():
-                mark_item(actor_state, "exists", bytes=output.stat().st_size)
+            if committer.exists(output):
+                mark_item(actor_state, "exists", bytes=committer.stat(output).st_size)
                 counters["actor_exists"] += 1
             elif not actor.get("url"):
                 mark_item(actor_state, "no_url",
@@ -372,7 +374,7 @@ def materialize_show(
                 source, content_type = fetch(actor["url"])
                 data = normalize_actor_image(source, options.normalize_actors)
                 committer.write(output, data)
-                mark_item(actor_state, "ok", bytes=len(data),
+                mark_item(actor_state, "ok" if committer.committing else "planned", bytes=len(data),
                           source_bytes=len(source), content_type=content_type)
                 counters["actor_ok"] += 1
                 counters["bytes"] += len(data)
@@ -385,7 +387,7 @@ def materialize_show(
             mark_item(actor_state, "error", error=repr(error), url=actor.get("url"))
             counters["actor_error"] += 1
             changes += 1
-        emit(reporter, "artifact", "actor image handled", show=folder_name,
+        emit(reporter, "artifact" if committer.committing else "prepared", "actor image handled", show=folder_name,
              actor=name, status=actor_state.get("status"))
     if write_nfo and write_poster and write_actors:
         update_overall_status(record)
