@@ -33,9 +33,9 @@ def discover_movies(root):
     if not root.is_dir():
         raise FileNotFoundError(f"MOVIE_ROOT is not a directory: {root}")
     found = {}
-    for directory, dirs, files in __import__("os").walk(root):
-        dirs[:] = [name for name in dirs if not name.startswith(".")]
-        base = Path(directory)
+    for base in sorted(path for path in root.iterdir()
+                       if path.is_dir() and not path.name.startswith(".")):
+        files = [path.name for path in base.iterdir() if path.is_file()]
         nfos = sorted(base / name for name in files if name.lower().endswith(".nfo"))
         videos = sorted(
             base / name for name in files

@@ -230,7 +230,40 @@ class BulkRecipeTests(unittest.TestCase):
                            {"processed": 1, "counts": {"ok": 1}}):
             result = bulk.run(config, "lost-found", ["movie"], None)
         self.assertEqual(calls, ["scan", "materialize"])
-        self.assertEqual(result["processed"], 2)
+        self.assertEqual(result["processed"], 1)
+
+    def test_missing_actor_bulk_uses_transport_and_accounts_for_missing_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = load_config({"state_dir": root / "state", "movie_root": root / "movies",
+                                  "tv_root": root / "tv"}, environ={}, app_dir=root)
+            config.movie_root.mkdir()
+            class Response:
+                headers = {"Content-Type": "image/jpeg"}
+                def __enter__(self): return self
+                def __exit__(self, *args): return False
+                def read(self): return b"\xff\xd8actor"
+            class RecordingTransport:
+                user_agent = None
+                def open(self, request, timeout=None):
+                    self.user_agent = request.get_header("User-agent")
+                    return Response()
+            transport = RecordingTransport()
+            def scan_with_one_source(*args, **kwargs):
+                save_json_atomic(config.state_path("actor_thumb_urls_tmdb.json"),
+                                 {"Has URL": ["https://images/actor.jpg"]})
+                return {"processed": 2, "counts": {"ok": 1, "unresolved": 1}}
+            with mock.patch("harvester_core.transport.transport_from_config",
+                            return_value=transport), \
+                    mock.patch("harvester_core.providers.tmdb.TMDBClient",
+                               return_value=object()), \
+                    mock.patch("harvester_core.jobs.movie_actor_scan.run",
+                               side_effect=scan_with_one_source):
+                result = bulk.run(config, "missing-actor-images",
+                                  ["Has URL", "No URL"], None)
+            self.assertEqual(transport.user_agent, "local-tmdb-actor-photo-gulper/1.0")
+            self.assertEqual(result["processed"], 2)
+            self.assertEqual(result["counts"]["image_unresolved_source"], 1)
 
     def test_missing_poster_reports_unresolved_target(self):
         config = mock.Mock()

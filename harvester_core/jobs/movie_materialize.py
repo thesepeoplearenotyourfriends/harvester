@@ -1,12 +1,14 @@
 """TMDB movie Stage 2. This module consumes frozen records only."""
 from collections import Counter
+import copy
 from datetime import datetime, timezone
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
 from ..downloads import download_image
 from ..events import emit
-from ..storage import load_json, save_json_atomic, write_bytes_atomic
+from ..artifacts import planned, use_committer
+from ..storage import load_json, save_json_atomic
 from .tv_materialize import image_extension
 
 USER_AGENT = "local-tmdb-movie-materializer/1.0"
@@ -48,9 +50,10 @@ def render_movie_nfo(payload):
 
 def run(config, reporter=None, limit=None, overwrite_nfo=False, overwrite_poster=False,
         targets=None, transport=None, downloader=None, write_nfo=True,
-        write_poster=True):
+        write_poster=True, committer=None):
+    committer = use_committer(committer)
     path = config.state_path("movie_manifest_tmdb.json")
-    manifest = load_json(path, None)
+    manifest = copy.deepcopy(load_json(path, None))
     if not isinstance(manifest, dict) or not isinstance(manifest.get("movies"), dict):
         raise FileNotFoundError(f"movie manifest not found: {path}; run movies scan first")
     selected = set(targets or [])
@@ -71,7 +74,7 @@ def run(config, reporter=None, limit=None, overwrite_nfo=False, overwrite_poster
                     state["nfo"] = {"status": "exists", "file": str(nfo_path), "bytes": nfo_path.stat().st_size, "updated": now_iso()}
                 else:
                     data = render_movie_nfo(record.get("nfo"))
-                    write_bytes_atomic(nfo_path, data)
+                    committer.write(nfo_path, data)
                     state["nfo"] = {"status": "ok", "file": str(nfo_path), "bytes": len(data), "updated": now_iso()}
             poster_value = record.get("poster_path")
             poster = Path(poster_value) if poster_value else None
@@ -81,7 +84,8 @@ def run(config, reporter=None, limit=None, overwrite_nfo=False, overwrite_poster
                 counts["poster_unresolved_target"] += 1
                 if write_nfo:
                     counts[state["nfo"]["status"]] += 1
-                save_json_atomic(path, manifest)
+                if committer.committing:
+                    save_json_atomic(path, manifest)
                 emit(reporter, "progress", key, status="unresolved_target",
                      target_kind="movie", id=key)
                 continue
@@ -99,11 +103,11 @@ def run(config, reporter=None, limit=None, overwrite_nfo=False, overwrite_poster
                         )
                         data, content_type = fetched if isinstance(fetched, tuple) else (fetched, "")
                         output = poster.with_suffix(image_extension(data, content_type))
-                        write_bytes_atomic(output, data)
+                        committer.write(output, data)
                         cleanup_error = None
                         if existing and existing.exists() and existing != output:
                             try:
-                                existing.unlink()
+                                committer.unlink(existing)
                             except OSError as error:
                                 cleanup_error = f"{type(error).__name__}: {error}"
                         state["poster"] = {"status": "ok", "file": str(output), "bytes": len(data), "content_type": content_type, "source_url": record["poster_url"], "updated": now_iso()}
@@ -116,11 +120,17 @@ def run(config, reporter=None, limit=None, overwrite_nfo=False, overwrite_poster
                 counts[state["nfo"]["status"]] += 1
             if write_poster:
                 counts[f"poster_{state['poster']['status']}"] += 1
-            save_json_atomic(path, manifest)
+            if committer.committing:
+                save_json_atomic(path, manifest)
             emit(reporter, "progress", key, status="materialized", target_kind="movie", id=key)
     except KeyboardInterrupt:
-        save_json_atomic(path, manifest)
+        if committer.committing:
+            save_json_atomic(path, manifest)
         raise
     manifest.setdefault("_meta", {})["last_materialize"] = now_iso()
-    save_json_atomic(path, manifest)
+    if committer.committing:
+        save_json_atomic(path, manifest)
+    if not committer.committing:
+        return {"processed": processed, "planned_counts": dict(counts),
+                "planned": planned(committer)}
     return {"processed": processed, "counts": dict(counts)}

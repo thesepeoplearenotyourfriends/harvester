@@ -1,11 +1,13 @@
 """Materialize the frozen TMDB actor URL list."""
 from datetime import datetime, timezone
+import copy
 import time
 import urllib.request
 
 from ..events import emit
 from ..images import normalize_actor_image, safe_actor_filename
-from ..storage import load_json, save_json_atomic, write_bytes_atomic
+from ..artifacts import planned, use_committer
+from ..storage import load_json, save_json_atomic
 
 
 def run(
@@ -22,12 +24,14 @@ def run(
     save_every=25,
     sleep=None,
     targets=None,
+    committer=None,
 ):
+    committer = use_committer(committer)
     urls = load_json(config.state_path("actor_thumb_urls_tmdb.json"), {})
     status_path = config.state_path("actor_photo_download_status.json")
-    statuses = load_json(status_path, {})
+    statuses = copy.deepcopy(load_json(status_path, {}))
     target_dir = config.movie_root / ".actors"
-    target_dir.mkdir(parents=True, exist_ok=True)
+    committer.mkdir(target_dir)
 
     def fetch(url):
         request = urllib.request.Request(url, headers={
@@ -70,7 +74,7 @@ def run(
             if not source:
                 raise RuntimeError("downloaded zero bytes")
             data = normalize_actor_image(source, normalize)
-            write_bytes_atomic(output, data)
+            committer.write(output, data)
             statuses[name] = {
                 "status": "ok", "file": str(output), "bytes": len(data),
                 "source_bytes": len(source), "url": urls[name][0],
@@ -86,12 +90,17 @@ def run(
         processed += 1
         changed += 1
         if changed >= save_every:
-            save_json_atomic(status_path, statuses)
+            if committer.committing:
+                save_json_atomic(status_path, statuses)
             changed = 0
         emit(reporter, "progress", name, status=statuses[name]["status"])
         if sleep_between:
             sleep(sleep_between)
-    save_json_atomic(status_path, statuses)
+    if committer.committing:
+        save_json_atomic(status_path, statuses)
+    if not committer.committing:
+        return {"processed": processed, "total": len(urls),
+                "planned_counts": counts, "planned": planned(committer)}
     return {"processed": processed, "total": len(urls), "counts": counts}
 
 

@@ -1,5 +1,6 @@
 """TV Stage 2: materialize only the metadata and URLs frozen by Stage 1."""
 from collections import Counter
+import copy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,7 +10,8 @@ import xml.etree.ElementTree as ET
 from ..downloads import download_image
 from ..events import emit
 from ..images import normalize_actor_image, safe_actor_filename
-from ..storage import load_json, save_json_atomic, write_bytes_atomic
+from ..artifacts import planned, use_committer
+from ..storage import load_json, save_json_atomic
 
 USER_AGENT = "local-tv-tvdb-materializer/1.0"
 
@@ -257,8 +259,10 @@ def materialize_show(
     write_nfo=True,
     write_poster=True,
     write_actors=True,
+    committer=None,
 ):
     """Materialize one record without provider access or terminal output."""
+    committer = use_committer(committer)
     show_dir = Path(show_path)
     folder_name = record.get("folder_name") or show_dir.name
     state = record.setdefault("materialize", {})
@@ -296,7 +300,7 @@ def materialize_show(
                 counters["nfo_error"] += 1
             else:
                 xml = render_show_nfo(record["nfo"])
-                write_bytes_atomic(nfo_path, xml)
+                committer.write(nfo_path, xml)
                 mark_item(state["nfo"], "ok", bytes=len(xml))
                 counters["nfo_ok"] += 1
             changes += 1
@@ -324,10 +328,10 @@ def materialize_show(
                 data, content_type = fetch(poster_url)
                 target = show_dir / ("poster" + image_extension(data, content_type))
                 alternate = poster_png if target == poster_jpg else poster_jpg
-                write_bytes_atomic(target, data)
+                committer.write(target, data)
                 if alternate.exists():
                     try:
-                        alternate.unlink()
+                        committer.unlink(alternate)
                     except OSError:
                         pass
                 mark_item(poster_state, "ok", bytes=len(data), file=target.name,
@@ -367,7 +371,7 @@ def materialize_show(
             else:
                 source, content_type = fetch(actor["url"])
                 data = normalize_actor_image(source, options.normalize_actors)
-                write_bytes_atomic(output, data)
+                committer.write(output, data)
                 mark_item(actor_state, "ok", bytes=len(data),
                           source_bytes=len(source), content_type=content_type)
                 counters["actor_ok"] += 1
@@ -407,8 +411,10 @@ def run(
     write_nfo=True,
     write_poster=True,
     write_actors=True,
+    committer=None,
 ):
     """Materialize a frozen manifest and return a compact structured result."""
+    committer = use_committer(committer)
     options = MaterializeOptions(
         overwrite_nfo=overwrite_nfo,
         overwrite_poster=overwrite_poster,
@@ -420,14 +426,14 @@ def run(
     )
     sleep = sleep or time.sleep
     work_path = config.state_path("tv_show_urls_tvdb.json")
-    manifest = load_json(work_path, None)
+    manifest = copy.deepcopy(load_json(work_path, None))
     if not isinstance(manifest, dict) or not isinstance(manifest.get("shows"), dict):
         raise RuntimeError(f"No usable Stage 1 work file at {work_path}; run 'tv scan' first")
     if not config.tv_root.is_dir():
         raise FileNotFoundError(f"TV root is not a readable directory: {config.tv_root}")
     actors_dir = config.tv_root / ".actors"
     if write_actors:
-        actors_dir.mkdir(parents=True, exist_ok=True)
+        committer.mkdir(actors_dir)
     matched = [
         (path, record) for path, record in manifest["shows"].items()
         if record.get("status") == "matched" and record.get("nfo")
@@ -445,11 +451,13 @@ def run(
                 show_path, record, actors_dir, counters, options, reporter, downloader,
                 sleep, transport,
                 write_nfo, write_poster, write_actors,
+                committer,
             )
             changed_since_save += changes
             manifest.setdefault("_meta", {})["updated"] = now_iso()
             if changed_since_save >= save_every_changes:
-                save_json_atomic(work_path, manifest)
+                if committer.committing:
+                    save_json_atomic(work_path, manifest)
                 changed_since_save = 0
             emit(reporter, "progress", record.get("folder_name", show_path),
                  status=record.get("materialize", {}).get("status"))
@@ -468,11 +476,19 @@ def run(
             "actor_error": counters["actor_error"],
             "bytes_written": counters["bytes"],
         }
-        save_json_atomic(work_path, manifest)
-    return {
+        if committer.committing:
+            save_json_atomic(work_path, manifest)
+    result = {
         "processed": counters["shows_seen"],
         "bytes_written": counters["bytes"],
         "nfo_ok": counters["nfo_ok"],
         "poster_ok": counters["poster_ok"],
         "actor_ok": counters["actor_ok"],
     }
+    if not committer.committing:
+        return {"processed": counters["shows_seen"],
+                "planned_counts": {"nfo": counters["nfo_ok"],
+                                   "poster": counters["poster_ok"],
+                                   "actor": counters["actor_ok"]},
+                "planned": planned(committer)}
+    return result

@@ -87,6 +87,18 @@ class MachineApiMovieTests(unittest.TestCase):
         self.assertNotIn("secret", serialized)
         self.assertEqual({x["key"] for x in records[0]["result"]["providers"]}, {"tmdb", "tvdb"})
 
+    def test_movie_discovery_does_not_promote_descendant_video_folders(self):
+        root = Path(self.temp.name) / "nested-movies"
+        movie = root / "The Good the Bad and the Ugly - 1966"
+        sample = movie / "Sample"
+        sample.mkdir(parents=True)
+        (movie / "movie.nfo").write_text("<movie><title>The Good the Bad and the Ugly</title></movie>")
+        (movie / "movie.mkv").write_bytes(b"movie")
+        (movie / "poster.jpg").write_bytes(b"poster")
+        (sample / "sample.mkv").write_bytes(b"sample")
+        discovered = discover_movies(root)
+        self.assertEqual(list(discovered), [str((movie / "movie.nfo").resolve())])
+
     def test_api_errors_are_json_and_nonzero(self):
         result = self.cli("api", "get", "actor", "Missing")
         record = json.loads(result.stdout)

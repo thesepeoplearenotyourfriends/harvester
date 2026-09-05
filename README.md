@@ -111,6 +111,12 @@ store. Lost & Found resolves provider metadata before writing an NFO. Missing Po
 reports records without an already-safe poster target as unresolved rather than
 inventing a filename.
 
+Movie discovery treats only immediate, non-hidden children of `MOVIE_ROOT` as movie
+containers, so nested sample/extras/disc directories cannot become census records.
+Artifact materializers accept a commit boundary: production uses atomic filesystem
+commits, while a recording committer returns the exact planned directories, destinations,
+bytes, and cleanup operations without changing library files or durable receipts.
+
 List and search results are written atomically to filter-specific, versioned files
 under `.cache/ui/`. Only an asset descriptor crosses the Severin bridge, and the
 renderer reads the collection through `asset://com.harvester.app/`. The cache is
