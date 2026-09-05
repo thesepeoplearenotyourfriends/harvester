@@ -99,6 +99,30 @@ in the browser, fits them within 185 × 278 pixels, and sends a small canonical 
 for the `.actors` file. Refresh from API invokes the existing targeted actor image
 refresh.
 
+Bulk work has one application-level state shown either in the persistent bottom strip,
+its slide-up drawer, or the full **Work → Bulk** workspace. Problem queues expose
+**Re-fetch from web**, which freezes that queue's current record identities in its
+immutable collection cache before starting a semantic, allowlisted recipe. Leaving the
+queue or closing the drawer does not stop the work. While a Bulk writer is active,
+navigation and inspection remain available but other UI write controls are disabled.
+Broad materialization preserves files that already exist rather than treating the
+workflow as an overwrite request; Bulk state is session-only and is not a job-history
+store. Lost & Found resolves provider metadata before preparing an NFO. Missing Poster
+reports records without an already-safe poster target as unresolved rather than
+inventing a filename.
+
+`Re-fetch from web` is preparation-only: provider work may update Harvester manifests
+and caches, but its artifact recipes never mutate the configured media roots. Prepared
+bytes and an atomic review manifest live under disposable `.cache/bulk/<plan-id>/` data;
+the Bulk summary reports prepared, attention, and applied counts, with applied fixed at
+zero until a future inspectable review/apply surface exists.
+
+Movie discovery treats only immediate, non-hidden children of `MOVIE_ROOT` as movie
+containers, so nested sample/extras/disc directories cannot become census records.
+Artifact materializers accept a commit boundary: production uses atomic filesystem
+commits, while a recording committer returns the exact planned directories, destinations,
+bytes, and cleanup operations without changing library files or durable receipts.
+
 List and search results are written atomically to filter-specific, versioned files
 under `.cache/ui/`. Only an asset descriptor crosses the Severin bridge, and the
 renderer reads the collection through `asset://com.harvester.app/`. The cache is

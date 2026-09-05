@@ -113,6 +113,11 @@ def parser():
     search_parser.add_argument("--limit", type=int, default=50)
     api.add_parser("rescan", help="rebuild all local censuses offline")
     api.add_parser("inventory", help="summarize durable state")
+    bulk = api.add_parser("bulk", help=argparse.SUPPRESS)
+    bulk.add_argument("workflow")
+    bulk.add_argument("--scope-file", required=True)
+    bulk.add_argument("--generation", required=True)
+    bulk.add_argument("--count", required=True, type=int)
     refresh = api.add_parser("refresh", help="refresh explicitly named records").add_subparsers(dest="kind", required=True)
     aspects = {"actor": ("identity", "image", "all"), "movie": ("identity", "metadata", "nfo", "poster", "actors", "all"), "show": ("identity", "metadata", "nfo", "poster", "actors", "all")}
     for kind, choices in aspects.items():
@@ -285,6 +290,11 @@ def api_main(args, config):
                 terminal(rescan(config))
             else:
                 terminal(inventory(config))
+        elif args.api_command == "bulk":
+            from harvester_core.jobs.bulk import load_scope, run
+            identities = load_scope(config, args.workflow, args.scope_file,
+                                    args.generation, args.count)
+            terminal(run(config, args.workflow, identities, api_report))
         else:
             from harvester_core.transport import transport_from_config
             transport = transport_from_config(config)

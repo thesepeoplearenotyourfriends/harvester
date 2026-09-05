@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 import harvester_ui
+from harvester_core.jobs import bulk
 from harvester_core.config import load_config
 from harvester_core.storage import save_json_atomic
 
@@ -57,6 +58,25 @@ class HarvesterUIBridgeTests(unittest.TestCase):
                          frozenset({"__ping__", *harvester_ui.ACTION_REGISTRY}))
         with self.assertRaises(harvester_ui.BridgeError):
             harvester_ui.action_argv("actor.install_image", {"path": "/tmp/escape"})
+
+    def test_bulk_workflow_is_semantic_bounded_and_preserves_artifacts(self):
+        scope = {
+            "asset": "asset://com.harvester.app/.cache/ui/collection-v1-abc.json",
+            "count": 2, "generation": "generation", "version": 1,
+        }
+        argv = harvester_ui.action_argv(
+            "bulk.workflow",
+            {"workflow": "missing-posters", "scope": scope},
+        )
+        self.assertEqual(argv[3:5], ["bulk", "missing-posters"])
+        self.assertIn("--scope-file", argv)
+        self.assertNotIn("movie one", argv)
+        for payload in (
+                {"workflow": "shell", "scope": scope},
+                {"workflow": "missing-posters", "scope": {**scope, "count": 1_000_001}},
+                {"workflow": "missing-posters", "scope": {**scope, "asset": "asset://com.harvester.app/.cache/ui/../escape"}}):
+            with self.subTest(payload=payload), self.assertRaises(harvester_ui.BridgeError):
+                harvester_ui.action_argv("bulk.workflow", payload)
 
     def test_manual_jpeg_install_uses_canonical_actor_path(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -179,6 +199,108 @@ class HarvesterUICacheTests(unittest.TestCase):
         self.assertIn('querySelector("#search").disabled = scanning', page)
         self.assertIn("showStartupRescanFailure(error)", page)
         self.assertIn("Work queues and Search remain unavailable", page)
+
+    def test_bulk_drawer_and_workspace_share_navigation_safe_frozen_state(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        self.assertIn('bulk: { job: null, drawerOpen: false }', page)
+        self.assertIn('state.bulk.job = {', page)
+        self.assertIn('scope,', page)
+        self.assertIn('App.request("bulk.workflow", { workflow, scope }, false, true)', page)
+        self.assertIn('if (state.workflow === "bulk")', page)
+        self.assertIn('state.bulk.drawerOpen = false', page)
+        self.assertNotIn('state.bulk.job = null', page)
+        self.assertNotIn('completed: identities.length', page)
+        self.assertIn('<progress aria-label="Bulk work in progress"></progress>', page)
+        self.assertIn('writerActive()', page)
+        self.assertIn('Re-fetch from web', page)
+
+
+class BulkRecipeTests(unittest.TestCase):
+    def test_lost_found_scans_before_materializing_nfo(self):
+        config = mock.Mock(tmdb_api_key="key", tmdb_bearer_token=None)
+        config.state_path.return_value = Path("cache.json")
+        calls = []
+        committers = []
+        with mock.patch.object(bulk, "get_record", return_value={"local_target": "movie.nfo"}), \
+                mock.patch("harvester_core.transport.transport_from_config", return_value=object()), \
+                mock.patch("harvester_core.providers.tmdb.TMDBClient", return_value=object()), \
+                mock.patch("harvester_core.jobs.movie_scan.run",
+                           side_effect=lambda *a, **k: calls.append("scan") or {"processed": 1}), \
+                mock.patch("harvester_core.jobs.movie_materialize.run",
+                           side_effect=lambda *a, **k: (calls.append("materialize"),
+                                                        committers.append(k["committer"])) and
+                           {"processed": 1, "counts": {"ok": 1}}), \
+                mock.patch.object(bulk, "persist_preparation",
+                                  return_value={"prepared": 1}):
+            result = bulk.run(config, "lost-found", ["movie"], None)
+        self.assertEqual(calls, ["scan", "materialize"])
+        self.assertEqual(result["processed"], 1)
+        self.assertFalse(committers[0].committing)
+
+    def test_missing_actor_bulk_uses_transport_and_accounts_for_missing_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = load_config({"state_dir": root / "state", "movie_root": root / "movies",
+                                  "tv_root": root / "tv"}, environ={}, app_dir=root)
+            config.movie_root.mkdir()
+            class Response:
+                headers = {"Content-Type": "image/jpeg"}
+                def __enter__(self): return self
+                def __exit__(self, *args): return False
+                def read(self): return b"\xff\xd8actor"
+            class RecordingTransport:
+                user_agent = None
+                def open(self, request, timeout=None):
+                    self.user_agent = request.get_header("User-agent")
+                    return Response()
+            transport = RecordingTransport()
+            def scan_with_one_source(*args, **kwargs):
+                save_json_atomic(config.state_path("actor_thumb_urls_tmdb.json"),
+                                 {"Has URL": ["https://images/actor.jpg"]})
+                return {"processed": 2, "counts": {"ok": 1, "unresolved": 1}}
+            with mock.patch("harvester_core.transport.transport_from_config",
+                            return_value=transport), \
+                    mock.patch("harvester_core.providers.tmdb.TMDBClient",
+                               return_value=object()), \
+                    mock.patch("harvester_core.jobs.movie_actor_scan.run",
+                               side_effect=scan_with_one_source):
+                result = bulk.run(config, "missing-actor-images",
+                                  ["Has URL", "No URL"], None)
+            self.assertEqual(transport.user_agent, "local-tmdb-actor-photo-gulper/1.0")
+            self.assertEqual(result["processed"], 2)
+            self.assertEqual(result["counts"]["image_unresolved_source"], 1)
+            self.assertFalse((config.movie_root / ".actors").exists())
+            self.assertEqual(result["counts"]["applied"], 0)
+            self.assertIn("Nothing has been written", result["message"])
+
+    def test_missing_poster_reports_unresolved_target(self):
+        config = mock.Mock()
+        with mock.patch.object(bulk, "get_record", return_value={"local_target": "movie.nfo"}), \
+                mock.patch("harvester_core.transport.transport_from_config", return_value=object()), \
+                mock.patch("harvester_core.jobs.movie_materialize.run", return_value={
+                    "processed": 1, "counts": {"poster_unresolved_target": 1}}), \
+                mock.patch.object(bulk, "persist_preparation",
+                                  return_value={"prepared": 0}):
+            result = bulk.run(config, "missing-posters", ["movie"], None)
+        self.assertFalse(result["ok"])
+        self.assertIn("no safe poster target", result["message"])
+        self.assertEqual(result["counts"]["poster_unresolved_target"], 1)
+
+    def test_scope_rejects_oversized_aggregate_identities(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / ".cache" / "ui"
+            cache.mkdir(parents=True)
+            path = cache / "collection-v1-large.json"
+            items = [{"name": "x" * (16 * 1024 * 1024 + 1)}]
+            generation = __import__("hashlib").sha256(json.dumps(
+                items, sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest()[:20]
+            path.write_text(json.dumps({"version": 1, "generation": generation,
+                                        "items": items}))
+            config = mock.Mock(app_dir=root)
+            with self.assertRaisesRegex(ValueError, "identity scope"):
+                bulk.load_scope(config, "missing-actor-images", path, generation, 1)
 
     def test_movie_and_tv_renderers_use_artifact_inspection(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
