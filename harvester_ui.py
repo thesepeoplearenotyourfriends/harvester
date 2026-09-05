@@ -54,10 +54,19 @@ def _list(kind):
         if not set(data) <= allowed or not all(isinstance(v, str) for v in data.values()):
             raise BridgeError(f"list.{kind}s accepts string status/missing filters only")
         suffix = ["list", kind + "s", "--brief"]
+        if kind in ("movie", "show"):
+            suffix.append("--artifacts")
         for option in ("status", "missing"):
             if data.get(option):
                 suffix += ["--" + option, data[option]]
         return tuple(suffix)
+    return build
+
+
+def _inspect(kind):
+    def build(data):
+        _identifier(kind)(data)
+        return ("inspect", kind, data["identifier"])
     return build
 
 
@@ -85,6 +94,7 @@ ACTION_REGISTRY = {
     "list.movies": _list("movie"), "list.shows": _list("show"),
     "list.actors": _list("actor"), "get.movie": _identifier("movie"),
     "get.show": _identifier("show"), "get.actor": _identifier("actor"),
+    "inspect.movie": _inspect("movie"), "inspect.show": _inspect("show"),
     "search": _search, "rescan": _rescan,
     "refresh.actor.image": _refresh_actor,
     "actor.install_image": None,

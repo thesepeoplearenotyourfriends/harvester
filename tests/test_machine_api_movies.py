@@ -14,6 +14,7 @@ from harvester_core.jobs.tv_materialize import run as materialize_tv
 from harvester_core.providers.profiles import profiles
 from harvester_core.rescan import rescan
 from harvester_core.storage import load_json, save_json_atomic
+from harvester_core.api import inspect_item, list_artifacts
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -127,6 +128,49 @@ class MachineApiMovieTests(unittest.TestCase):
             result = self.cli(*command)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)["type"], "result")
+
+    def test_artifact_inspection_reads_current_files_not_frozen_work_fields(self):
+        folder = self.movies / "Example (2020)"
+        nfo = folder / "movie.nfo"
+        poster = folder / "poster.png"
+        video = folder / "Example.mkv"
+        poster.write_bytes(b"png")
+        video.write_bytes(b"video")
+        save_json_atomic(self.state / "movie_manifest_tmdb.json", {"movies": {
+            str(nfo): {"status": "failed", "title": "Stale title", "tries": 99,
+                       "nfo_path": str(nfo), "poster_target_status": "unresolved"}
+        }})
+
+        before = (self.state / "movie_manifest_tmdb.json").read_bytes()
+        with mock.patch("urllib.request.urlopen", side_effect=AssertionError("network used")):
+            item = inspect_item(self.config, "movie", str(nfo))
+
+        self.assertEqual(item["nfo"]["fields"]["title"], "Example")
+        self.assertEqual(item["nfo"]["fields"]["unique_ids"], {"tmdb": "7"})
+        self.assertEqual(item["poster"], {"present": True, "path": str(poster)})
+        self.assertEqual(item["video_files"], [str(video)])
+        self.assertNotIn("tries", item)
+        self.assertNotIn("poster_target_status", item)
+        self.assertEqual((self.state / "movie_manifest_tmdb.json").read_bytes(), before)
+
+    def test_missing_poster_projection_groups_shared_directory_and_marks_ambiguity(self):
+        folder = self.movies / "Shared"
+        folder.mkdir()
+        first = folder / "first.nfo"
+        second = folder / "second.nfo"
+        first.write_text("<movie><title>First</title></movie>")
+        second.write_text("<movie><title>Second</title></movie>")
+        save_json_atomic(self.state / "movie_manifest_tmdb.json", {"movies": {
+            str(first): {"nfo_path": str(first)},
+            str(second): {"nfo_path": str(second)},
+        }})
+
+        items = list_artifacts(self.config, "movie", missing="poster")
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["manifest_identities"], [str(first), str(second)])
+        self.assertEqual(items[0]["ownership"]["status"], "ambiguous")
+        self.assertEqual(items[0]["nfo"], {"present": True, "count": 2})
 
     def test_brief_lists_and_offline_search_return_compact_typed_records(self):
         save_json_atomic(self.state / "movie_actor_queue.json", {"actors": {

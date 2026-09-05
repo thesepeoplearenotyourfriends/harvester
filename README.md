@@ -58,6 +58,15 @@ All state is ordinary atomically replaced JSON:
 
 Normal runs resume these files. An actor found in several NFOs is tried through those movie contexts until one resolves. Movie lookup prefers local TMDB ID, then IMDb lookup, then conservative title/year matching. Existing actor files are always receipts; NFO/poster overwrite behavior retains the reference defaults and has explicit opt-outs. Failed transfers are retried only when the corresponding retry control permits it. A transient refresh failure does not replace a prior successful match. Ambiguous title-only TV searches remain staged as ambiguous for human correction rather than selecting recklessly. CLI results are compact summaries; detailed receipts remain in these JSON files. Malformed state is never silently replaced: jobs report an actionable read error, while `status` marks the affected file unreadable and continues checking the others.
 
+For offline integrations, `api get movie|show IDENTIFIER` remains the raw durable-record
+primitive. `api inspect movie|show IDENTIFIER` instead reports the artifacts currently
+on disk: the owning directory, parsed local NFO fields, poster and video presence, and
+the manifest identities behind that view. `api list movies|shows --artifacts` provides
+the same presentation projection for queues. Movie entries sharing a directory are
+grouped and reported with ambiguous ownership rather than pretending each NFO owns the
+same missing poster. These inspection operations make no provider requests and do not
+change durable state.
+
 ## Validation
 
 No live provider or real library is used by the suite:
