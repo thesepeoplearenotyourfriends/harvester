@@ -153,8 +153,14 @@ def inspect_item(config, kind, identifier):
 
 def list_artifacts(config, kind, status=None, missing=None, group_directories=False):
     """Return compact artifact queue rows, grouping only when explicitly asked."""
+    source = records(config, kind)
+    directory_members = {}
+    if group_directories and kind == "movie":
+        for key, record in source.items():
+            directory = _movie_directory(key, record)
+            directory_members.setdefault(directory, []).append(key)
     selected = []
-    for key, record in records(config, kind).items():
+    for key, record in source.items():
         if status:
             statuses = ("failed", "error") if kind == "movie" and status == "failed" else (status,)
             if record.get("status") not in statuses:
@@ -173,8 +179,7 @@ def list_artifacts(config, kind, status=None, missing=None, group_directories=Fa
         presence = {"nfo": nfo.is_file(), "poster": bool(posters)}
         if missing and presence[missing]:
             continue
-        all_identities = ([candidate for candidate, candidate_record in records(config, kind).items()
-                           if _movie_directory(candidate, candidate_record) == directory]
+        all_identities = (directory_members[directory]
                           if group_directories and kind == "movie" else [key])
         ambiguous = group_directories and kind == "movie" and len(all_identities) > 1
         items.append({"kind": kind, "identifier": owner,

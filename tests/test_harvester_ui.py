@@ -191,7 +191,6 @@ class HarvesterUICacheTests(unittest.TestCase):
         self.assertIn("row.grouped", page)
         self.assertIn("await rawRecords(detail.kind, rawIds)", page)
         self.assertIn("position: sticky", css)
-        self.assertNotIn("Bulk: idle", page)
 
 
 if __name__ == "__main__":

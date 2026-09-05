@@ -15,6 +15,7 @@ from harvester_core.providers.profiles import profiles
 from harvester_core.rescan import rescan
 from harvester_core.storage import load_json, save_json_atomic
 from harvester_core.api import inspect_item, list_artifacts
+import harvester_core.api as machine_api
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -175,6 +176,22 @@ class MachineApiMovieTests(unittest.TestCase):
         self.assertTrue(items[0]["nfo_present"])
         self.assertNotIn("nfo", items[0])
         self.assertNotIn("video_files", items[0])
+
+    def test_grouped_artifact_listing_reads_durable_collection_once(self):
+        source = {
+            str(self.movies / "One" / "first.nfo"): {
+                "nfo_path": str(self.movies / "One" / "first.nfo")},
+            str(self.movies / "One" / "second.nfo"): {
+                "nfo_path": str(self.movies / "One" / "second.nfo")},
+            str(self.movies / "Two" / "movie.nfo"): {
+                "nfo_path": str(self.movies / "Two" / "movie.nfo")},
+        }
+        with mock.patch.object(machine_api, "records", return_value=source) as read:
+            items = list_artifacts(self.config, "movie", missing="poster",
+                                   group_directories=True)
+
+        read.assert_called_once_with(self.config, "movie")
+        self.assertEqual(len(items), 2)
 
     def test_state_workflow_projection_preserves_matching_movie_identity(self):
         folder = self.movies / "Mixed"
