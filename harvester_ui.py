@@ -91,32 +91,29 @@ def _rescan(data):
     return ("rescan",)
 
 
-BULK_WORKFLOWS = {
-    "missing-actor-images": ("actor", "image"),
-    "failed-actors": ("actor", "identity"),
-    "lost-found": ("movie", "nfo"),
-    "missing-posters": ("movie", "poster"),
-    "unresolved-movies": ("movie", "identity"),
-    "failed-movies": ("movie", "identity"),
-    "ambiguous-tv": ("show", "identity"),
-    "not-found-tv": ("show", "identity"),
-    "tv-errors": ("show", "identity"),
-}
+BULK_WORKFLOWS = frozenset({
+    "missing-actor-images", "failed-actors", "lost-found", "missing-posters",
+    "unresolved-movies", "failed-movies", "ambiguous-tv", "not-found-tv", "tv-errors",
+})
 
 
 def _bulk_workflow(data):
     """Accept only a frozen set of identities for a known workflow operation."""
-    if set(data) != {"workflow", "identities"} or data.get("workflow") not in BULK_WORKFLOWS:
-        raise BridgeError("bulk.workflow requires a known workflow and identities")
-    identities = data["identities"]
-    if (not isinstance(identities, list) or len(identities) > 100_000 or
-            not all(isinstance(value, str) and value and "\0" not in value and
-                    not value.startswith("-") for value in identities)):
-        raise BridgeError("bulk.workflow identities must be a bounded list of record identifiers")
-    if not identities:
-        raise BridgeError("bulk.workflow requires at least one identity")
-    kind, aspect = BULK_WORKFLOWS[data["workflow"]]
-    return ("refresh", kind, *identities, "--aspect", aspect, "--preserve")
+    if set(data) != {"workflow", "scope"} or data.get("workflow") not in BULK_WORKFLOWS:
+        raise BridgeError("bulk.workflow requires a known workflow and frozen scope")
+    scope = data["scope"]
+    if not isinstance(scope, dict) or set(scope) != {"asset", "count", "generation", "version"}:
+        raise BridgeError("bulk.workflow requires a collection scope descriptor")
+    prefix = f"asset://{PACKAGE_ID}/.cache/ui/"
+    asset = scope.get("asset")
+    suffix = asset[len(prefix):] if isinstance(asset, str) and asset.startswith(prefix) else ""
+    if (not suffix.startswith(f"collection-v{COLLECTION_CACHE_VERSION}-") or "/" in suffix or
+            scope.get("version") != COLLECTION_CACHE_VERSION or
+            not isinstance(scope.get("count"), int) or not 1 <= scope["count"] <= 1_000_000 or
+            not isinstance(scope.get("generation"), str)):
+        raise BridgeError("bulk.workflow received an invalid frozen scope")
+    return ("bulk", data["workflow"], "--scope-file", str(CACHE_DIR / suffix),
+            "--generation", scope["generation"], "--count", str(scope["count"]))
 
 
 ACTION_REGISTRY = {
@@ -249,12 +246,13 @@ def publish_collection(action, data, result):
         {"version": COLLECTION_CACHE_VERSION, "action": action, "data": data},
         ensure_ascii=True, sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")
-    cache_name = f"collection-v{COLLECTION_CACHE_VERSION}-{hashlib.sha256(identity).hexdigest()[:20]}.json"
-    path = CACHE_DIR / cache_name
     generation = hashlib.sha256(json.dumps(
         result["items"], ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         default=str,
     ).encode("utf-8")).hexdigest()[:20]
+    cache_name = (f"collection-v{COLLECTION_CACHE_VERSION}-"
+                  f"{hashlib.sha256(identity).hexdigest()[:20]}-{generation}.json")
+    path = CACHE_DIR / cache_name
     payload = {"version": COLLECTION_CACHE_VERSION, "generation": generation,
                "items": result["items"]}
     with _cache_lock:

@@ -266,9 +266,14 @@ hr {
   position: sticky;
   top: 0;
   z-index: 2;
-  padding: 5px 0;
+  margin: -5px -8px 5px;
+  padding: 5px 8px;
   border-bottom: 1px solid var(--line);
   background: var(--well);
+}
+.bulk-writing #drop-zone {
+  opacity: 0.55;
+  pointer-events: none;
 }
 .queue button {
   min-width: 0;

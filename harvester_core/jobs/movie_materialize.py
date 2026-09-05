@@ -78,6 +78,7 @@ def run(config, reporter=None, limit=None, overwrite_nfo=False, overwrite_poster
             if write_poster and poster is None:
                 state["poster"] = {"status": "unresolved_target", "updated": now_iso()}
                 processed += 1
+                counts["poster_unresolved_target"] += 1
                 if write_nfo:
                     counts[state["nfo"]["status"]] += 1
                 save_json_atomic(path, manifest)
@@ -113,6 +114,8 @@ def run(config, reporter=None, limit=None, overwrite_nfo=False, overwrite_poster
             processed += 1
             if write_nfo:
                 counts[state["nfo"]["status"]] += 1
+            if write_poster:
+                counts[f"poster_{state['poster']['status']}"] += 1
             save_json_atomic(path, manifest)
             emit(reporter, "progress", key, status="materialized", target_kind="movie", id=key)
     except KeyboardInterrupt:

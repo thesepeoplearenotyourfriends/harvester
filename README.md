@@ -101,11 +101,15 @@ refresh.
 
 Bulk work has one application-level state shown either in the persistent bottom strip,
 its slide-up drawer, or the full **Work → Bulk** workspace. Problem queues expose
-**Scan All**, which freezes that queue's current record identities before starting a
-semantic, allowlisted operation. Leaving the queue or closing the drawer does not stop
-the work. Broad materialization preserves files that already exist rather than treating
-the workflow as an overwrite request; Bulk state is session-only and is not a job-history
-store.
+**Re-fetch from web**, which freezes that queue's current record identities in its
+immutable collection cache before starting a semantic, allowlisted recipe. Leaving the
+queue or closing the drawer does not stop the work. While a Bulk writer is active,
+navigation and inspection remain available but other UI write controls are disabled.
+Broad materialization preserves files that already exist rather than treating the
+workflow as an overwrite request; Bulk state is session-only and is not a job-history
+store. Lost & Found resolves provider metadata before writing an NFO. Missing Poster
+reports records without an already-safe poster target as unresolved rather than
+inventing a filename.
 
 List and search results are written atomically to filter-specific, versioned files
 under `.cache/ui/`. Only an asset descriptor crosses the Severin bridge, and the

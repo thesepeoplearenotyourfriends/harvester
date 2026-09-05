@@ -70,6 +70,7 @@
         leftWidth: 184,
         contextVisible: true,
         searchTimer: null,
+        collectionDescriptor: null,
         bulk: { job: null, drawerOpen: false },
       };
       const workflows = {
@@ -228,7 +229,7 @@
           ) {
             throw Error("Collection cache did not match its descriptor");
           }
-          return collection.items;
+          return { items: collection.items, descriptor };
         },
       };
       const esc = (value) =>
@@ -334,13 +335,14 @@
       }
       function renderContext(title, rows) {
         const scan = bulkWorkflows[state.workflow]
-          ? '<button id="scan-all" class="compact-action" type="button">Scan All</button>'
+          ? '<button id="scan-all" class="compact-action" type="button">Re-fetch from web</button>'
           : "";
         document.querySelector("#context-pane").innerHTML =
           `<div class="context-nav"><button id="back-overview">⮪ Overview</button></div><div class="workflow-heading"><h1>${esc(title)}</h1>${scan}</div><div class="queue">${rows.map((r, i) => `<button data-row="${i}"><span>${r.kind ? `<small>${esc(r.kind.toUpperCase())}</small>` : ""}${esc(rowLabel(r))}</span></button>`).join("")}</div>`;
         document.querySelector("#back-overview").onclick = () => loadOverview();
         const scanAll = document.querySelector("#scan-all");
         if (scanAll) scanAll.onclick = startBulkWorkflow;
+        setWriterControls();
         document
           .querySelectorAll("[data-row]")
           .forEach((b) => (b.onclick = () => selectRow(+b.dataset.row)));
@@ -356,6 +358,7 @@
         state.selectionGeneration++;
         state.workflow = name;
         state.rows = [];
+        state.collectionDescriptor = null;
         renderContext(cfg.title, []);
         document.querySelector("#workspace").innerHTML =
           `<p class="muted">Loading ${esc(cfg.title)}…</p>`;
@@ -364,7 +367,9 @@
             const value = await App.request(cfg.action, cfg.data);
             state.rows = Array.isArray(value.providers) ? value.providers : [];
           } else {
-            state.rows = await App.requestCollection(cfg.action, cfg.data);
+            const collection = await App.requestCollection(cfg.action, cfg.data);
+            state.rows = collection.items;
+            state.collectionDescriptor = collection.descriptor;
           }
           renderContext(cfg.title, state.rows);
           document.querySelector("#workspace").innerHTML = state.rows.length
@@ -375,51 +380,61 @@
             document.querySelector("#workspace").textContent = e.message;
         }
       }
-      function frozenWorkflowIdentifiers(rows) {
-        return rows.flatMap((row) =>
-          row.grouped && Array.isArray(row.manifest_identities)
-            ? row.manifest_identities
-            : [rowIdentifier(row)],
-        ).filter((identifier) => typeof identifier === "string" && identifier);
-      }
       async function startBulkWorkflow() {
         if (state.bulk.job?.status === "running") return;
         const workflow = state.workflow;
         const cfg = workflows[workflow];
-        const identities = [...new Set(frozenWorkflowIdentifiers(state.rows))];
+        const scope = state.collectionDescriptor && { ...state.collectionDescriptor };
+        if (!scope) return;
         state.bulk.job = {
           workflow,
           title: cfg.title,
-          identities,
-          total: identities.length,
-          completed: 0,
-          status: identities.length ? "running" : "complete",
-          message: identities.length ? "Starting…" : "Nothing to process",
+          scope,
+          total: scope.count,
+          processed: null,
+          counts: {},
+          status: scope.count ? "running" : "complete",
+          message: scope.count ? "Working…" : "Nothing to process",
         };
         state.bulk.drawerOpen = true;
+        setWriterControls();
         renderBulkPresentations();
-        if (!identities.length) return;
+        if (!scope.count) return;
         try {
-          const result = await App.request("bulk.workflow", { workflow, identities }, false, true);
+          const result = await App.request("bulk.workflow", { workflow, scope }, false, true);
           Object.assign(state.bulk.job, {
-            status: "complete", completed: identities.length,
-            message: result?.message || "Completed",
+            status: result?.ok === false ? "attention" : "complete",
+            processed: Number.isInteger(result?.processed) ? result.processed : null,
+            counts: result?.counts || {},
+            message: result?.message || "Finished",
           });
         } catch (error) {
           Object.assign(state.bulk.job, { status: "failed", message: error.message });
         }
+        setWriterControls();
         renderBulkPresentations();
+      }
+      function writerActive() {
+        return state.bulk.job?.status === "running";
+      }
+      function setWriterControls() {
+        const active = writerActive();
+        document.querySelectorAll("#scan-all, #refresh-actor, #choose-image, #image-file").forEach((control) => {
+          control.disabled = active;
+        });
+        document.body.classList.toggle("bulk-writing", active);
       }
       function bulkMarkup(full = false) {
         const job = state.bulk.job;
         if (!job) return '<div class="bulk-empty"><h1>Bulk</h1><p class="muted">No bulk work has been started.</p></div>';
-        const progress = job.total ? `${job.completed} of ${job.total}` : "No items";
-        return `<div class="bulk-content"><div class="bulk-title"><h1>Bulk</h1>${full ? "" : '<button id="close-bulk" type="button" aria-label="Close Bulk drawer">×</button>'}</div><h2>${esc(job.title)}</h2><p><strong>${esc(job.status)}</strong> · ${esc(progress)}</p><progress max="${job.total || 1}" value="${job.completed}"></progress><p class="muted">${esc(job.message)}</p></div>`;
+        const progress = job.status === "running" ? "In progress" : job.processed === null ? "Finished" : `${job.processed} processed`;
+        const counts = Object.entries(job.counts || {}).map(([name, value]) => `<li>${esc(name.replaceAll("_", " "))}: ${esc(value)}</li>`).join("");
+        return `<div class="bulk-content"><div class="bulk-title"><h1>Bulk</h1>${full ? "" : '<button id="close-bulk" type="button" aria-label="Close Bulk drawer">×</button>'}</div><h2>${esc(job.title)}</h2><p><strong>${esc(job.status)}</strong> · ${esc(progress)}</p>${job.status === "running" ? '<progress aria-label="Bulk work in progress"></progress>' : ""}<p class="muted">${esc(job.message)}</p>${counts ? `<ul>${counts}</ul>` : ""}</div>`;
       }
       function renderBulkPresentations() {
         const job = state.bulk.job;
         const strip = document.querySelector("#job-strip");
-        strip.textContent = !job ? "Bulk: idle" : `Bulk: ${job.title} · ${job.status}${job.total ? ` ${job.completed}/${job.total}` : ""}`;
+        strip.textContent = !job ? "Bulk: idle" : `Bulk: ${job.title} · ${job.status}${job.processed === null ? "" : ` · ${job.processed} processed`}`;
         strip.setAttribute("aria-expanded", state.bulk.drawerOpen);
         const drawer = document.querySelector("#bulk-drawer");
         drawer.hidden = !state.bulk.drawerOpen;
@@ -517,8 +532,13 @@
         };
         document.querySelector("#refresh-actor").onclick = () =>
           repairActor("refresh.actor.image", { identifier: detail.name });
+        setWriterControls();
       }
       async function installFile(name, file) {
+        if (writerActive()) {
+          showError("Bulk work is currently writing; wait for it to finish.");
+          return;
+        }
         if (file.size > 8000000) {
           showError("Image is larger than 8 MB");
           return;
@@ -570,6 +590,10 @@
         });
       }
       async function repairActor(action, data) {
+        if (writerActive()) {
+          showError("Bulk work is currently writing; wait for it to finish.");
+          return;
+        }
         const selected = document.querySelector("[data-row].selected");
         const selectedIndex = selected ? Number(selected.dataset.row) : 0;
         document.querySelector("#workspace").classList.add("busy");
@@ -632,7 +656,8 @@
         state.selectionGeneration++;
         state.workflow = "search";
         try {
-          state.rows = await App.requestCollection("search", { query });
+          const collection = await App.requestCollection("search", { query });
+          state.rows = collection.items;
           renderContext("Search results", state.rows);
           document.querySelector("#workspace").innerHTML = state.rows.length
             ? '<p class="muted">Select a search result.</p>'

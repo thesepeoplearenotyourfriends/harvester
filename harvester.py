@@ -113,13 +113,17 @@ def parser():
     search_parser.add_argument("--limit", type=int, default=50)
     api.add_parser("rescan", help="rebuild all local censuses offline")
     api.add_parser("inventory", help="summarize durable state")
+    bulk = api.add_parser("bulk", help=argparse.SUPPRESS)
+    bulk.add_argument("workflow")
+    bulk.add_argument("--scope-file", required=True)
+    bulk.add_argument("--generation", required=True)
+    bulk.add_argument("--count", required=True, type=int)
     refresh = api.add_parser("refresh", help="refresh explicitly named records").add_subparsers(dest="kind", required=True)
     aspects = {"actor": ("identity", "image", "all"), "movie": ("identity", "metadata", "nfo", "poster", "actors", "all"), "show": ("identity", "metadata", "nfo", "poster", "actors", "all")}
     for kind, choices in aspects.items():
         item = refresh.add_parser(kind)
         item.add_argument("identifiers", nargs="+")
         item.add_argument("--aspect", choices=choices, default="all")
-        item.add_argument("--preserve", action="store_true", help=argparse.SUPPRESS)
     return root
 
 
@@ -286,6 +290,11 @@ def api_main(args, config):
                 terminal(rescan(config))
             else:
                 terminal(inventory(config))
+        elif args.api_command == "bulk":
+            from harvester_core.jobs.bulk import load_scope, run
+            identities = load_scope(config, args.workflow, args.scope_file,
+                                    args.generation, args.count)
+            terminal(run(config, args.workflow, identities, api_report))
         else:
             from harvester_core.transport import transport_from_config
             transport = transport_from_config(config)
@@ -298,7 +307,7 @@ def api_main(args, config):
                     result = run(config, provider, api_report, refresh=True, retry_failed=True, targets=args.identifiers)
                 if args.aspect in ("image", "all"):
                     from harvester_core.jobs.movie_actor_fetch import run as fetch
-                    result["materialize"] = fetch(config, api_report, retry_failed=True, overwrite=not args.preserve, transport=transport, targets=args.identifiers)
+                    result["materialize"] = fetch(config, api_report, retry_failed=True, overwrite=True, transport=transport, targets=args.identifiers)
             elif args.kind == "movie":
                 from harvester_core.api import get_record
                 targets = [get_record(config, "movie", value)["local_target"] for value in args.identifiers]
@@ -313,8 +322,8 @@ def api_main(args, config):
                     from harvester_core.jobs.movie_materialize import run as materialize
                     result["materialize"] = materialize(
                         config, api_report,
-                        overwrite_nfo=not args.preserve and args.aspect in ("nfo", "all"),
-                        overwrite_poster=not args.preserve and args.aspect in ("poster", "all"),
+                        overwrite_nfo=args.aspect in ("nfo", "all"),
+                        overwrite_poster=args.aspect in ("poster", "all"),
                         targets=targets, transport=transport,
                         write_nfo=args.aspect in ("nfo", "all"),
                         write_poster=args.aspect in ("poster", "all"),
@@ -332,8 +341,8 @@ def api_main(args, config):
                 if args.aspect in ("nfo", "poster", "actors", "all"):
                     from harvester_core.jobs.tv_materialize import run as materialize
                     result["materialize"] = materialize(config, api_report,
-                        overwrite_nfo=not args.preserve and args.aspect in ("nfo", "all"),
-                        overwrite_poster=not args.preserve and args.aspect in ("poster", "all"),
+                        overwrite_nfo=args.aspect in ("nfo", "all"),
+                        overwrite_poster=args.aspect in ("poster", "all"),
                         targets=targets, transport=transport,
                         write_nfo=args.aspect in ("nfo", "all"),
                         write_poster=args.aspect in ("poster", "all"),
