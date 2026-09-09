@@ -177,18 +177,3 @@ def run(config, workflow, identities, reporter=None):
         config, provider, reporter, refresh=True, retry_errors=True,
         retry_ambiguous=True, retry_not_found=True, targets=_show_targets(config, identities),
     ))))
-
-
-def run_scoped(config, workflow, identities, logical_count, reporter=None):
-    """Run a UI scope while reporting collection rows as the terminal progress unit.
-
-    Grouped presentation rows may deliberately expand to several manifest identities.
-    Phase counters retain that identity-specific detail, but the top-level processed
-    value must use the same logical-row unit shown by the UI's progress denominator.
-    """
-    if not isinstance(logical_count, int) or logical_count < 0:
-        raise ValueError("invalid logical Bulk scope count")
-    result = run(config, workflow, identities, reporter)
-    result.setdefault("counts", {})["scoped_identities"] = len(identities)
-    result["processed"] = logical_count
-    return result
