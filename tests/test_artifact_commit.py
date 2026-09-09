@@ -3,7 +3,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from harvester_core.artifacts import RecordingCommitter, persist_preparation
+from harvester_core.artifacts import (RecordingCommitter, apply_inbox_item,
+                                      discard_inbox_item, get_inbox_item,
+                                      list_inbox, persist_preparation)
 from harvester_core.config import load_config
 from harvester_core.jobs.movie_actor_fetch import run as fetch_actors
 from harvester_core.jobs.movie_materialize import run as materialize_movies
@@ -108,7 +110,7 @@ class ArtifactCommitSeamTests(unittest.TestCase):
         destination = self.movies / "Movie" / "movie.nfo"
         recorder.write(destination, b"prepared nfo")
         plan = persist_preparation(self.config, "lost-found", ["movie"], recorder)
-        manifest_path = (self.root / ".cache" / "bulk" / plan["plan_id"] /
+        manifest_path = (self.root / ".cache" / "bulk" / "inbox" / plan["plan_id"] /
                          "manifest.json")
         manifest = json.loads(manifest_path.read_text())
         action = manifest["actions"][0]
@@ -116,6 +118,73 @@ class ArtifactCommitSeamTests(unittest.TestCase):
         self.assertEqual((manifest_path.parent / action["blob"]).read_bytes(),
                          b"prepared nfo")
         self.assertFalse(destination.exists())
+
+    def test_inbox_survives_reload_and_opening_marks_seen_without_deciding(self):
+        recorder = RecordingCommitter()
+        recorder.write(self.movies / "Movie" / "movie.nfo", b"offline")
+        plan = persist_preparation(self.config, "lost-found", ["movie"], recorder,
+                                   display_title="Movie")
+        self.assertEqual(len(list_inbox(self.config)), 1)
+        reopened = load_config({"state_dir": self.root / "state",
+                                "movie_root": self.movies, "tv_root": self.tv},
+                               environ={}, app_dir=self.root)
+        item = get_inbox_item(reopened, plan["plan_id"], mark_seen=True)
+        self.assertTrue(item["seen"])
+        self.assertEqual(item["state"], "ready")
+        self.assertEqual(len(list_inbox(reopened)), 1)
+
+    def test_grouped_identities_are_one_review_item(self):
+        recorder = RecordingCommitter()
+        recorder.write(self.movies / "Shared" / "poster.jpg", b"poster")
+        persist_preparation(self.config, "missing-posters", ["first.nfo", "second.nfo"],
+                            recorder, display_title="Shared")
+        items = list_inbox(self.config)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["identities"], ["first.nfo", "second.nfo"])
+
+    def test_apply_is_offline_and_discard_never_mutates_media(self):
+        target = self.movies / "Movie" / "movie.nfo"
+        target.parent.mkdir()
+        recorder = RecordingCommitter(); recorder.write(target, b"frozen")
+        plan = persist_preparation(self.config, "lost-found", ["movie"], recorder)
+        apply_inbox_item(self.config, plan["plan_id"])
+        self.assertEqual(target.read_bytes(), b"frozen")
+        self.assertEqual(list_inbox(self.config), [])
+
+        untouched = self.movies / "Other" / "movie.nfo"
+        recorder = RecordingCommitter(); recorder.write(untouched, b"discarded")
+        plan = persist_preparation(self.config, "lost-found", ["other"], recorder)
+        discard_inbox_item(self.config, plan["plan_id"])
+        self.assertFalse(untouched.exists())
+
+    def test_stale_destination_blocks_apply_and_marks_attention(self):
+        target = self.movies / "Movie" / "movie.nfo"; target.parent.mkdir()
+        recorder = RecordingCommitter(); recorder.write(target, b"prepared")
+        plan = persist_preparation(self.config, "lost-found", ["movie"], recorder)
+        target.write_bytes(b"newer local work")
+        with self.assertRaisesRegex(ValueError, "filesystem changed"):
+            apply_inbox_item(self.config, plan["plan_id"])
+        self.assertEqual(target.read_bytes(), b"newer local work")
+        self.assertEqual(get_inbox_item(self.config, plan["plan_id"])["state"],
+                         "needs_attention")
+
+    def test_apply_rejects_escape_and_tampered_blob(self):
+        outside = self.root / "outside"
+        recorder = RecordingCommitter(); recorder.write(outside, b"escape")
+        plan = persist_preparation(self.config, "lost-found", ["escape"], recorder)
+        with self.assertRaisesRegex(ValueError, "outside configured"):
+            apply_inbox_item(self.config, plan["plan_id"])
+        self.assertFalse(outside.exists())
+
+        target = self.movies / "Movie" / "poster.jpg"; target.parent.mkdir(exist_ok=True)
+        recorder = RecordingCommitter(); recorder.write(target, b"poster")
+        plan = persist_preparation(self.config, "missing-posters", ["poster"], recorder)
+        manifest = get_inbox_item(self.config, plan["plan_id"])
+        blob = self.root / ".cache" / "bulk" / "inbox" / plan["plan_id"] / manifest["actions"][0]["blob"]
+        blob.write_bytes(b"tampered")
+        with self.assertRaisesRegex(ValueError, "size/hash"):
+            apply_inbox_item(self.config, plan["plan_id"])
+        self.assertFalse(target.exists())
 
 
 if __name__ == "__main__":

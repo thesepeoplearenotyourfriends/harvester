@@ -35,6 +35,23 @@ HARVESTER_SOCKS5_PASSWORD=...
 
 Blank lines, comments beginning with `#`, and unknown keys are ignored. Precedence is explicit command/runtime override, then same-named environment variable, then the file, then defaults. Secrets and provider bearer tokens are not stored in caches or normal output.
 
+The desktop UI's **View → Configuration…** dialog edits these same seven managed
+entries in `keys_and_tokens.txt`; it preserves unrelated lines and comments rather
+than creating a second settings store. Fields whose effective value comes from a
+different environment value are marked as overridden. Saved values are picked up by
+the next Harvester operation without restarting the application.
+
+## Bulk Inbox
+
+Bulk acquisition is preparation-only. Each logical queue row is stored independently
+under `.cache/bulk/inbox/` as soon as its acquisition finishes, including frozen
+artifact bytes, hashes, destinations, and filesystem preconditions. The **Bulk Inbox**
+workspace can be reopened after a restart and reviewed without network access.
+Opening an item only marks it seen. **Apply** explicitly validates its stored blobs,
+configured media-root destinations, and the current filesystem before writing through
+the normal filesystem committer; stale or tampered work is refused. **Discard** removes
+only prepared data. Stopping acquisition leaves items already prepared in the Inbox.
+
 Pillow is optional and imported only while treating actor images. Without it, downloaded bytes are preserved unchanged.
 
 Network requests use direct sockets by default. Set `HARVESTER_SOCKS5=127.0.0.1:1080`
