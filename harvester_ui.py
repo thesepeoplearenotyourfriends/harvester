@@ -462,10 +462,22 @@ def run_inbox_action(action, data):
         selected = [item for item in items if action == "inbox.discard_all" or
                     item["state"] == "ready"]
         operation = apply_inbox_item if action == "inbox.apply_all" else discard_inbox_item
+        counts = {"applied": 0, "discarded": 0, "needs_attention": 0, "failed": 0}
         with _library_commit_lock:
             for item in selected:
-                operation(config, item["item_id"])
-        return {"processed": len(selected)}
+                try:
+                    outcome = operation(config, item["item_id"])
+                    counts["applied" if outcome.get("applied") else "discarded"] += 1
+                except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                    try:
+                        current = get_inbox_item(config, item["item_id"])
+                    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                        counts["failed"] += 1
+                    else:
+                        counts["needs_attention" if current.get("state") ==
+                               "needs_attention" else "failed"] += 1
+        counts["processed"] = sum(counts.values())
+        return counts
     if set(data) != {"item_id"}:
         raise BridgeError(f"{action} requires one trusted item id")
     item_id = data["item_id"]

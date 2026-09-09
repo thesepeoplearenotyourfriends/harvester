@@ -104,11 +104,9 @@ def _item_result(identities, *results, message="Finished"):
 
 
 def _finish(config, workflow, identities, recorder, result, attention=0):
-    problem_names = ("unresolved", "failed", "error", "ambiguous", "not_found")
-    attention = max(attention, sum(
-        int(value) for name, value in result.get("counts", {}).items()
-        if any(problem in name for problem in problem_names)
-    ))
+    # Scanner summaries may describe the entire durable provider manifest. Only
+    # explicit failures from this item's own recipe are safe to classify here;
+    # run_scoped resolves provider-record outcome after loading this row alone.
     state = "needs_attention" if attention or result.get("ok") is False else "ready"
     plan = persist_preparation(
         config, workflow, identities, recorder, state=state,
@@ -130,6 +128,22 @@ def _finish(config, workflow, identities, recorder, result, attention=0):
                                "Applied: 0\n\nNothing has been written to the media library."
                                f"{detail}")})
     return result
+
+
+def _scoped_record_outcome(workflow, identities, records):
+    """Classify only provider records owned by one frozen logical row."""
+    successful = {"actor": {"ok"}, "movie": {"ok"}, "show": {"matched"}}
+    kind = "actor" if "actor" in workflow else "show" if workflow in {
+        "ambiguous-tv", "not-found-tv", "tv-errors"} else "movie"
+    if identities and len(records) != len(identities):
+        return True, "Scoped provider record is missing"
+    for record in records:
+        status = record.get("status")
+        if status not in successful[kind]:
+            reason = (record.get("error") or record.get("reason") or status or
+                      "Provider result needs attention")
+            return True, str(reason)
+    return False, None
 
 
 def run(config, workflow, identities, reporter=None):
@@ -234,7 +248,7 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
     preparations = []
     all_identities = []
     ok = True
-    for item in items:
+    for row_index, item in enumerate(items):
         identities = item["identities"]
         all_identities.extend(identities)
         # Empty/invalid rows are still durable review outcomes rather than
@@ -264,7 +278,7 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest["display_title"] = item.get("display_title") or manifest["display_title"]
             manifest["local_target"] = item.get("local_target") or manifest.get("local_target")
-            manifest["summary"] = {"counts": result.get("counts", {}),
+            manifest["summary"] = {"stage_diagnostics": result.get("counts", {}),
                                    "message": result.get("message")}
             records = []
             kind = "actor" if "actor" in workflow else "show" if workflow in {
@@ -275,13 +289,18 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
                 except (KeyError, OSError, ValueError):
                     pass
             manifest["summary"]["provider_results"] = records
-            if manifest["state"] == "needs_attention" and records:
-                record = records[0]
-                manifest["reason"] = (record.get("error") or record.get("reason") or
-                                      record.get("status") or manifest.get("reason"))
+            record_attention, record_reason = _scoped_record_outcome(
+                workflow, identities, records)
+            if record_attention and manifest["state"] == "ready":
+                manifest["state"] = "needs_attention"
+                manifest["reason"] = record_reason
+            result.setdefault("counts", {})["needs_attention"] = int(
+                manifest["state"] == "needs_attention")
             save_json_atomic(manifest_path, manifest)
             emit(reporter, "inbox", manifest["display_title"], id=plan["plan_id"],
-                 status=manifest["state"], target_kind="inbox")
+                 status=manifest["state"], target_kind="inbox",
+                 row_index=row_index, logical_ids=identities,
+                 label=manifest["display_title"])
         preparations.append(result.get("preparation"))
         counts.update(result.get("counts", {}))
         ok = ok and result.get("ok", True)
