@@ -169,6 +169,16 @@ def _scoped_artifact_outcome(workflow, result):
         "missing-tv-nfo": ("nfo", ("error",)),
         "missing-tv-posters": ("poster", ("error", "no_url")),
     }.get(workflow)
+    # Identity-repair recipes may opportunistically add a missing NFO after a
+    # successful match. Once that phase runs, its artifact outcome—not merely
+    # the provider status—decides whether Apply is safe.
+    if expected is None and workflow in {
+            "unresolved-movies", "failed-movies", "ambiguous-tv", "not-found-tv",
+            "tv-errors"}:
+        diagnostics = result.get("counts", {})
+        if (result.get("phase_results", {}).get("nfo") or
+                any(name.startswith("nfo_") for name in diagnostics)):
+            expected = ("nfo", ("error", "unresolved_target"))
     if expected is None:
         return False, None
     prefix, failures = expected

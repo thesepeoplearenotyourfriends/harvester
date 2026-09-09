@@ -542,6 +542,31 @@ function selectInboxItem() {{}}
   await selectCandidate(item, 2);
   if (captured[0] !== 'inbox.select_candidate') process.exit(1);
   if (captured[1].candidate_index !== 2 || captured[4][0].identifier !== 'movie.nfo') process.exit(2);
+  if (state.inbox.items.length !== 0) process.exit(3);
+}})().catch(() => process.exit(3));
+"""
+        subprocess.run(["node", "-e", script], check=True)
+
+    def test_candidate_selection_reselects_stable_item_and_merges_inferred_query(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        self.assertIn("const query = { ...(item.query?.inferred || {}), ...(item.query?.override || {}) };", page)
+        start = page.index("async function selectCandidate")
+        end = page.index("\n      function bindInboxImage", start)
+        function = page[start:end]
+        script = f"""
+let selected = -1;
+async function runBulk() {{}}
+const state = {{inbox: {{items: []}}}};
+async function openInbox() {{ state.inbox.items = [{{item_id:'stable'}}]; }}
+function selectInboxItem(index) {{ selected = index; }}
+{function}
+(async () => {{
+  await selectCandidate({{item_id:'stable', display_title:'Movie', identities:['movie.nfo']}}, 0);
+  if (selected !== 0) process.exit(1);
+  const inferred = {{title:'Visible title', year:2024}};
+  const override = {{tmdb_id:7}};
+  const query = {{...inferred, ...override}};
+  if (query.title !== 'Visible title' || query.year !== 2024) process.exit(2);
 }})().catch(() => process.exit(3));
 """
         subprocess.run(["node", "-e", script], check=True)
@@ -569,6 +594,76 @@ if (!closed || saved) process.exit(1);
 
 
 class BulkRecipeTests(unittest.TestCase):
+    def test_tv_repairs_prepare_apply_and_inspect_missing_artifacts(self):
+        from harvester_core.api import inspect_item
+        from harvester_core.artifacts import apply_inbox_item, list_inbox
+        from harvester_core.storage import load_json
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir()
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            ambiguous = tv / "Ambiguous"; poster_show = tv / "Poster"
+            ambiguous.mkdir(); poster_show.mkdir()
+            save_json_atomic(config.state_path("tv_show_urls_tvdb.json"), {"shows": {
+                str(ambiguous): {"status": "ambiguous", "folder_name": "Ambiguous",
+                                 "query_title": "Ambiguous", "query_year": 2020,
+                                 "nfo": None, "assets": None},
+                str(poster_show): {"status": "matched", "folder_name": "Poster",
+                                   "query_title": "Poster", "query_year": 2021,
+                                   "tvdb_id": 22, "nfo": {"title": "Poster"},
+                                   "assets": {"poster_url": "https://poster"}},
+            }})
+
+            def resolve(*_args, **_kwargs):
+                state = load_json(config.state_path("tv_show_urls_tvdb.json"))
+                record = state["shows"][str(ambiguous)]
+                record.update({"status": "matched", "tvdb_id": 11,
+                               "nfo": {"title": "Ambiguous"}, "assets": {}})
+                save_json_atomic(config.state_path("tv_show_urls_tvdb.json"), state)
+                return {"processed": 1, "status_counts": {"matched": 1}}
+
+            patches = (mock.patch("harvester_core.providers.tvdb.TVDBClient", return_value=object()),
+                       mock.patch("harvester_core.transport.transport_from_config", return_value=object()),
+                       mock.patch("harvester_core.jobs.tv_scan.run", side_effect=resolve),
+                       mock.patch("harvester_core.jobs.tv_materialize.download_bytes",
+                                  return_value=(b"\xff\xd8poster", "image/jpeg")))
+            with patches[0], patches[1], patches[2], patches[3]:
+                bulk.run_scoped(config, "ambiguous-tv", [{
+                    "identities": [str(ambiguous)], "display_title": "Ambiguous",
+                    "local_target": str(ambiguous)}], 1)
+                nfo_item = list_inbox(config)[0]
+                self.assertEqual(nfo_item["state"], "ready")
+                self.assertEqual([Path(action["path"]).name for action in nfo_item["actions"]
+                                  if action["action"] == "write"], ["show.nfo"])
+                apply_inbox_item(config, nfo_item["item_id"])
+                self.assertTrue(inspect_item(config, "show", str(ambiguous))["nfo"]["present"])
+
+                bulk.run_scoped(config, "missing-tv-posters", [{
+                    "identities": [str(poster_show)], "display_title": "Poster",
+                    "local_target": str(poster_show)}], 1)
+                poster_item = list_inbox(config)[0]
+                self.assertEqual(poster_item["state"], "ready")
+                apply_inbox_item(config, poster_item["item_id"])
+                detail = inspect_item(config, "show", str(poster_show))
+                self.assertTrue(detail["poster"]["present"])
+                self.assertEqual(Path(detail["poster"]["path"]).name, "poster.jpg")
+
+    def test_opportunistic_nfo_failure_overrides_resolved_identity(self):
+        result = {"counts": {"identity_matched": 1, "nfo_error": 1},
+                  "phase_results": {"nfo": {"show": {
+                      "status": "error", "error": "cannot render NFO"}}}}
+        attention, reason = bulk._scoped_artifact_outcome("ambiguous-tv", result)
+        self.assertTrue(attention)
+        self.assertEqual(reason, "cannot render NFO")
+
+    def test_opportunistic_nfo_requires_planned_or_existing_artifact(self):
+        result = {"counts": {"identity_ok": 1, "nfo_skipped": 1},
+                  "phase_results": {"nfo": {"movie": {"status": "skipped"}}}}
+        attention, reason = bulk._scoped_artifact_outcome("unresolved-movies", result)
+        self.assertTrue(attention)
+        self.assertEqual(reason, "No nfo artifact was prepared")
+
     def test_movie_query_override_controls_tmdb_without_changing_local_identity(self):
         from harvester_core.jobs import movie_scan
         with tempfile.TemporaryDirectory() as temporary:

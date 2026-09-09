@@ -569,7 +569,7 @@
         const preview = writes.find((action) => /\.(jpe?g|png|webp)$/i.test(action.path));
         const previewUrl = preview ? `asset://${PACKAGE_ID}/.cache/bulk/inbox/${item.item_id}/${preview.blob}` : null;
         const kind = item.workflow.includes("actor") ? "actor" : ["ambiguous-tv", "not-found-tv", "tv-errors", "missing-tv-nfo", "missing-tv-posters"].includes(item.workflow) ? "show" : "movie";
-        const query = item.query?.override || item.query?.inferred || {};
+        const query = { ...(item.query?.inferred || {}), ...(item.query?.override || {}) };
         const queryFields = kind === "actor"
           ? `<label>Name <input id="query-name" value="${esc(query.name || "")}" maxlength="300"></label>`
           : `<label>Title <input id="query-title" value="${esc(query.title || "")}" maxlength="300"></label><label>Year <input id="query-year" value="${esc(query.year || "")}" inputmode="numeric" maxlength="4"></label>`;
@@ -590,6 +590,8 @@
           manifest_identities: item.identities, identifier: item.identities[0] }];
         await runBulk("inbox.select_candidate", { item_id: item.item_id, candidate_index: candidateIndex }, `${item.display_title}: selected result`, null, rows);
         await openInbox();
+        const index = state.inbox.items.findIndex((candidate) => candidate.item_id === item.item_id);
+        if (index >= 0) selectInboxItem(index);
       }
       function bindInboxImage(item) {
         const input = document.querySelector("#inbox-image-file"), zone = document.querySelector("#inbox-drop-zone");
