@@ -702,8 +702,9 @@ def run(
             break
 
         old_status = status
-        title = record.get("query_title") or record["folder_name"]
-        year = record.get("query_year")
+        override = record.get("query_override") or {}
+        title = override.get("title") or record.get("query_title") or record["folder_name"]
+        year = override.get("year") if "year" in override else record.get("query_year")
         record["tries"] = int(record.get("tries") or 0) + 1
         record["updated"] = now_iso()
         sleep_after_show = True

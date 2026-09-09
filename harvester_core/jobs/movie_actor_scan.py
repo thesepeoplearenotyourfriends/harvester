@@ -819,13 +819,14 @@ def run(
         item["tries"] = int(item.get("tries") or 0) + 1
         item["updated"] = now_iso()
         try:
+            query_name = (item.get("query_override") or {}).get("name") or actor_name
             result = resolve_actor_from_contexts(
-                provider, actor_name, item.get("contexts") or [], image_base,
+                provider, query_name, item.get("contexts") or [], image_base,
                 image_size, max_images_per_actor,
             )
             if not result.get("ok") and fallback:
                 result = fallback_person_search(
-                    provider, actor_name, item.get("contexts") or [], image_base,
+                    provider, query_name, item.get("contexts") or [], image_base,
                     image_size, max_images_per_actor,
                 )
             if result.get("ok"):

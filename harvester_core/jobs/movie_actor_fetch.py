@@ -103,7 +103,9 @@ def run(
         save_json_atomic(status_path, statuses)
     if not committer.committing:
         return {"processed": processed, "total": len(urls),
-                "planned_counts": counts, "planned": planned(committer)}
+                "planned_counts": counts, "planned": planned(committer),
+                "planned_statuses": {name: statuses[name] for name in statuses
+                                     if not selected or name.casefold() in selected}}
     return {"processed": processed, "total": len(urls), "counts": counts}
 
 

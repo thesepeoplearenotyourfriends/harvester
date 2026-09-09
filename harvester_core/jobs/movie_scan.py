@@ -150,12 +150,14 @@ def run(config, provider, reporter=None, limit=None, rebuild=False, refresh=Fals
             record["tries"] = int(record.get("tries") or 0) + 1
             record["updated"] = now_iso()
             try:
+                override = record.get("query_override") or {}
                 identity = resolve_movie_tmdb_id(provider, {
-                    "title": record.get("title"),
-                    "original_title": record.get("original_title"),
-                    "year": record.get("year"),
-                    "imdb_id": record.get("imdb_id"),
-                    "tmdb_id": record.get("local_tmdb_id"),
+                    "title": override.get("title") or record.get("title"),
+                    "original_title": (None if override.get("title") else
+                                       record.get("original_title")),
+                    "year": override.get("year") if "year" in override else record.get("year"),
+                    "imdb_id": None if override else record.get("imdb_id"),
+                    "tmdb_id": None if override else record.get("local_tmdb_id"),
                 })
                 record["match"] = identity.get("method")
                 record["candidates"] = identity.get("top") or []

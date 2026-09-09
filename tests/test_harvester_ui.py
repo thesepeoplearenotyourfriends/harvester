@@ -1,7 +1,11 @@
 import importlib
 import json
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import base64
 from pathlib import Path
@@ -123,6 +127,213 @@ class HarvesterUIBridgeTests(unittest.TestCase):
         ))
         self.assertEqual(harvester_ui.parse_ndjson(output), {"items": []})
 
+    def test_bulk_stream_delivers_event_before_terminal_result(self):
+        program = (
+            'import json,sys,time; '
+            'print(json.dumps({"type":"event","event":"progress","id":"movie"}),flush=True); '
+            'sys.stderr.write("verbose\\n"*20000); sys.stderr.flush(); time.sleep(.05); '
+            'print(json.dumps({"type":"result","ok":True,"result":{"processed":1}}),flush=True)'
+        )
+        observed = []
+        with mock.patch.object(harvester_ui, "action_argv", return_value=[sys.executable, "-c", program]):
+            result = harvester_ui.run_streaming_action(
+                "bulk.workflow", {}, lambda event: observed.append((event, time.monotonic())))
+        self.assertEqual(result, {"processed": 1})
+        self.assertEqual(observed[0][0]["id"], "movie")
+
+    def test_selected_bulk_freezes_only_the_existing_logical_row(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); cache = root / ".cache" / "ui"; cache.mkdir(parents=True)
+            items = [{"identifier": "other"}, {"grouped": True,
+                     "manifest_identities": ["selected-a", "selected-b"]}]
+            generation = __import__("hashlib").sha256(json.dumps(
+                items, sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest()[:20]
+            source = cache / "collection-v1-source.json"
+            source.write_text(json.dumps({"version": 1, "generation": generation, "items": items}))
+            scope = {"asset": "asset://com.harvester.app/.cache/ui/collection-v1-source.json",
+                     "count": 2, "generation": generation, "version": 1}
+            with mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                    mock.patch.object(harvester_ui, "CACHE_DIR", cache):
+                argv = harvester_ui.action_argv(
+                    "bulk.item", {"workflow": "missing-posters", "scope": scope, "index": 1})
+            frozen = Path(argv[argv.index("--scope-file") + 1])
+            self.assertEqual(json.loads(frozen.read_text())["items"], [items[1]])
+            self.assertEqual(argv[-1], "1")
+
+    def test_configuration_save_preserves_unmanaged_content_and_reports_environment(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); path = root / "keys_and_tokens.txt"
+            path.write_text("# keep me\nUNRELATED=yes\nTMDB_API_KEY=old\n")
+            values = {field: "" for field in harvester_ui.CONFIG_FIELDS}
+            values["tmdb_api_key"] = "new"
+            with mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                    mock.patch.dict("os.environ", {"TMDB_API_KEY": "environment"}, clear=False):
+                result = harvester_ui.save_configuration({"values": values})
+            content = path.read_text()
+            self.assertIn("# keep me\nUNRELATED=yes\nTMDB_API_KEY=new\n", content)
+            self.assertTrue(result["environment_overrides"]["tmdb_api_key"])
+            self.assertNotIn("environment", content)
+
+    def test_bulk_event_channel_is_session_scoped_and_always_completes(self):
+        class App:
+            reply = None
+            def write(self, receipt, reply):
+                self.reply = json.loads(reply)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); cache = root / ".cache" / "ui"
+            def fail(_action, _data, publish, _process_key):
+                publish({"type": "event", "event": "progress", "id": "one"})
+                raise harvester_ui.BridgeError("failed after progress")
+            def succeed(_action, _data, publish, _process_key):
+                publish({"type": "event", "event": "progress", "id": "one"})
+                return {"processed": 1}
+            for session, operation, expected_ok in (("a" * 32, fail, False),
+                                                     ("b" * 32, succeed, True)):
+                app = App()
+                message = json.dumps({"id": 7, "session": session,
+                                      "action": "bulk.workflow", "data": {}})
+                with mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                        mock.patch.object(harvester_ui, "CACHE_DIR", cache), \
+                        mock.patch.object(harvester_ui, "run_streaming_action",
+                                          side_effect=operation):
+                    harvester_ui._run_bridge_job(app, object(), message)
+                channel = json.loads((cache / f"events-{session}-7.json").read_text())
+                self.assertTrue(channel["complete"])
+                self.assertEqual(channel["events"][0]["id"], "one")
+                self.assertEqual(app.reply["ok"], expected_ok)
+            self.assertFalse((cache / "events-7.json").exists())
+
+    def test_stopping_acquisition_keeps_prepared_inbox_items(self):
+        from harvester_core.artifacts import RecordingCommitter, list_inbox, persist_preparation
+        class Process:
+            terminated = False
+            def terminate(self): self.terminated = True
+        class App:
+            def write(self, receipt, reply): self.reply = json.loads(reply)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); (root / "movies").mkdir(); (root / "tv").mkdir()
+            config = load_config({"state_dir": root / "state", "movie_root": root / "movies",
+                                  "tv_root": root / "tv"}, environ={}, app_dir=root)
+            recorder = RecordingCommitter(); recorder.write(root / "movies" / "one.nfo", b"one")
+            persist_preparation(config, "lost-found", ["one"], recorder)
+            process = Process(); key = ("c" * 32, 9)
+            harvester_ui._bulk_processes[key] = process
+            app = App()
+            harvester_ui._run_bridge_job(app, object(), json.dumps({
+                "id": 10, "session": key[0], "action": "bulk.stop",
+                "data": {"request_id": key[1]}}))
+            harvester_ui._bulk_processes.pop(key, None)
+            self.assertTrue(process.terminated)
+            self.assertEqual(len(list_inbox(config)), 1)
+
+    def test_concurrent_acquisition_does_not_block_different_inbox_apply(self):
+        from harvester_core.artifacts import RecordingCommitter, persist_preparation
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); (movies / "Reviewed").mkdir()
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            target = movies / "Reviewed" / "movie.nfo"
+            recorder = RecordingCommitter(); recorder.write(target, b"offline")
+            plan = persist_preparation(config, "lost-found", ["reviewed"], recorder)
+            # An active acquisition is deliberately not part of the library
+            # commit lock; only simultaneous Apply operations serialize.
+            harvester_ui._bulk_processes[("d" * 32, 4)] = mock.Mock()
+            environ = {"HARVESTER_MOVIE_ROOT": str(movies),
+                       "HARVESTER_TV_ROOT": str(tv),
+                       "HARVESTER_STATE_DIR": str(root / "state")}
+            try:
+                with mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                        mock.patch.dict("os.environ", environ, clear=True):
+                    result = harvester_ui.run_inbox_action(
+                        "inbox.apply", {"item_id": plan["plan_id"]})
+            finally:
+                harvester_ui._bulk_processes.pop(("d" * 32, 4), None)
+            self.assertEqual(result["applied"], 1)
+            self.assertEqual(target.read_bytes(), b"offline")
+
+    def test_apply_all_ready_continues_past_stale_items(self):
+        from harvester_core.artifacts import (RecordingCommitter, list_inbox,
+                                              persist_preparation)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir()
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            targets = [movies / name / "movie.nfo" for name in ("One", "Stale", "Three")]
+            for target in targets:
+                target.parent.mkdir()
+                recorder = RecordingCommitter(); recorder.write(target, target.parent.name.encode())
+                persist_preparation(config, "lost-found", [target.parent.name], recorder)
+            targets[1].write_bytes(b"newer")
+            environ = {"HARVESTER_MOVIE_ROOT": str(movies), "HARVESTER_TV_ROOT": str(tv),
+                       "HARVESTER_STATE_DIR": str(root / "state")}
+            with mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                    mock.patch.dict("os.environ", environ, clear=True):
+                result = harvester_ui.run_inbox_action("inbox.apply_all", {})
+            self.assertEqual(result, {"applied": 2, "discarded": 0,
+                                      "needs_attention": 1, "failed": 0,
+                                      "processed": 3})
+            self.assertEqual(targets[1].read_bytes(), b"newer")
+            self.assertEqual([item["state"] for item in list_inbox(config)],
+                             ["needs_attention"])
+
+    def test_retry_override_persists_clears_and_keeps_same_inbox_identity(self):
+        from harvester_core.artifacts import RecordingCommitter, get_inbox_item, persist_preparation
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); cache = root / ".cache" / "ui"
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            identity = str(movies / "Ugly.2019" / "movie.nfo")
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"_meta": {}, "movies": {
+                identity: {"status": "unresolved", "local_target": identity,
+                           "title": "Ugly.2019", "year": 2019}}})
+            plan = persist_preparation(config, "lost-found", [identity], RecordingCommitter())
+            with mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                    mock.patch.object(harvester_ui, "CACHE_DIR", cache):
+                argv = harvester_ui.action_argv("inbox.retry", {
+                    "item_id": plan["plan_id"],
+                    "query": {"title": "Clean Title", "year": "2019"}})
+                first_id = get_inbox_item(config, plan["plan_id"])["item_id"]
+                state = json.loads(config.state_path("movie_manifest_tmdb.json").read_text())
+                self.assertEqual(state["movies"][identity]["query_override"],
+                                 {"title": "Clean Title", "year": 2019})
+                # A later host/config reload sees the same durable override.
+                reloaded = load_config({"state_dir": root / "state", "movie_root": movies,
+                                        "tv_root": tv}, environ={}, app_dir=root)
+                self.assertEqual(json.loads(reloaded.state_path(
+                    "movie_manifest_tmdb.json").read_text())["movies"][identity][
+                        "query_override"]["title"], "Clean Title")
+                harvester_ui._retrying_items.discard(plan["plan_id"])
+                harvester_ui.action_argv("inbox.retry", {
+                    "item_id": plan["plan_id"],
+                    "query": {"title": "Changed Title", "year": ""}})
+                changed = json.loads(config.state_path("movie_manifest_tmdb.json").read_text())
+                self.assertEqual(changed["movies"][identity]["query_override"],
+                                 {"title": "Changed Title", "year": None})
+                harvester_ui._retrying_items.discard(plan["plan_id"])
+                harvester_ui.action_argv("inbox.retry", {
+                    "item_id": plan["plan_id"], "query": {"title": "", "year": ""}})
+                harvester_ui._retrying_items.discard(plan["plan_id"])
+            state = json.loads(config.state_path("movie_manifest_tmdb.json").read_text())
+            self.assertNotIn("query_override", state["movies"][identity])
+            self.assertEqual(first_id, plan["plan_id"])
+            self.assertIn("--scope-file", argv)
+
+    def test_apply_and_discard_reject_the_item_currently_being_retried(self):
+        item_id = "e" * 32
+        harvester_ui._retrying_items.add(item_id)
+        try:
+            for action in ("inbox.apply", "inbox.discard"):
+                with self.subTest(action=action), mock.patch(
+                        "harvester_core.config.load_config", return_value=mock.Mock()):
+                    with self.assertRaisesRegex(harvester_ui.BridgeError, "being retried"):
+                        harvester_ui.run_inbox_action(action, {"item_id": item_id})
+        finally:
+            harvester_ui._retrying_items.discard(item_id)
+
     def test_large_collection_is_published_outside_bridge_reply(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -178,6 +389,30 @@ class HarvesterUICacheTests(unittest.TestCase):
     def test_host_and_page_package_ids_agree(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
         self.assertIn(f'const PACKAGE_ID = "{harvester_ui.PACKAGE_ID}";', page)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is unavailable for renderer regression")
+    def test_grouped_row_uses_one_live_progress_unit_across_phase_events(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        function = re.search(
+            r"      function advanceBulkProgress\(job, event\) \{.*?\n      \}",
+            page, re.DOTALL,
+        ).group(0)
+        script = function + """
+const job = {activity: '', stage: '', total: 1,
+             identityOwners: new Map([['group-a', 0], ['group-b', 0]]),
+             seenOwners: new Set(), liveProcessed: 0};
+advanceBulkProgress(job, {event: 'progress', id: 'group-a'});
+advanceBulkProgress(job, {event: 'prepared', id: 'group-b'});
+if (`${job.liveProcessed} / ${job.total}` !== '1 / 1' || job.stage !== 'preparing') process.exit(1);
+advanceBulkProgress(job, {event: 'progress', id: 'group-a', status: 'unresolved'});
+if (job.activityStatus !== 'unresolved') process.exit(1);
+const identityless = {activity: '', stage: '', total: 1, identityOwners: new Map(),
+                      seenOwners: new Set(), liveProcessed: 0};
+advanceBulkProgress(identityless, {event: 'inbox', id: 'plan', row_index: 0,
+                                   status: 'needs_attention', label: 'Broken row'});
+if (identityless.liveProcessed !== 1 || identityless.activity !== 'Broken row') process.exit(1);
+"""
+        subprocess.run(["node", "-e", script], check=True)
         self.assertIn("asset://${PACKAGE_ID}/.cache/ui/collection-v", page)
         self.assertIn("requestCollection", page)
 
@@ -205,7 +440,7 @@ class HarvesterUICacheTests(unittest.TestCase):
         self.assertIn('bulk: { job: null, drawerOpen: false }', page)
         self.assertIn('state.bulk.job = {', page)
         self.assertIn('scope,', page)
-        self.assertIn('App.request("bulk.workflow", { workflow, scope }, false, true)', page)
+        self.assertIn('runBulk("bulk.workflow", { workflow, scope }', page)
         self.assertIn('if (state.workflow === "bulk")', page)
         self.assertIn('state.bulk.drawerOpen = false', page)
         self.assertNotIn('state.bulk.job = null', page)
@@ -213,9 +448,226 @@ class HarvesterUICacheTests(unittest.TestCase):
         self.assertIn('<progress aria-label="Bulk work in progress"></progress>', page)
         self.assertIn('writerActive()', page)
         self.assertIn('Re-fetch from web', page)
+        self.assertIn('Re-fetch this item', page)
+        self.assertNotIn('#apply-item, #discard-item', page.split('querySelectorAll("#scan-all', 1)[1].split(')', 1)[0])
+        self.assertIn('runBulk("bulk.item", { workflow, scope, index }', page)
+        self.assertIn("job.seenOwners.has(owner)", page)
 
 
 class BulkRecipeTests(unittest.TestCase):
+    def test_movie_query_override_controls_tmdb_without_changing_local_identity(self):
+        from harvester_core.jobs import movie_scan
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; movies.mkdir()
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": root / "tv"}, environ={}, app_dir=root)
+            identity = str(movies / "Ugly.Name.2019" / "movie.nfo")
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"_meta": {}, "movies": {
+                identity: {"status": "unresolved", "local_target": identity,
+                           "nfo_path": identity, "poster_path": None,
+                           "title": "Ugly.Name.2019.WEBRip", "original_title": None,
+                           "year": 2019, "imdb_id": "tt-original", "local_tmdb_id": 99,
+                           "query_override": {"title": "Fractured", "year": 2019}}}})
+            queries = []
+            provider = mock.Mock()
+            provider.get.side_effect = lambda path, _params: ({"images": {}} if path == "/configuration" else {})
+            with mock.patch.object(movie_scan, "discover_movies", return_value={}), \
+                    mock.patch.object(movie_scan, "resolve_movie_tmdb_id",
+                                      side_effect=lambda _provider, query: queries.append(query) or {
+                                          "ok": False, "reason": "test", "top": []}):
+                movie_scan.run(config, provider, refresh=True, targets=[identity])
+            self.assertEqual(queries[0]["title"], "Fractured")
+            self.assertEqual(queries[0]["year"], 2019)
+            self.assertIsNone(queries[0]["imdb_id"])
+            record = json.loads(config.state_path("movie_manifest_tmdb.json").read_text())["movies"][identity]
+            self.assertEqual(record["local_target"], identity)
+            self.assertEqual(record["title"], "Ugly.Name.2019.WEBRip")
+
+    def test_tv_and_actor_overrides_reach_resolvers_without_renaming_identity(self):
+        from harvester_core.jobs import movie_actor_scan, tv_scan
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir()
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            show = tv / "The.Show.Name.2024"; show.mkdir()
+            tv_manifest = {"_meta": {}, "shows": {str(show): {
+                "status": "not_found", "folder_name": show.name,
+                "query_title": "The.Show.Name", "query_year": 2024,
+                "query_override": {"title": "The Show Name", "year": 2024}}}}
+            tv_queries = []
+            with mock.patch.object(tv_scan, "load_or_merge_manifest",
+                                   return_value=(tv_manifest, [show], 0)), \
+                    mock.patch.object(tv_scan, "resolve_tvdb_series",
+                                      side_effect=lambda _p, title, year: tv_queries.append(
+                                          (title, year)) or {"ok": False, "status": "not_found"}):
+                tv_scan.run(config, mock.Mock(), refresh=True, retry_not_found=True,
+                            targets=[str(show)], sleep_between_shows=0)
+            self.assertEqual(tv_queries, [("The Show Name", 2024)])
+            self.assertIn(str(show), tv_manifest["shows"])
+
+            queue = {"_meta": {}, "actors": {"Bad / Actor": {
+                "status": "failed", "contexts": [],
+                "query_override": {"name": "Good Actor"}}}}
+            actor_queries = []
+            with mock.patch.object(movie_actor_scan, "make_actor_work_queue", return_value=queue), \
+                    mock.patch.object(movie_actor_scan, "get_tmdb_image_base",
+                                      return_value=("https://image/", ["w185"])), \
+                    mock.patch.object(movie_actor_scan, "resolve_actor_from_contexts",
+                                      side_effect=lambda _p, name, *args: actor_queries.append(name) or {
+                                          "ok": False, "reason": "test"}):
+                movie_actor_scan.run(config, mock.Mock(), refresh=True, retry_failed=True,
+                                     targets=["Bad / Actor"])
+            self.assertEqual(actor_queries, ["Good Actor"])
+            self.assertIn("Bad / Actor", queue["actors"])
+
+    def test_scoped_artifact_result_controls_ready_state_after_provider_success(self):
+        from harvester_core.artifacts import RecordingCommitter, list_inbox
+        cases = (
+            ("missing-actor-images", "actor", "Actor", "image", "failed", "download broke"),
+            ("missing-posters", "movie", "movie.nfo", "poster", "error", "poster broke"),
+        )
+        for workflow, kind, identity_name, phase, failure, reason in cases:
+            for succeeds in (False, True):
+                with self.subTest(workflow=workflow, succeeds=succeeds), \
+                        tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    config = load_config({"state_dir": root / "state",
+                                          "movie_root": root / "movies",
+                                          "tv_root": root / "tv"}, environ={}, app_dir=root)
+                    config.movie_root.mkdir(); config.tv_root.mkdir()
+                    if kind == "actor":
+                        identity = identity_name
+                        save_json_atomic(config.state_path("movie_actor_queue.json"), {
+                            "actors": {identity: {"status": "ok"},
+                                       "Unrelated": {"status": "failed"}}})
+                    else:
+                        identity = str(config.movie_root / "Movie" / identity_name)
+                        save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {
+                            "movies": {identity: {"status": "ok", "local_target": identity},
+                                       "unrelated.nfo": {"status": "unresolved"}}})
+
+                    def prepared(*_args):
+                        recorder = RecordingCommitter()
+                        if succeeds:
+                            recorder.write(config.movie_root / "prepared" / f"{phase}.jpg",
+                                           b"artifact")
+                        plan = bulk.persist_preparation(config, workflow, [identity], recorder)
+                        status = "planned" if succeeds else failure
+                        details = {"status": status}
+                        if not succeeds:
+                            details["error"] = reason
+                        return {"processed": 1, "counts": {f"{phase}_{status}": 1},
+                                "phase_results": {phase: {str(identity): details}},
+                                "preparation": plan, "message": "Finished"}
+
+                    item = {"identities": [identity], "display_title": str(identity),
+                            "local_target": str(identity)}
+                    with mock.patch.object(bulk, "run", side_effect=prepared):
+                        bulk.run_scoped(config, workflow, [item], 1)
+                    inbox = list_inbox(config)[0]
+                    self.assertEqual(inbox["state"],
+                                     "ready" if succeeds else "needs_attention")
+                    self.assertEqual(sum(action["action"] == "write"
+                                         for action in inbox["actions"]), int(succeeds))
+                    if not succeeds:
+                        self.assertEqual(inbox["reason"], reason)
+
+    def test_combined_preserves_augmented_and_planned_artifact_counts(self):
+        combined = bulk._combined(("image", {
+            "counts": {"unresolved_source": 1, "failed": 9},
+            "planned_counts": {"planned": 2, "failed": 1, "exists": 3},
+        }))
+        self.assertEqual(combined["counts"], {
+            "image_unresolved_source": 1, "image_failed": 9,
+            "image_planned": 2, "image_exists": 3})
+
+    def test_inbox_state_uses_only_scoped_provider_record(self):
+        from harvester_core.artifacts import RecordingCommitter, list_inbox
+        for scoped_status, unrelated_status, expected in (
+                ("ok", "unresolved", "ready"),
+                ("unresolved", "ok", "needs_attention")):
+            with self.subTest(scoped_status=scoped_status), \
+                    tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config = load_config({"state_dir": root / "state", "movie_root": root / "movies",
+                                      "tv_root": root / "tv"}, environ={}, app_dir=root)
+                config.movie_root.mkdir(); config.tv_root.mkdir()
+                scoped = str(config.movie_root / "Scoped" / "movie.nfo")
+                unrelated = str(config.movie_root / "Other" / "movie.nfo")
+                save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"movies": {
+                    scoped: {"status": scoped_status, "local_target": scoped,
+                             "reason": "scoped unresolved", "candidates": ["Scoped candidate"]},
+                    unrelated: {"status": unrelated_status, "local_target": unrelated,
+                                "reason": "unrelated problem"}}})
+                def prepared(*_args):
+                    recorder = RecordingCommitter()
+                    recorder.write(Path(scoped), b"nfo")
+                    plan = bulk.persist_preparation(config, "lost-found", [scoped], recorder)
+                    # Deliberately aggregate both records to reproduce the scanner
+                    # summary that must not classify this scoped Inbox item.
+                    return {"processed": 2, "counts": {"identity_ok": 1,
+                            "identity_unresolved": 1, "nfo_planned": 1},
+                            "preparation": plan,
+                            "message": "Finished"}
+                item = {"identities": [scoped], "display_title": "Scoped",
+                        "local_target": scoped}
+                with mock.patch.object(bulk, "run", side_effect=prepared):
+                    bulk.run_scoped(config, "lost-found", [item], 1)
+                inbox = list_inbox(config)
+                self.assertEqual(inbox[0]["state"], expected)
+                if expected == "needs_attention":
+                    self.assertEqual(inbox[0]["reason"], "scoped unresolved")
+
+    def test_first_item_enters_inbox_before_multi_item_producer_finishes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = load_config({"state_dir": root / "state", "movie_root": root / "movies",
+                                  "tv_root": root / "tv"}, environ={}, app_dir=root)
+            config.movie_root.mkdir(); config.tv_root.mkdir()
+            calls = []
+            def prepare(_config, workflow, identities, reporter):
+                if calls:
+                    self.assertEqual(len(__import__("harvester_core.artifacts", fromlist=["list_inbox"]).list_inbox(config)), 1)
+                recorder = __import__("harvester_core.artifacts", fromlist=["RecordingCommitter"]).RecordingCommitter()
+                recorder.write(config.movie_root / identities[0] / "movie.nfo", b"prepared")
+                plan = bulk.persist_preparation(config, workflow, identities, recorder)
+                calls.append(identities[0])
+                return {"processed": 1, "counts": {}, "preparation": plan,
+                        "message": "prepared"}
+            items = [{"identities": ["one"], "display_title": "One", "local_target": None},
+                     {"identities": ["two"], "display_title": "Two", "local_target": None}]
+            with mock.patch.object(bulk, "run", side_effect=prepare):
+                result = bulk.run_scoped(config, "lost-found", items, 2)
+            self.assertEqual(result["processed"], 2)
+            self.assertEqual(len(__import__("harvester_core.artifacts", fromlist=["list_inbox"]).list_inbox(config)), 2)
+
+    def test_producer_error_becomes_attention_item_and_does_not_disappear(self):
+        from harvester_core.artifacts import list_inbox
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = load_config({"state_dir": root / "state", "movie_root": root / "movies",
+                                  "tv_root": root / "tv"}, environ={}, app_dir=root)
+            config.movie_root.mkdir(); config.tv_root.mkdir()
+            item = {"identities": ["unresolved"], "display_title": "Unresolved",
+                    "local_target": None}
+            with mock.patch.object(bulk, "run", side_effect=RuntimeError("provider unavailable")):
+                result = bulk.run_scoped(config, "lost-found", [item], 1)
+            self.assertFalse(result["ok"])
+            inbox = list_inbox(config)
+            self.assertEqual(inbox[0]["state"], "needs_attention")
+            self.assertIn("provider unavailable", inbox[0]["reason"])
+
+    def test_grouped_scope_terminal_processed_uses_logical_row_count(self):
+        underlying = {"processed": 2, "counts": {"identity_ok": 2},
+                      "message": "Finished"}
+        with mock.patch.object(bulk, "run", return_value=underlying):
+            result = bulk.run_scoped(mock.Mock(), "missing-posters",
+                                     ["group-a", "group-b"], 1)
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(result["counts"]["scoped_identities"], 2)
+        self.assertEqual(result["counts"]["identity_ok"], 2)
+
     def test_lost_found_scans_before_materializing_nfo(self):
         config = mock.Mock(tmdb_api_key="key", tmdb_bearer_token=None)
         config.state_path.return_value = Path("cache.json")

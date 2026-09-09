@@ -134,5 +134,8 @@ def run(config, reporter=None, limit=None, overwrite_nfo=False, overwrite_poster
         save_json_atomic(path, manifest)
     if not committer.committing:
         return {"processed": processed, "planned_counts": dict(counts),
-                "planned": planned(committer)}
+                "planned": planned(committer), "planned_statuses": {
+                    key: record.get("materialize", {})
+                    for key, record in manifest["movies"].items()
+                    if not selected or key in selected or str(record.get("tmdb_id")) in selected}}
     return {"processed": processed, "counts": dict(counts)}
