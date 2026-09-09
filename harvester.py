@@ -248,7 +248,7 @@ def _safe_machine_value(value, secrets=()):
 
 def _ndjson(record, secrets=()):
     print(json.dumps(_safe_machine_value(record, secrets), ensure_ascii=False,
-                     separators=(",", ":"), default=str), flush=True)
+                     separators=(",", ":"), default=str))
 
 
 def api_main(args, config):
@@ -291,10 +291,10 @@ def api_main(args, config):
             else:
                 terminal(inventory(config))
         elif args.api_command == "bulk":
-            from harvester_core.jobs.bulk import load_scope, run_scoped
+            from harvester_core.jobs.bulk import load_scope, run
             identities = load_scope(config, args.workflow, args.scope_file,
                                     args.generation, args.count)
-            terminal(run_scoped(config, args.workflow, identities, args.count, api_report))
+            terminal(run(config, args.workflow, identities, api_report))
         else:
             from harvester_core.transport import transport_from_config
             transport = transport_from_config(config)
