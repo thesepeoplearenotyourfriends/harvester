@@ -59,7 +59,7 @@
       <section id="bulk-drawer" hidden aria-label="Bulk work"></section>
       <button id="job-strip" type="button" aria-expanded="false">Bulk: idle</button>
     </main>
-    <dialog id="configuration"><form method="dialog"><h1>Configuration</h1><p class="muted">Environment variables override stored values; overridden fields are marked below.</p><div id="configuration-fields"></div><p class="error" id="configuration-error"></p><div class="dialog-actions"><button value="cancel">Cancel</button><button id="save-configuration" value="default">Save</button></div></form></dialog>
+    <dialog id="configuration"><form method="dialog"><h1>Configuration</h1><p class="muted">Environment variables override stored values; overridden fields are marked below.</p><div id="configuration-fields"></div><p class="error" id="configuration-error" hidden></p><div class="dialog-actions"><button value="cancel">Cancel</button><button id="save-configuration" value="default">Save</button></div></form></dialog>
     <script>
       "use strict";
       const PACKAGE_ID = "com.harvester.app";
@@ -564,11 +564,37 @@
         const queryFields = kind === "actor"
           ? `<label>Name <input id="query-name" value="${esc(query.name || "")}" maxlength="300"></label>`
           : `<label>Title <input id="query-title" value="${esc(query.title || "")}" maxlength="300"></label><label>Year <input id="query-year" value="${esc(query.year || "")}" inputmode="numeric" maxlength="4"></label>`;
-        document.querySelector("#workspace").innerHTML = `<article class="inspector"><h1>${esc(item.display_title)}</h1><p><strong>${item.state === "ready" ? "Ready for review" : "Needs attention"}</strong></p>${item.reason ? `<p class="error">${esc(item.reason)}</p>` : ""}${previewUrl ? `<img class="inbox-preview" src="${previewUrl}" alt="Prepared artwork preview">` : ""}<h2>Proposal</h2><pre>${esc(JSON.stringify(item.summary, null, 2))}</pre><h2>Exact filesystem changes</h2><ul>${item.actions.map((action) => `<li>${esc(action.action)} · ${esc(action.path)}${action.size === undefined ? "" : ` · ${action.size} bytes`} · expected ${action.precondition?.exists ? esc(action.precondition.kind || "present") : "absent"}</li>`).join("")}</ul><section class="provider-query"><h2>Provider query</h2>${queryFields}</section><div class="inbox-actions"><button id="apply-item" ${item.state !== "ready" ? "disabled" : ""}>Apply</button><button id="discard-item">Discard</button><button id="retry-item">Retry Search…</button></div></article>`;
+        const candidates = kind === "movie" ? (item.summary?.provider_results?.[0]?.candidates || []) : [];
+        const candidateCards = candidates.length ? `<section class="candidate-results"><h2>Candidate results</h2>${candidates.map((candidate, candidateIndex) => `<article class="candidate"><strong>${esc(candidate.title || "Untitled")}</strong>${candidate.original_title && candidate.original_title !== candidate.title ? `<span>Original title: ${esc(candidate.original_title)}</span>` : ""}<span>Release: ${esc(candidate.release_date || "Unknown")}</span><span>Score: ${esc(candidate.score ?? "Unknown")}</span><button type="button" data-candidate-index="${candidateIndex}">Use this result</button></article>`).join("")}</section>` : "";
+        const manualImage = ["actor", "movie"].includes(kind) && (kind === "actor" || item.workflow === "missing-posters") ? `<div id="inbox-drop-zone" class="drop-zone" tabindex="0">Drop an image here<br><span>or</span><br><button id="choose-inbox-image" type="button">Choose Image…</button><input id="inbox-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></div>` : "";
+        document.querySelector("#workspace").innerHTML = `<article class="inspector"><h1>${esc(item.display_title)}</h1><p><strong>${item.state === "ready" ? "Ready for review" : "Needs attention"}</strong></p>${item.reason ? `<p class="error">${esc(item.reason)}</p>` : ""}${previewUrl ? `<img class="inbox-preview" src="${previewUrl}" alt="Prepared artwork preview">` : ""}${manualImage}<h2>Proposal</h2><pre>${esc(JSON.stringify(item.summary, null, 2))}</pre>${candidateCards}<h2>Exact filesystem changes</h2><ul>${item.actions.map((action) => `<li>${esc(action.action)} · ${esc(action.path)}${action.size === undefined ? "" : ` · ${action.size} bytes`} · expected ${action.precondition?.exists ? esc(action.precondition.kind || "present") : "absent"}</li>`).join("")}</ul><section class="provider-query"><h2>Provider query</h2>${queryFields}</section><div class="inbox-actions"><button id="apply-item" ${item.state !== "ready" ? "disabled" : ""}>Apply</button><button id="discard-item">Discard</button><button id="retry-item">Retry Search…</button></div></article>`;
         document.querySelector("#apply-item").onclick = () => inboxDecision("inbox.apply", item.item_id);
         document.querySelector("#discard-item").onclick = () => inboxDecision("inbox.discard", item.item_id);
         document.querySelector("#retry-item").onclick = () => retryInboxItem(item, kind);
+        document.querySelectorAll("[data-candidate-index]").forEach((button) => button.onclick = () => selectCandidate(item, +button.dataset.candidateIndex));
+        bindInboxImage(item);
         await refreshInboxSummary();
+      }
+      async function selectCandidate(item, candidateIndex) {
+        await runBulk("inbox.select_candidate", { item_id: item.item_id, candidate_index: candidateIndex }, `${item.display_title}: selected result`);
+        await openInbox();
+      }
+      function bindInboxImage(item) {
+        const input = document.querySelector("#inbox-image-file"), zone = document.querySelector("#inbox-drop-zone");
+        if (!input || !zone) return;
+        document.querySelector("#choose-inbox-image").onclick = (event) => { event.stopPropagation(); input.click(); };
+        const prepare = async (file) => {
+          try {
+            const dataUrl = await normalizeActorImage(file);
+            await App.request("inbox.install_image", { item_id: item.item_id, data_url: dataUrl }, false, true);
+            const index = state.inbox.items.findIndex((candidate) => candidate.item_id === item.item_id);
+            if (index >= 0) await selectInboxItem(index);
+          } catch (error) { showError(error.message || "Could not prepare image"); }
+        };
+        input.onchange = () => input.files[0] && prepare(input.files[0]);
+        zone.ondragover = (event) => { event.preventDefault(); zone.classList.add("drag"); };
+        zone.ondragleave = () => zone.classList.remove("drag");
+        zone.ondrop = (event) => { event.preventDefault(); zone.classList.remove("drag"); if (event.dataTransfer.files[0]) prepare(event.dataTransfer.files[0]); };
       }
       async function retryInboxItem(item, kind) {
         const query = kind === "actor"
@@ -990,12 +1016,13 @@
         closeMenus();
         const dialog = document.querySelector("#configuration"), fields = document.querySelector("#configuration-fields");
         document.querySelector("#configuration-error").textContent = "";
+        document.querySelector("#configuration-error").hidden = true;
         fields.innerHTML = '<p class="muted">Loading…</p>';
         dialog.showModal();
         try {
           const config = await App.request("config.get");
           fields.innerHTML = configFields.map(([name, label]) => `<label><span>${esc(label)}${config.environment_overrides[name] ? ' <small>overridden by environment</small>' : ""}</span><input name="${name}" type="password" value="${esc(config.values[name])}" autocomplete="off"></label>`).join("");
-        } catch (error) { document.querySelector("#configuration-error").textContent = error.message; }
+        } catch (error) { const node = document.querySelector("#configuration-error"); node.textContent = error.message; node.hidden = false; }
       };
       document.querySelector("#save-configuration").onclick = async (event) => {
         event.preventDefault();
@@ -1006,7 +1033,7 @@
           const config = await App.request("config.save", { values });
           document.querySelector("#configuration-fields").innerHTML = configFields.map(([name, label]) => `<label><span>${esc(label)}${config.environment_overrides[name] ? ' <small>overridden by environment</small>' : ""}</span><input name="${name}" type="password" value="${esc(config.values[name])}" autocomplete="off"></label>`).join("");
           document.querySelector("#configuration").close();
-        } catch (error) { document.querySelector("#configuration-error").textContent = error.message; }
+        } catch (error) { const node = document.querySelector("#configuration-error"); node.textContent = error.message; node.hidden = false; }
       };
       document.querySelector("#toggle-context").onclick = (e) => {
         state.contextVisible = !state.contextVisible;

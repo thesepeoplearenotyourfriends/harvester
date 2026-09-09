@@ -6,7 +6,7 @@ import hashlib
 import json
 import shutil
 
-from .storage import save_json_atomic, write_bytes_atomic
+from .storage import save_json_atomic, write_bytes_atomic, write_library_bytes_atomic
 
 
 class FilesystemCommitter:
@@ -18,7 +18,7 @@ class FilesystemCommitter:
         Path(path).mkdir(parents=True, exist_ok=True)
 
     def write(self, path, data):
-        write_bytes_atomic(path, data)
+        write_library_bytes_atomic(path, data)
 
     def unlink(self, path):
         Path(path).unlink()

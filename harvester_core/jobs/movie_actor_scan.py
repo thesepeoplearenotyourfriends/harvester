@@ -38,6 +38,12 @@ def clean_year(s):
     return int(m.group(0))
 
 
+def last_year(s):
+    """Use the last year-like token only for filesystem-name inference."""
+    matches = re.findall(r"(?:19|20)\d{2}", str(s or ""))
+    return int(matches[-1]) if matches else None
+
+
 def valid_http_url(url):
     return isinstance(url, str) and url.startswith(("http://", "https://"))
 

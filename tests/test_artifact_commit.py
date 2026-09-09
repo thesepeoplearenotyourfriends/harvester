@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -156,6 +158,17 @@ class ArtifactCommitSeamTests(unittest.TestCase):
         plan = persist_preparation(self.config, "lost-found", ["other"], recorder)
         discard_inbox_item(self.config, plan["plan_id"])
         self.assertFalse(untouched.exists())
+
+    def test_newly_applied_nfo_is_readable_by_library_users(self):
+        target = self.movies / "Movie" / "movie.nfo"
+        recorder = RecordingCommitter(); recorder.write(target, b"<movie/>")
+        plan = persist_preparation(self.config, "lost-found", [str(target)], recorder)
+        old_umask = os.umask(0o022)
+        try:
+            apply_inbox_item(self.config, plan["plan_id"])
+        finally:
+            os.umask(old_umask)
+        self.assertTrue(stat.S_IMODE(target.stat().st_mode) & stat.S_IROTH)
 
     def test_stale_destination_blocks_apply_and_marks_attention(self):
         target = self.movies / "Movie" / "movie.nfo"; target.parent.mkdir()

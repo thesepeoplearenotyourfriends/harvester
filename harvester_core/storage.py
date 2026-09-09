@@ -54,3 +54,33 @@ def write_bytes_atomic(path, data):
             os.unlink(temporary)
         except FileNotFoundError:
             pass
+
+
+def write_library_bytes_atomic(path, data):
+    """Atomically write a public library artifact without adopting mkstemp metadata.
+
+    Existing receipts retain their mode and ownership.  A new receipt gets the
+    process' normal file mode and, for privileged harvesters, the destination
+    directory's ownership so a media server can read it.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = path.stat() if path.exists() else None
+    parent = path.parent.stat()
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    try:
+        mode = existing.st_mode & 0o7777 if existing else 0o644
+        os.fchmod(fd, mode)
+        if hasattr(os, "fchown") and os.geteuid() == 0:
+            owner = existing or parent
+            os.fchown(fd, owner.st_uid, owner.st_gid)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass

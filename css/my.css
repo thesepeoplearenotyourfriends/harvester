@@ -19,13 +19,21 @@ body {
   overflow: hidden;
 }
 
-dialog { border: 1px solid #777; border-radius: 8px; min-width: min(30rem, 85vw); }
+dialog { border: 1px solid var(--line); border-radius: 8px; min-width: min(30rem, 85vw); background: var(--well); color: var(--text); }
 dialog::backdrop { background: rgb(0 0 0 / 45%); }
 #configuration-fields { display: grid; gap: .65rem; }
 #configuration-fields label { display: grid; gap: .2rem; }
-#configuration-fields input { padding: .45rem; }
+#configuration-fields input,
+.provider-query input { padding: .45rem; border: 1px solid var(--line); border-radius: 4px; background: var(--background); color: var(--text); }
 #configuration-fields small { color: #a24b00; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1rem; }
+.dialog-actions button,
+.inbox-actions button,
+.candidate button { padding: 4px 9px; border: 1px solid #626558; border-radius: 3px; background: #41423c; color: var(--text); }
+.error[hidden] { display: none; }
+.candidate-results { display: grid; gap: .45rem; }
+.candidate { display: grid; gap: .2rem; padding: .6rem; border: 1px solid var(--line); border-radius: 4px; background: var(--background); }
+.candidate button { justify-self: start; }
 .queue button.unseen { font-weight: 700; }
 .inbox-actions { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: .8rem; }
 .inbox-preview { display: block; max-width: min(280px, 100%); max-height: 340px; object-fit: contain; margin: .75rem 0; }
@@ -358,7 +366,8 @@ pre {
   border: 1px solid var(--line);
   white-space: pre-wrap;
 }
-#drop-zone {
+#drop-zone,
+.drop-zone {
   margin: 12px 0;
   padding: 24px;
   text-align: center;
@@ -366,10 +375,12 @@ pre {
   border-radius: 4px;
   background: #ffffff05;
 }
-#drop-zone.drag {
+#drop-zone.drag,
+.drop-zone.drag {
   background: #a7b47b22;
 }
-#drop-zone span {
+#drop-zone span,
+.drop-zone span {
   color: var(--muted);
 }
 #choose-image,

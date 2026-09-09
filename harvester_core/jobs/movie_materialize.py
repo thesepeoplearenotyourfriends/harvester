@@ -79,6 +79,12 @@ def run(config, reporter=None, limit=None, overwrite_nfo=False, overwrite_poster
             poster_value = record.get("poster_path")
             poster = Path(poster_value) if poster_value else None
             if write_poster and poster is None:
+                directory = nfo_path.parent
+                owners = [candidate for candidate in manifest["movies"].values()
+                          if Path(candidate.get("nfo_path", "")).parent == directory]
+                if len(owners) == 1:
+                    poster = directory / "poster"
+            if write_poster and poster is None:
                 state["poster"] = {"status": "unresolved_target", "updated": now_iso()}
                 processed += 1
                 counts["poster_unresolved_target"] += 1
@@ -89,7 +95,9 @@ def run(config, reporter=None, limit=None, overwrite_nfo=False, overwrite_poster
                 emit(reporter, "progress", key, status="unresolved_target",
                      target_kind="movie", id=key)
                 continue
-            existing = poster if poster and committer.exists(poster) else poster.with_suffix(".png") if poster else None
+            existing = next((candidate for candidate in (
+                poster, *(poster.with_suffix(suffix) for suffix in (".jpg", ".jpeg", ".png", ".webp"))
+            ) if candidate and committer.exists(candidate)), poster)
             if write_poster:
                 if committer.exists(existing) and not overwrite_poster:
                     state["poster"] = {"status": "exists", "file": str(existing), "bytes": committer.stat(existing).st_size, "updated": now_iso()}

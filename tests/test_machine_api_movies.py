@@ -116,24 +116,21 @@ class MachineApiMovieTests(unittest.TestCase):
         self.assertEqual(record["tmdb_id"], 7)
         self.assertEqual(record["poster_url"], "https://images/w780/poster.jpg")
         self.assertNotIn("poster_url", record["nfo"])
-        self.assertIsNone(record["poster_path"])
-        self.assertEqual(record["poster_target_status"], "unresolved")
-
-        # Materialization receives an explicit local poster target; discovery
-        # does not invent one for an arbitrary NFO.
-        record["poster_path"] = str(Path(record["nfo_path"]).parent / "chosen-poster.jpg")
-        record["poster_target_status"] = "resolved"
+        self.assertEqual(record["poster_path"],
+                         str(Path(record["nfo_path"]).parent / "poster"))
+        self.assertEqual(record["poster_target_status"], "resolved")
         save_json_atomic(self.state / "movie_manifest_tmdb.json", manifest)
 
         old = Path(record["nfo_path"]).read_bytes()
         materialize(self.config, downloader=lambda url: (b"\xff\xd8poster", "image/jpeg"))
         self.assertEqual(Path(record["nfo_path"]).read_bytes(), old)
-        self.assertTrue(Path(record["poster_path"]).is_file())
+        poster = Path(record["poster_path"]).with_suffix(".jpg")
+        self.assertTrue(poster.is_file())
 
         materialize(self.config, overwrite_nfo=True, overwrite_poster=True,
                     downloader=lambda url: (b"\xff\xd8new", "image/jpeg"))
         self.assertIn(b"<actor>", Path(record["nfo_path"]).read_bytes())
-        self.assertEqual(Path(record["poster_path"]).read_bytes(), b"\xff\xd8new")
+        self.assertEqual(poster.read_bytes(), b"\xff\xd8new")
 
     def test_offline_list_and_inventory_read_shared_manifest(self):
         save_json_atomic(self.state / "movie_manifest_tmdb.json", {"movies": {"/one.nfo": {"status": "unresolved", "nfo_path": "/one.nfo", "poster_path": "/one-poster.jpg"}}})
@@ -412,18 +409,26 @@ class MachineApiMovieTests(unittest.TestCase):
         result = self.cli("api", "get", "show", str(show))
         self.assertTrue(json.loads(result.stdout)["result"]["local_receipts"]["nfo"])
 
-    def test_lone_video_supplies_nfo_target_but_not_poster_target(self):
+    def test_lone_video_supplies_nfo_and_canonical_poster_targets(self):
         folder = self.movies / "Needs Metadata (2024)"
         folder.mkdir()
         video = folder / "Needs Metadata.mkv"
         video.write_bytes(b"video")
         record = discover_movies(self.movies)[str(video.with_suffix(".nfo").resolve())]
         self.assertEqual(record["nfo_path"], str(video.with_suffix(".nfo").resolve()))
-        self.assertIsNone(record["poster_path"])
-        self.assertEqual(record["poster_target_status"], "unresolved")
+        self.assertEqual(record["poster_path"], str((folder / "poster").resolve()))
+        self.assertEqual(record["poster_target_status"], "resolved")
 
         (folder / "part-two.mp4").write_bytes(b"video")
         self.assertNotIn(str(video.with_suffix(".nfo").resolve()), discover_movies(self.movies))
+
+    def test_filesystem_year_hint_uses_last_year_like_token(self):
+        folder = self.movies / "Person 1922 - 2017"
+        folder.mkdir()
+        nfo = folder / "Person.nfo"
+        nfo.write_text("<movie><title>Person</title></movie>")
+        record = discover_movies(self.movies)[str(nfo.resolve())]
+        self.assertEqual(record["year"], 2017)
 
     def test_movie_discovery_preserves_legacy_identity_fields(self):
         folder = self.movies / "Identity"

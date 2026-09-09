@@ -197,6 +197,11 @@ def _inbox_retry(data):
     override = ({text_key: query[text_key].strip()} if query[text_key].strip() else {})
     if kind != "actor" and (override or year not in (None, "")):
         override["year"] = int(year) if year not in (None, "") else None
+    return _prepare_inbox_rerun(config, item, kind, override)
+
+
+def _prepare_inbox_rerun(config, item, kind, override):
+    """Persist a human provider override and rebuild the same scoped recipe."""
     with _library_commit_lock:
         _retrying_items.add(item["item_id"])
     from harvester_core.storage import load_json, save_json_atomic
@@ -234,6 +239,28 @@ def _inbox_retry(data):
             "--generation", generation, "--count", "1")
 
 
+def _inbox_candidate(data):
+    """Select only by a trusted item's frozen candidate index."""
+    if (set(data) != {"item_id", "candidate_index"} or
+            not isinstance(data.get("candidate_index"), int) or
+            isinstance(data.get("candidate_index"), bool) or data["candidate_index"] < 0):
+        raise BridgeError("inbox.select_candidate requires item_id and candidate_index")
+    from harvester_core.artifacts import get_inbox_item
+    from harvester_core.config import load_config
+    config = load_config(app_dir=PROJECT_DIR)
+    item = get_inbox_item(config, data["item_id"])
+    if item["workflow"] not in {"lost-found", "unresolved-movies", "failed-movies"}:
+        raise BridgeError("candidate selection is available for movies only")
+    try:
+        candidate = item["summary"]["provider_results"][0]["candidates"][data["candidate_index"]]
+        movie_id = candidate["id"]
+    except (KeyError, IndexError, TypeError) as error:
+        raise BridgeError("candidate index is not present in the frozen Inbox item") from error
+    if not isinstance(movie_id, int) or isinstance(movie_id, bool) or movie_id <= 0:
+        raise BridgeError("frozen candidate has no usable TMDB identity")
+    return _prepare_inbox_rerun(config, item, "movie", {"tmdb_id": movie_id})
+
+
 ACTION_REGISTRY = {
     "providers": _no_args(("providers",)), "inventory": _no_args(("inventory",)),
     "list.movies": _list("movie"), "list.shows": _list("show"),
@@ -246,10 +273,11 @@ ACTION_REGISTRY = {
     "bulk.item": _bulk_item,
     "bulk.stop": None,
     "inbox.retry": _inbox_retry,
+    "inbox.select_candidate": _inbox_candidate,
     "config.get": None, "config.save": None,
     "inbox.list": None, "inbox.get": None, "inbox.apply": None,
     "inbox.discard": None, "inbox.apply_all": None, "inbox.discard_all": None,
-    "actor.install_image": None,
+    "actor.install_image": None, "inbox.install_image": None,
 }
 BRIDGE_ACTIONS = frozenset({"__ping__", *ACTION_REGISTRY})
 
@@ -298,7 +326,7 @@ def install_actor_image(data):
     from harvester_core.api import get_record
     from harvester_core.config import load_config
     from harvester_core.images import safe_actor_filename
-    from harvester_core.storage import write_bytes_atomic
+    from harvester_core.storage import write_library_bytes_atomic
     config = load_config()
     actor = get_record(config, "actor", data["identifier"])
     try:
@@ -314,8 +342,49 @@ def install_actor_image(data):
     if mime not in ("image/jpeg", "image/jpg") or not source.startswith(b"\xff\xd8\xff"):
         raise BridgeError("actor.install_image accepts a canonical JPEG only")
     destination = config.movie_root / ".actors" / safe_actor_filename(actor["name"])
-    write_bytes_atomic(destination, source)
+    write_library_bytes_atomic(destination, source)
     return {"actor": actor["name"], "local_file": str(destination), "bytes": len(source)}
+
+
+def install_inbox_image(data):
+    """Replace a prepared artwork blob; never write through to the library."""
+    if set(data) != {"item_id", "data_url"} or not all(isinstance(v, str) for v in data.values()):
+        raise BridgeError("inbox.install_image requires item_id and data_url")
+    from harvester_core.api import get_record
+    from harvester_core.artifacts import get_inbox_item
+    from harvester_core.config import load_config
+    from harvester_core.images import safe_actor_filename
+    from harvester_core.storage import save_json_atomic, write_bytes_atomic
+    config = load_config(app_dir=PROJECT_DIR)
+    item = get_inbox_item(config, data["item_id"])
+    try:
+        header, encoded = data["data_url"].split(",", 1)
+        source = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError) as error:
+        raise BridgeError("invalid image data") from error
+    if ";base64" not in header or len(source) > 512_000 or not source.startswith(b"\xff\xd8\xff"):
+        raise BridgeError("manual Inbox image must be a canonical JPEG up to 512 KB")
+    if item["workflow"] in {"missing-actor-images", "failed-actors"} and len(item["identities"]) == 1:
+        target = config.movie_root / ".actors" / safe_actor_filename(item["identities"][0])
+    elif item["workflow"] == "missing-posters" and len(item["identities"]) == 1:
+        record = get_record(config, "movie", item["identities"][0])
+        if not record.get("poster_path"):
+            raise BridgeError("movie poster ownership is unresolved")
+        target = Path(record["poster_path"]).with_suffix(".jpg")
+    else:
+        raise BridgeError("manual image is unavailable for this Inbox item")
+    root = config.app_dir / ".cache" / "bulk" / "inbox" / item["item_id"]
+    digest = hashlib.sha256(source).hexdigest()
+    write_bytes_atomic(root / "blobs" / digest, source)
+    from harvester_core.artifacts import _precondition
+    action = {"action": "write", "path": str(target), "precondition": _precondition(target),
+              "blob": f"blobs/{digest}", "size": len(source), "sha256": digest}
+    item["actions"] = [a for a in item["actions"] if not (a.get("action") == "write" and
+                       Path(a.get("path", "")).suffix.casefold() in {".jpg", ".jpeg", ".png", ".webp"})]
+    item["actions"].append(action)
+    item.update({"state": "ready", "reason": None})
+    save_json_atomic(root / "manifest.json", item)
+    return {"item_id": item["item_id"], "prepared": 1, "bytes": len(source)}
 
 
 def parse_ndjson(output):
@@ -353,6 +422,8 @@ def run_action(action, data):
         raise BridgeError(f"unknown bridge action: {action}")
     if action == "actor.install_image":
         return install_actor_image(data)
+    if action == "inbox.install_image":
+        return install_inbox_image(data)
     if action == "config.get":
         return get_configuration(data)
     if action == "config.save":
@@ -631,7 +702,8 @@ def _run_bridge_job(app, receipt, json_text):
                 if process is not None:
                     process.terminate()
             result = {"stopped": process is not None}
-        elif message["action"] in ("bulk.workflow", "bulk.item", "inbox.retry"):
+        elif message["action"] in ("bulk.workflow", "bulk.item", "inbox.retry",
+                                  "inbox.select_candidate"):
             if (not isinstance(message_id, int) or isinstance(message_id, bool) or
                     not 1 <= message_id <= 2**53 - 1):
                 raise BridgeError("Bulk request id must be a positive integer")

@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 
 from ..events import emit
 from ..storage import load_json, save_json_atomic
-from .movie_actor_scan import clean_year, resolve_movie_tmdb_id
+from .movie_actor_scan import clean_year, last_year, resolve_movie_tmdb_id
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -47,7 +47,7 @@ def discover_movies(root):
         for nfo_path in targets:
             title = nfo_path.stem
             original_title = None
-            year = clean_year(base.name) or clean_year(title)
+            year = last_year(base.name) or last_year(title)
             imdb_id = tmdb_id = None
             if nfo_path.exists():
                 try:
@@ -62,19 +62,17 @@ def discover_movies(root):
                     tmdb_id = _id(node, "tmdb") or _text(node, "tmdbid")
                 except (ET.ParseError, OSError):
                     pass
-            # Existing paths are receipts. There is no repository-wide movie
-            # poster naming rule, so only retain a unique existing poster and
-            # leave a missing/ambiguous target unresolved for later policy.
+            # Existing paths are receipts. A container with one movie has the
+            # conventional extensionless ``poster`` target; content decides
+            # the eventual suffix during preparation.
             posters = sorted(
                 path for path in base.iterdir()
                 if path.is_file() and "poster" in path.stem.casefold()
                 and path.suffix.casefold() in (".jpg", ".jpeg", ".png")
             )
-            poster = (
-                posters[0].resolve()
-                if len(targets) == 1 and len(posters) == 1
-                else None
-            )
+            poster = (posters[0].resolve() if len(targets) == 1 and len(posters) == 1
+                      else (base / "poster").resolve() if len(targets) == 1 and not posters
+                      else None)
             found[str(nfo_path.resolve())] = {
                 "kind": "movie", "local_target": str(nfo_path.resolve()),
                 "nfo_path": str(nfo_path.resolve()),
@@ -157,7 +155,8 @@ def run(config, provider, reporter=None, limit=None, rebuild=False, refresh=Fals
                                        record.get("original_title")),
                     "year": override.get("year") if "year" in override else record.get("year"),
                     "imdb_id": None if override else record.get("imdb_id"),
-                    "tmdb_id": None if override else record.get("local_tmdb_id"),
+                    "tmdb_id": (override.get("tmdb_id") if override else
+                                record.get("local_tmdb_id")),
                 })
                 record["match"] = identity.get("method")
                 record["candidates"] = identity.get("top") or []
