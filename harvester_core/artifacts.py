@@ -115,6 +115,11 @@ def persist_preparation(config, workflow, identities, committer, *, state="ready
                         ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     plan_id = hashlib.sha256(stable.encode("utf-8")).hexdigest()[:32]
     root = _safe_root(config, "inbox", plan_id)
+    previous = None
+    try:
+        previous = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError):
+        pass
     blobs = root / "blobs"
     manifest_actions = []
     for action in planned(committer):
@@ -134,6 +139,11 @@ def persist_preparation(config, workflow, identities, committer, *, state="ready
                 (str(identities[0]) if identities else workflow),
                 "local_target": local_target, "state": state, "seen": False,
                 "reason": reason, "summary": summary or {},
+                "query": (previous or {}).get("query", {}),
+                "history": [*((previous or {}).get("history", [])), *([{
+                    "state": previous.get("state"), "reason": previous.get("reason"),
+                    "summary": previous.get("summary", {}),
+                    "query": previous.get("query", {})}] if previous else [])][-10:],
                 "requested_artifacts": list(requested_artifacts or ()),
                 "actions": manifest_actions}
     save_json_atomic(root / "manifest.json", manifest)

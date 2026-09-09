@@ -32,6 +32,7 @@ _cache_lock = threading.Lock()
 _library_commit_lock = threading.Lock()
 _process_lock = threading.Lock()
 _bulk_processes = {}
+_retrying_items = set()
 
 
 class BridgeError(RuntimeError):
@@ -173,11 +174,50 @@ def _scope_path(scope):
 
 def _inbox_retry(data):
     """Re-run the stored semantic recipe; accept no workflow or path from JS."""
-    if set(data) != {"item_id"}:
-        raise BridgeError("inbox.retry requires one trusted item id")
+    if set(data) != {"item_id", "query"} or not isinstance(data.get("query"), dict):
+        raise BridgeError("inbox.retry requires one trusted item id and provider query")
     from harvester_core.artifacts import get_inbox_item
     from harvester_core.config import load_config
-    item = get_inbox_item(load_config(app_dir=PROJECT_DIR), data["item_id"])
+    config = load_config(app_dir=PROJECT_DIR)
+    item = get_inbox_item(config, data["item_id"])
+    kind = "actor" if "actor" in item["workflow"] else "show" if item["workflow"] in {
+        "ambiguous-tv", "not-found-tv", "tv-errors"} else "movie"
+    query = data["query"]
+    valid_keys = (set(query) == {"name"} if kind == "actor" else
+                  "title" in query and set(query) <= {"title", "year"})
+    if (not valid_keys or not all(value is None or isinstance(value, str)
+                                  for value in query.values())):
+        raise BridgeError("inbox.retry received an invalid provider query")
+    text_key = "name" if kind == "actor" else "title"
+    if not isinstance(query.get(text_key), str) or len(query[text_key]) > 300 or "\0" in query[text_key]:
+        raise BridgeError("provider query is invalid")
+    year = query.get("year")
+    if kind != "actor" and year not in (None, "") and (not year.isdigit() or len(year) != 4):
+        raise BridgeError("provider query year must be four digits")
+    override = ({text_key: query[text_key].strip()} if query[text_key].strip() else {})
+    if kind != "actor" and (override or year not in (None, "")):
+        override["year"] = int(year) if year not in (None, "") else None
+    with _library_commit_lock:
+        _retrying_items.add(item["item_id"])
+    from harvester_core.storage import load_json, save_json_atomic
+    filename, collection = {"actor": ("movie_actor_queue.json", "actors"),
+                            "movie": ("movie_manifest_tmdb.json", "movies"),
+                            "show": ("tv_show_urls_tvdb.json", "shows")}[kind]
+    state_path = config.state_path(filename)
+    state = load_json(state_path, {})
+    records = state.get(collection, {})
+    for identity in item["identities"]:
+        keys = [identity] if identity in records else [
+            key for key in records if kind == "actor" and key.casefold() == identity.casefold()]
+        for key in keys:
+            if override:
+                records[key]["query_override"] = override
+            else:
+                records[key].pop("query_override", None)
+    save_json_atomic(state_path, state)
+    manifest_path = config.app_dir / ".cache" / "bulk" / "inbox" / item["item_id"] / "manifest.json"
+    item.setdefault("query", {})["override"] = override or None
+    save_json_atomic(manifest_path, item)
     row = {"grouped": len(item["identities"]) > 1,
            "manifest_identities": item["identities"],
            "identifier": item["identities"][0] if item["identities"] else None,
@@ -241,7 +281,13 @@ def action_argv(action, data):
     if action not in ACTION_REGISTRY or ACTION_REGISTRY[action] is None:
         raise BridgeError(f"unknown bridge action: {action}")
     builder = ACTION_REGISTRY[action]
-    suffix = builder(data)
+    try:
+        suffix = builder(data)
+    except BaseException:
+        if action == "inbox.retry":
+            with _library_commit_lock:
+                _retrying_items.discard(data.get("item_id"))
+        raise
     return [sys.executable, str(HARVESTER_PATH), "api", *suffix]
 
 
@@ -331,8 +377,14 @@ def run_action(action, data):
 def run_streaming_action(action, data, on_event, process_key=None):
     """Consume Bulk stdout incrementally while preserving its strict terminal contract."""
     argv = action_argv(action, data)
-    process = subprocess.Popen(argv, cwd=PROJECT_DIR, text=True, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, bufsize=1)
+    try:
+        process = subprocess.Popen(argv, cwd=PROJECT_DIR, text=True, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, bufsize=1)
+    except BaseException:
+        if action == "inbox.retry":
+            with _library_commit_lock:
+                _retrying_items.discard(data.get("item_id"))
+        raise
     if process_key is not None:
         with _process_lock:
             _bulk_processes[process_key] = process
@@ -375,6 +427,9 @@ def run_streaming_action(action, data, on_event, process_key=None):
             raise BridgeError(f"Harvester API exited with status {returncode}")
         return terminal["result"]
     finally:
+        if action == "inbox.retry":
+            with _library_commit_lock:
+                _retrying_items.discard(data.get("item_id"))
         if process_key is not None:
             with _process_lock:
                 _bulk_processes.pop(process_key, None)
@@ -465,6 +520,9 @@ def run_inbox_action(action, data):
         counts = {"applied": 0, "discarded": 0, "needs_attention": 0, "failed": 0}
         with _library_commit_lock:
             for item in selected:
+                if item["item_id"] in _retrying_items:
+                    counts["failed"] += 1
+                    continue
                 try:
                     outcome = operation(config, item["item_id"])
                     counts["applied" if outcome.get("applied") else "discarded"] += 1
@@ -485,6 +543,8 @@ def run_inbox_action(action, data):
         return get_inbox_item(config, item_id, mark_seen=True)
     operation = apply_inbox_item if action == "inbox.apply" else discard_inbox_item
     with _library_commit_lock:
+        if item_id in _retrying_items:
+            raise BridgeError("Bulk Inbox item is currently being retried")
         return operation(config, item_id)
 
 

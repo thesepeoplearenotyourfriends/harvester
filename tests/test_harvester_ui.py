@@ -279,6 +279,61 @@ class HarvesterUIBridgeTests(unittest.TestCase):
             self.assertEqual([item["state"] for item in list_inbox(config)],
                              ["needs_attention"])
 
+    def test_retry_override_persists_clears_and_keeps_same_inbox_identity(self):
+        from harvester_core.artifacts import RecordingCommitter, get_inbox_item, persist_preparation
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); cache = root / ".cache" / "ui"
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            identity = str(movies / "Ugly.2019" / "movie.nfo")
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"_meta": {}, "movies": {
+                identity: {"status": "unresolved", "local_target": identity,
+                           "title": "Ugly.2019", "year": 2019}}})
+            plan = persist_preparation(config, "lost-found", [identity], RecordingCommitter())
+            with mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                    mock.patch.object(harvester_ui, "CACHE_DIR", cache):
+                argv = harvester_ui.action_argv("inbox.retry", {
+                    "item_id": plan["plan_id"],
+                    "query": {"title": "Clean Title", "year": "2019"}})
+                first_id = get_inbox_item(config, plan["plan_id"])["item_id"]
+                state = json.loads(config.state_path("movie_manifest_tmdb.json").read_text())
+                self.assertEqual(state["movies"][identity]["query_override"],
+                                 {"title": "Clean Title", "year": 2019})
+                # A later host/config reload sees the same durable override.
+                reloaded = load_config({"state_dir": root / "state", "movie_root": movies,
+                                        "tv_root": tv}, environ={}, app_dir=root)
+                self.assertEqual(json.loads(reloaded.state_path(
+                    "movie_manifest_tmdb.json").read_text())["movies"][identity][
+                        "query_override"]["title"], "Clean Title")
+                harvester_ui._retrying_items.discard(plan["plan_id"])
+                harvester_ui.action_argv("inbox.retry", {
+                    "item_id": plan["plan_id"],
+                    "query": {"title": "Changed Title", "year": ""}})
+                changed = json.loads(config.state_path("movie_manifest_tmdb.json").read_text())
+                self.assertEqual(changed["movies"][identity]["query_override"],
+                                 {"title": "Changed Title", "year": None})
+                harvester_ui._retrying_items.discard(plan["plan_id"])
+                harvester_ui.action_argv("inbox.retry", {
+                    "item_id": plan["plan_id"], "query": {"title": "", "year": ""}})
+                harvester_ui._retrying_items.discard(plan["plan_id"])
+            state = json.loads(config.state_path("movie_manifest_tmdb.json").read_text())
+            self.assertNotIn("query_override", state["movies"][identity])
+            self.assertEqual(first_id, plan["plan_id"])
+            self.assertIn("--scope-file", argv)
+
+    def test_apply_and_discard_reject_the_item_currently_being_retried(self):
+        item_id = "e" * 32
+        harvester_ui._retrying_items.add(item_id)
+        try:
+            for action in ("inbox.apply", "inbox.discard"):
+                with self.subTest(action=action), mock.patch(
+                        "harvester_core.config.load_config", return_value=mock.Mock()):
+                    with self.assertRaisesRegex(harvester_ui.BridgeError, "being retried"):
+                        harvester_ui.run_inbox_action(action, {"item_id": item_id})
+        finally:
+            harvester_ui._retrying_items.discard(item_id)
+
     def test_large_collection_is_published_outside_bridge_reply(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -400,6 +455,72 @@ if (identityless.liveProcessed !== 1 || identityless.activity !== 'Broken row') 
 
 
 class BulkRecipeTests(unittest.TestCase):
+    def test_movie_query_override_controls_tmdb_without_changing_local_identity(self):
+        from harvester_core.jobs import movie_scan
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; movies.mkdir()
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": root / "tv"}, environ={}, app_dir=root)
+            identity = str(movies / "Ugly.Name.2019" / "movie.nfo")
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"_meta": {}, "movies": {
+                identity: {"status": "unresolved", "local_target": identity,
+                           "nfo_path": identity, "poster_path": None,
+                           "title": "Ugly.Name.2019.WEBRip", "original_title": None,
+                           "year": 2019, "imdb_id": "tt-original", "local_tmdb_id": 99,
+                           "query_override": {"title": "Fractured", "year": 2019}}}})
+            queries = []
+            provider = mock.Mock()
+            provider.get.side_effect = lambda path, _params: ({"images": {}} if path == "/configuration" else {})
+            with mock.patch.object(movie_scan, "discover_movies", return_value={}), \
+                    mock.patch.object(movie_scan, "resolve_movie_tmdb_id",
+                                      side_effect=lambda _provider, query: queries.append(query) or {
+                                          "ok": False, "reason": "test", "top": []}):
+                movie_scan.run(config, provider, refresh=True, targets=[identity])
+            self.assertEqual(queries[0]["title"], "Fractured")
+            self.assertEqual(queries[0]["year"], 2019)
+            self.assertIsNone(queries[0]["imdb_id"])
+            record = json.loads(config.state_path("movie_manifest_tmdb.json").read_text())["movies"][identity]
+            self.assertEqual(record["local_target"], identity)
+            self.assertEqual(record["title"], "Ugly.Name.2019.WEBRip")
+
+    def test_tv_and_actor_overrides_reach_resolvers_without_renaming_identity(self):
+        from harvester_core.jobs import movie_actor_scan, tv_scan
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir()
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            show = tv / "The.Show.Name.2024"; show.mkdir()
+            tv_manifest = {"_meta": {}, "shows": {str(show): {
+                "status": "not_found", "folder_name": show.name,
+                "query_title": "The.Show.Name", "query_year": 2024,
+                "query_override": {"title": "The Show Name", "year": 2024}}}}
+            tv_queries = []
+            with mock.patch.object(tv_scan, "load_or_merge_manifest",
+                                   return_value=(tv_manifest, [show], 0)), \
+                    mock.patch.object(tv_scan, "resolve_tvdb_series",
+                                      side_effect=lambda _p, title, year: tv_queries.append(
+                                          (title, year)) or {"ok": False, "status": "not_found"}):
+                tv_scan.run(config, mock.Mock(), refresh=True, retry_not_found=True,
+                            targets=[str(show)], sleep_between_shows=0)
+            self.assertEqual(tv_queries, [("The Show Name", 2024)])
+            self.assertIn(str(show), tv_manifest["shows"])
+
+            queue = {"_meta": {}, "actors": {"Bad / Actor": {
+                "status": "failed", "contexts": [],
+                "query_override": {"name": "Good Actor"}}}}
+            actor_queries = []
+            with mock.patch.object(movie_actor_scan, "make_actor_work_queue", return_value=queue), \
+                    mock.patch.object(movie_actor_scan, "get_tmdb_image_base",
+                                      return_value=("https://image/", ["w185"])), \
+                    mock.patch.object(movie_actor_scan, "resolve_actor_from_contexts",
+                                      side_effect=lambda _p, name, *args: actor_queries.append(name) or {
+                                          "ok": False, "reason": "test"}):
+                movie_actor_scan.run(config, mock.Mock(), refresh=True, retry_failed=True,
+                                     targets=["Bad / Actor"])
+            self.assertEqual(actor_queries, ["Good Actor"])
+            self.assertIn("Bad / Actor", queue["actors"])
+
     def test_scoped_artifact_result_controls_ready_state_after_provider_success(self):
         from harvester_core.artifacts import RecordingCommitter, list_inbox
         cases = (

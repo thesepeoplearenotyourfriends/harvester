@@ -326,6 +326,22 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
                 except (KeyError, OSError, ValueError):
                     pass
             manifest["summary"]["provider_results"] = records
+            if records:
+                record = records[0]
+                if kind == "actor":
+                    inferred = {"name": identities[0]}
+                else:
+                    inferred = {
+                        "title": (record.get("query_title") or record.get("title") or
+                                  record.get("folder_name") or item.get("display_title")),
+                        "year": record.get("query_year") if kind == "show" else record.get("year"),
+                    }
+                manifest.setdefault("query", {})["inferred"] = inferred
+                override = record.get("query_override")
+                if override:
+                    manifest["query"]["override"] = override
+                else:
+                    manifest["query"].pop("override", None)
             record_attention, record_reason = _scoped_record_outcome(
                 workflow, identities, records)
             artifact_attention, artifact_reason = _scoped_artifact_outcome(workflow, result)

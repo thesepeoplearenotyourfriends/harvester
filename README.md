@@ -51,6 +51,10 @@ Opening an item only marks it seen. **Apply** explicitly validates its stored bl
 configured media-root destinations, and the current filesystem before writing through
 the normal filesystem committer; stale or tampered work is refused. **Discard** removes
 only prepared data. Stopping acquisition leaves items already prepared in the Inbox.
+Inbox review also exposes the inferred provider query. **Retry Search…** can store a
+title/year or actor-name override and rerun the same preparation-only recipe; this
+changes provider lookup input only, never the local identity, directory, or artifact
+destination. Clearing the fields restores filesystem-inferred searches.
 
 Pillow is optional and imported only while treating actor images. Without it, downloaded bytes are preserved unchanged.
 

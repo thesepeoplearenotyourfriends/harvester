@@ -559,15 +559,32 @@
         const writes = item.actions.filter((action) => action.action === "write");
         const preview = writes.find((action) => /\.(jpe?g|png|webp)$/i.test(action.path));
         const previewUrl = preview ? `asset://${PACKAGE_ID}/.cache/bulk/inbox/${item.item_id}/${preview.blob}` : null;
-        document.querySelector("#workspace").innerHTML = `<article class="inspector"><h1>${esc(item.display_title)}</h1><p><strong>${item.state === "ready" ? "Ready for review" : "Needs attention"}</strong></p>${item.reason ? `<p class="error">${esc(item.reason)}</p>` : ""}${previewUrl ? `<img class="inbox-preview" src="${previewUrl}" alt="Prepared artwork preview">` : ""}<h2>Proposal</h2><pre>${esc(JSON.stringify(item.summary, null, 2))}</pre><h2>Exact filesystem changes</h2><ul>${item.actions.map((action) => `<li>${esc(action.action)} · ${esc(action.path)}${action.size === undefined ? "" : ` · ${action.size} bytes`} · expected ${action.precondition?.exists ? esc(action.precondition.kind || "present") : "absent"}</li>`).join("")}</ul><div class="inbox-actions"><button id="apply-item" ${item.state !== "ready" ? "disabled" : ""}>Apply</button><button id="discard-item">Discard</button><button id="retry-item">Retry Search…</button></div></article>`;
+        const kind = item.workflow.includes("actor") ? "actor" : ["ambiguous-tv", "not-found-tv", "tv-errors"].includes(item.workflow) ? "show" : "movie";
+        const query = item.query?.override || item.query?.inferred || {};
+        const queryFields = kind === "actor"
+          ? `<label>Name <input id="query-name" value="${esc(query.name || "")}" maxlength="300"></label>`
+          : `<label>Title <input id="query-title" value="${esc(query.title || "")}" maxlength="300"></label><label>Year <input id="query-year" value="${esc(query.year || "")}" inputmode="numeric" maxlength="4"></label>`;
+        document.querySelector("#workspace").innerHTML = `<article class="inspector"><h1>${esc(item.display_title)}</h1><p><strong>${item.state === "ready" ? "Ready for review" : "Needs attention"}</strong></p>${item.reason ? `<p class="error">${esc(item.reason)}</p>` : ""}${previewUrl ? `<img class="inbox-preview" src="${previewUrl}" alt="Prepared artwork preview">` : ""}<h2>Proposal</h2><pre>${esc(JSON.stringify(item.summary, null, 2))}</pre><h2>Exact filesystem changes</h2><ul>${item.actions.map((action) => `<li>${esc(action.action)} · ${esc(action.path)}${action.size === undefined ? "" : ` · ${action.size} bytes`} · expected ${action.precondition?.exists ? esc(action.precondition.kind || "present") : "absent"}</li>`).join("")}</ul><section class="provider-query"><h2>Provider query</h2>${queryFields}</section><div class="inbox-actions"><button id="apply-item" ${item.state !== "ready" ? "disabled" : ""}>Apply</button><button id="discard-item">Discard</button><button id="retry-item">Retry Search…</button></div></article>`;
         document.querySelector("#apply-item").onclick = () => inboxDecision("inbox.apply", item.item_id);
         document.querySelector("#discard-item").onclick = () => inboxDecision("inbox.discard", item.item_id);
-        document.querySelector("#retry-item").onclick = () => runBulk(
-          "inbox.retry", { item_id: item.item_id }, `${item.display_title}: retry`,
-          null, [{ grouped: item.identities.length > 1,
-                   manifest_identities: item.identities,
-                   identifier: item.identities[0] }]);
+        document.querySelector("#retry-item").onclick = () => retryInboxItem(item, kind);
         await refreshInboxSummary();
+      }
+      async function retryInboxItem(item, kind) {
+        const query = kind === "actor"
+          ? { name: document.querySelector("#query-name").value }
+          : { title: document.querySelector("#query-title").value,
+              year: document.querySelector("#query-year").value };
+        document.querySelectorAll("#apply-item, #discard-item, #retry-item").forEach(
+          (button) => button.disabled = true);
+        await runBulk("inbox.retry", { item_id: item.item_id, query },
+          `${item.display_title}: retry`, null,
+          [{ grouped: item.identities.length > 1,
+             manifest_identities: item.identities,
+             identifier: item.identities[0] }]);
+        await openInbox();
+        const index = state.inbox.items.findIndex((candidate) => candidate.item_id === item.item_id);
+        if (index >= 0) selectInboxItem(index);
       }
       async function inboxDecision(action, itemId) {
         try {
