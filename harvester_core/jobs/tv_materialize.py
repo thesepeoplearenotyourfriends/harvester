@@ -488,9 +488,18 @@ def run(
         "actor_ok": counters["actor_ok"],
     }
     if not committer.committing:
+        statuses = {}
+        for show_path, record in matched:
+            statuses[show_path] = {
+                name: copy.deepcopy((record.get("materialize") or {}).get(name, {}))
+                for name, enabled in (("nfo", write_nfo), ("poster", write_poster)) if enabled
+            }
         return {"processed": counters["shows_seen"],
-                "planned_counts": {"nfo": counters["nfo_ok"],
-                                   "poster": counters["poster_ok"],
-                                   "actor": counters["actor_ok"]},
+                "planned_counts": {
+                    "planned": counters["nfo_ok"] + counters["poster_ok"],
+                    "exists": counters["nfo_exists"] + counters["poster_exists"],
+                    "no_url": counters["poster_no_url"],
+                    "error": counters["nfo_error"] + counters["poster_error"]},
+                "planned_statuses": statuses,
                 "planned": planned(committer)}
     return result

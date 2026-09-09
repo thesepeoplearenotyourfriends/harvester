@@ -20,6 +20,7 @@ from ..events import emit
 WORKFLOWS = frozenset({
     "missing-actor-images", "failed-actors", "lost-found", "missing-posters",
     "unresolved-movies", "failed-movies", "ambiguous-tv", "not-found-tv", "tv-errors",
+    "missing-tv-nfo", "missing-tv-posters",
 })
 
 
@@ -126,7 +127,9 @@ def _finish(config, workflow, identities, recorder, result, attention=0):
         reason=result.get("message") if state == "needs_attention" else None,
         logical_identity=result.pop("_logical_identity", None),
         requested_artifacts={"missing-actor-images": ["actor_image"],
-                             "lost-found": ["nfo"], "missing-posters": ["poster"]}.get(
+                             "lost-found": ["nfo"], "missing-posters": ["poster"],
+                             "missing-tv-nfo": ["nfo"],
+                             "missing-tv-posters": ["poster"]}.get(
                                  workflow, ["identity"]),
     )
     detail = result.get("message")
@@ -144,7 +147,8 @@ def _scoped_record_outcome(workflow, identities, records):
     """Classify only provider records owned by one frozen logical row."""
     successful = {"actor": {"ok"}, "movie": {"ok"}, "show": {"matched"}}
     kind = "actor" if "actor" in workflow else "show" if workflow in {
-        "ambiguous-tv", "not-found-tv", "tv-errors"} else "movie"
+        "ambiguous-tv", "not-found-tv", "tv-errors", "missing-tv-nfo",
+        "missing-tv-posters"} else "movie"
     if identities and len(records) != len(identities):
         return True, "Scoped provider record is missing"
     for record in records:
@@ -162,6 +166,8 @@ def _scoped_artifact_outcome(workflow, result):
         "missing-actor-images": ("image", ("failed", "unresolved_source")),
         "missing-posters": ("poster", ("error", "no_url", "unresolved_target")),
         "lost-found": ("nfo", ("error", "unresolved_target")),
+        "missing-tv-nfo": ("nfo", ("error",)),
+        "missing-tv-posters": ("poster", ("error", "no_url")),
     }.get(workflow)
     if expected is None:
         return False, None
@@ -230,7 +236,11 @@ def run(config, workflow, identities, reporter=None):
         provider = TMDBClient(config.tmdb_api_key, config.tmdb_bearer_token,
                               config.state_path("tmdb_api_cache.json"), transport)
         scanned = scan(config, provider, reporter, refresh=True, targets=targets)
-        if workflow != "lost-found":
+        records = [get_record(config, "movie", value) for value in identities]
+        should_prepare_nfo = workflow == "lost-found" or any(
+            record.get("status") == "ok" and not Path(record["nfo_path"]).is_file()
+            for record in records)
+        if not should_prepare_nfo:
             return _finish(config, workflow, identities, recorder,
                            _item_result(identities, ("identity", scanned)))
         from .movie_materialize import run as materialize
@@ -262,10 +272,31 @@ def run(config, workflow, identities, reporter=None):
     transport = transport_from_config(config)
     provider = TVDBClient(config.tvdb_api_key, config.tvdb_pin,
                           config.state_path("tvdb_api_cache.json"), transport)
-    return _finish(config, workflow, identities, recorder, _item_result(identities, ("identity", scan(
+    records = [get_record(config, "show", value) for value in identities]
+    needs_resolution = [record for record in records if record.get("status") != "matched"]
+    scanned = {"processed": 0, "counts": {}}
+    if needs_resolution:
+        scanned = scan(
         config, provider, reporter, refresh=True, retry_errors=True,
         retry_ambiguous=True, retry_not_found=True, targets=_show_targets(config, identities),
-    ))))
+        )
+    records = [get_record(config, "show", value) for value in identities]
+    targets = [record["local_target"] for record in records if record.get("status") == "matched"]
+    write_nfo = workflow == "missing-tv-nfo" or (
+        workflow in {"ambiguous-tv", "not-found-tv", "tv-errors"} and
+        any(not (Path(record["local_target"]) / "show.nfo").is_file() for record in records
+            if record.get("status") == "matched"))
+    write_poster = workflow == "missing-tv-posters"
+    results = [("identity", scanned)]
+    if targets and (write_nfo or write_poster):
+        from .tv_materialize import run as materialize
+        prepared = materialize(config, reporter, targets=targets, transport=transport,
+                               write_nfo=write_nfo, write_poster=write_poster,
+                               write_actors=False, overwrite_nfo=False,
+                               overwrite_poster=False, committer=recorder)
+        results.append(("nfo" if write_nfo else "poster", prepared))
+    return _finish(config, workflow, identities, recorder,
+                   _item_result(identities, *results))
 
 
 def run_scoped(config, workflow, items, logical_count, reporter=None):
@@ -319,7 +350,8 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
                                    "message": result.get("message")}
             records = []
             kind = "actor" if "actor" in workflow else "show" if workflow in {
-                "ambiguous-tv", "not-found-tv", "tv-errors"} else "movie"
+                "ambiguous-tv", "not-found-tv", "tv-errors", "missing-tv-nfo",
+                "missing-tv-posters"} else "movie"
             for identity in identities:
                 try:
                     records.append(get_record(config, kind, identity))

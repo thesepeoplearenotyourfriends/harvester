@@ -259,5 +259,9 @@ def inventory(config):
     return {
         "actors": {"total": len(actors), "local": local, "pending_unresolved": actor_counts["pending"], "ok": actor_counts["ok"], "failed": actor_counts["failed"], "error": actor_counts["error"]},
         "movies": {"total": len(movies), "missing_nfo": sum(not Path(x.get("nfo_path", "")).is_file() for x in movies.values()), "missing_poster": sum(not _poster_candidates(directory) for directory in movie_directories), "unresolved": sum(x.get("status") == "unresolved" for x in movies.values()), "failed": sum(x.get("status") in ("failed", "error") for x in movies.values())},
-        "tv": dict(Counter(x.get("status", "pending") for x in shows.values())),
+        "tv": {"total": len(shows),
+               "missing_nfo": sum(not (Path(key) / "show.nfo").is_file()
+                                  for key in shows),
+               "missing_poster": sum(not _poster_candidates(Path(key)) for key in shows),
+               **dict(Counter(x.get("status", "pending") for x in shows.values()))},
     }

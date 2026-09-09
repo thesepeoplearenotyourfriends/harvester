@@ -525,6 +525,48 @@ if (identityless.liveProcessed !== 1 || identityless.activity !== 'Broken row') 
         self.assertIn('runBulk("bulk.item", { workflow, scope, index }', page)
         self.assertIn("job.seenOwners.has(owner)", page)
 
+    def test_candidate_click_supplies_frozen_row_and_issues_semantic_request(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        start = page.index("async function selectCandidate")
+        end = page.index("\n      async function retryInboxItem", start)
+        function = page[start:end]
+        script = f"""
+let captured;
+async function runBulk(...args) {{ captured = args; }}
+async function openInbox() {{}}
+const state = {{inbox: {{items: []}}}};
+function selectInboxItem() {{}}
+{function}
+(async () => {{
+  const item = {{item_id:'plan', display_title:'Movie', identities:['movie.nfo']}};
+  await selectCandidate(item, 2);
+  if (captured[0] !== 'inbox.select_candidate') process.exit(1);
+  if (captured[1].candidate_index !== 2 || captured[4][0].identifier !== 'movie.nfo') process.exit(2);
+}})().catch(() => process.exit(3));
+"""
+        subprocess.run(["node", "-e", script], check=True)
+
+    def test_configuration_cancel_explicitly_closes_without_saving(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="cancel-configuration" type="button"', page)
+        self.assertNotIn('<form method="dialog">', page)
+        start = page.index('document.querySelector("#cancel-configuration").onclick')
+        handler = page[start:page.index("\n      };", start) + len("\n      };")]
+        script = f"""
+let closed = false, saved = false;
+const cancel = {{}};
+const configuration = {{close() {{ closed = true; }}}};
+const document = {{querySelector(value) {{
+  if (value === '#cancel-configuration') return cancel;
+  if (value === '#configuration') return configuration;
+  saved = true;
+}}}};
+{handler}
+cancel.onclick();
+if (!closed || saved) process.exit(1);
+"""
+        subprocess.run(["node", "-e", script], check=True)
+
 
 class BulkRecipeTests(unittest.TestCase):
     def test_movie_query_override_controls_tmdb_without_changing_local_identity(self):
