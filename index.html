@@ -327,7 +327,7 @@
         state.selectionGeneration++;
         state.workflow = "overview";
         document.querySelector("#context-pane").innerHTML =
-          '<h1>Overview</h1><div class="toc">' +
+          '<div class="context-scroll"><h1>Overview</h1><div class="toc">' +
           tocRows()
             .map((r) =>
               r.h
@@ -335,7 +335,7 @@
                 : `<button data-work="${r.w}"><span>${r.n}</span>${r.c === undefined ? "" : `<b>${r.c}</b>`}</button>`,
             )
             .join("") +
-          "</div>";
+          "</div></div>";
         let groups = {
           Actors: tocRows().slice(1, 4),
           Movies: tocRows().slice(5, 10),
@@ -370,7 +370,7 @@
           ? '<button id="scan-all" class="compact-action" type="button">Re-fetch from web</button>'
           : "";
         document.querySelector("#context-pane").innerHTML =
-          `<div class="context-nav"><button id="back-overview">⮪ Overview</button></div><div class="workflow-heading"><h1>${esc(title)}</h1>${scan}</div><div class="queue">${rows.map((r, i) => `<button data-row="${i}"><span>${r.kind ? `<small>${esc(r.kind.toUpperCase())}</small>` : ""}${esc(rowLabel(r))}</span></button>`).join("")}</div>`;
+          `<div class="context-nav"><button id="back-overview">⮪ Overview</button></div><div class="context-scroll"><div class="workflow-heading"><h1>${esc(title)}</h1>${scan}</div><div class="queue">${rows.map((r, i) => `<button data-row="${i}"><span>${r.kind ? `<small>${esc(r.kind.toUpperCase())}</small>` : ""}${esc(rowLabel(r))}</span></button>`).join("")}</div></div>`;
         document.querySelector("#back-overview").onclick = () => loadOverview();
         const scanAll = document.querySelector("#scan-all");
         if (scanAll) scanAll.onclick = startBulkWorkflow;
@@ -527,7 +527,7 @@
         state.generation++;
         state.selectionGeneration++;
         state.workflow = "bulk";
-        document.querySelector("#context-pane").innerHTML = '<div class="context-nav"><button id="back-overview">⮪ Overview</button></div><h1>Bulk</h1><p class="muted">Application background work</p>';
+        document.querySelector("#context-pane").innerHTML = '<div class="context-nav"><button id="back-overview">⮪ Overview</button></div><div class="context-scroll"><h1>Bulk</h1><p class="muted">Application background work</p></div>';
         document.querySelector("#back-overview").onclick = () => loadOverview();
         renderBulkPresentations();
       }
@@ -545,7 +545,7 @@
         state.workflow = "inbox";
         await refreshInboxSummary();
         const items = state.inbox.items;
-        document.querySelector("#context-pane").innerHTML = `<div class="context-nav"><button id="back-overview">⮪ Overview</button></div><div class="workflow-heading"><h1>Bulk Inbox</h1></div><div class="queue">${items.map((item, index) => `<button data-inbox-row="${index}" class="${item.seen ? "" : "unseen"}"><span>${item.state === "needs_attention" ? "⚠ " : ""}${esc(item.display_title)}</span></button>`).join("")}</div><div class="inbox-actions"><button id="apply-ready">Apply All Ready</button><button id="discard-all">Discard All Pending</button></div>`;
+        document.querySelector("#context-pane").innerHTML = `<div class="context-nav"><button id="back-overview">⮪ Overview</button></div><div class="context-scroll"><div class="workflow-heading"><h1>Bulk Inbox</h1></div><div class="queue">${items.map((item, index) => `<button data-inbox-row="${index}" class="${item.seen ? "" : "unseen"}"><span>${item.state === "needs_attention" ? "⚠ " : ""}${esc(item.display_title)}</span></button>`).join("")}</div><div class="inbox-actions"><button id="apply-ready">Apply All Ready</button><button id="discard-all">Discard All Pending</button></div></div>`;
         document.querySelector("#workspace").innerHTML = items.length ? '<p class="muted">Select prepared work to review.</p>' : '<p class="muted">The Bulk Inbox is empty.</p>';
         document.querySelector("#back-overview").onclick = loadOverview;
         document.querySelectorAll("[data-inbox-row]").forEach((button) => button.onclick = () => selectInboxItem(+button.dataset.inboxRow));
@@ -648,19 +648,32 @@
         if (button) button.onclick = startSelectedBulk;
         setWriterControls();
       }
+      function previewSlot() {
+        return '<div class="artifact-preview" aria-live="polite"></div>';
+      }
+      async function loadArtifactPreview(kind, identifier) {
+        try {
+          const preview = await App.request("preview.artifact", { kind, identifier }, true);
+          const slot = document.querySelector(".artifact-preview");
+          if (slot && preview?.available && preview.asset?.startsWith(`asset://${PACKAGE_ID}/.cache/ui/preview-`))
+            slot.innerHTML = `<img class="inbox-preview" src="${esc(preview.asset)}" alt="Local ${kind === "actor" ? "mugshot" : "poster"} preview">`;
+        } catch (_) { /* Textual artifact state remains the safe fallback. */ }
+      }
       function renderInspector(detail, raw = null) {
         const fields = detail.nfo?.fields || detail.nfos?.find((item) => item.present)?.fields || {};
         const identityNote = detail.ownership?.status === "ambiguous"
           ? `<p class="error"><strong>Ambiguous poster ownership.</strong> ${esc(detail.ownership.reason)}</p>` : "";
         document.querySelector("#workspace").innerHTML =
-          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}${identityNote}<dl><dt>Directory</dt><dd>${esc(detail.directory)}</dd>${artifactLine("NFO", detail.nfo)}${artifactLine("Poster", detail.poster)}<dt>Video files</dt><dd>${esc(detail.video_count)}</dd>${Object.entries(fields).map(([key, value]) => `<dt>${esc(key.replaceAll("_", " "))}</dt><dd>${esc(typeof value === "object" ? JSON.stringify(value) : value)}</dd>`).join("")}</dl>${raw ? `<details><summary>Raw state</summary><pre>${esc(JSON.stringify(raw, null, 2))}</pre></details>` : ""}</article>`;
+          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}${identityNote}${previewSlot()}<dl><dt>Directory</dt><dd>${esc(detail.directory)}</dd>${artifactLine("NFO", detail.nfo)}${artifactLine("Poster", detail.poster)}<dt>Video files</dt><dd>${esc(detail.video_count)}</dd>${Object.entries(fields).map(([key, value]) => `<dt>${esc(key.replaceAll("_", " "))}</dt><dd>${esc(typeof value === "object" ? JSON.stringify(value) : value)}</dd>`).join("")}</dl>${raw ? `<details><summary>Raw state</summary><pre>${esc(JSON.stringify(raw, null, 2))}</pre></details>` : ""}</article>`;
         bindRefetch();
+        if (detail.poster?.present) loadArtifactPreview(detail.kind, detail.identifier);
       }
       function renderRecordInspector(detail) {
         const known = contexts(detail);
         document.querySelector("#workspace").innerHTML =
-          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}<dl>${detailPairs(detail)}</dl><h2>Known from</h2>${known.length ? `<ul>${known.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : '<p class="muted">No saved contexts.</p>'}<details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail, null, 2))}</pre></details></article>`;
+          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}${detail.kind === "actor" ? previewSlot() : ""}<dl>${detailPairs(detail)}</dl><h2>Known from</h2>${known.length ? `<ul>${known.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : '<p class="muted">No saved contexts.</p>'}<details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail, null, 2))}</pre></details></article>`;
         bindRefetch();
+        if (detail.kind === "actor" && detail.local_file) loadArtifactPreview("actor", detail.name);
       }
       async function rawRecords(kind, identifiers) {
         const values = [];
@@ -889,9 +902,17 @@
         }
       }
       async function loadOverview() {
-        state.generation++;
-        await refreshInventory();
+        const generation = ++state.generation;
         renderOverview();
+        try {
+          const inventory = await App.request("inventory", {}, false, true);
+          if (generation !== state.generation || state.workflow !== "overview") return;
+          state.inventory = inventory;
+          renderOverview();
+        } catch (e) {
+          if (e.name !== "AbortError" && generation === state.generation && state.workflow === "overview")
+            showError(e.message);
+        }
       }
       async function start() {
         const generation = ++state.generation;

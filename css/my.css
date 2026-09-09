@@ -146,10 +146,12 @@ button {
   overflow: hidden;
 }
 #context-pane {
+  display: flex;
+  flex-direction: column;
   flex: 0 0 auto;
   width: 184px;
   padding: 9px 8px;
-  overflow: auto;
+  overflow: hidden;
   background: var(--well);
 }
 #splitter {
@@ -284,13 +286,16 @@ hr {
   margin-top: 7px;
 }
 .context-nav {
-  position: sticky;
-  top: 0;
-  z-index: 2;
+  flex: 0 0 auto;
   margin: -5px -8px 5px;
   padding: 5px 8px;
   border-bottom: 1px solid var(--line);
   background: var(--well);
+}
+.context-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
 }
 .bulk-writing #drop-zone {
   opacity: 0.55;
@@ -399,15 +404,15 @@ pre {
 .busy {
   opacity: 0.7;
 }
-#context-pane::-webkit-scrollbar,
+.context-scroll::-webkit-scrollbar,
 #workspace::-webkit-scrollbar {
   width: 9px;
 }
-#context-pane::-webkit-scrollbar-track,
+.context-scroll::-webkit-scrollbar-track,
 #workspace::-webkit-scrollbar-track {
   background: var(--well);
 }
-#context-pane::-webkit-scrollbar-thumb,
+.context-scroll::-webkit-scrollbar-thumb,
 #workspace::-webkit-scrollbar-thumb {
   background: #56594d;
   border-radius: 4px;

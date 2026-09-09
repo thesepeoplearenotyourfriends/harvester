@@ -278,6 +278,7 @@ ACTION_REGISTRY = {
     "inbox.list": None, "inbox.get": None, "inbox.apply": None,
     "inbox.discard": None, "inbox.apply_all": None, "inbox.discard_all": None,
     "actor.install_image": None, "inbox.install_image": None,
+    "preview.artifact": None,
 }
 BRIDGE_ACTIONS = frozenset({"__ping__", *ACTION_REGISTRY})
 
@@ -387,6 +388,36 @@ def install_inbox_image(data):
     return {"item_id": item["item_id"], "prepared": 1, "bytes": len(source)}
 
 
+def publish_artifact_preview(data):
+    """Publish one already-known library image as disposable UI state."""
+    if (set(data) != {"kind", "identifier"} or
+            data.get("kind") not in {"actor", "movie", "show"} or
+            not isinstance(data.get("identifier"), str)):
+        raise BridgeError("preview.artifact requires a semantic kind and identifier")
+    from harvester_core.api import get_record, inspect_item
+    from harvester_core.config import load_config
+    config = load_config(app_dir=PROJECT_DIR)
+    if data["kind"] == "actor":
+        source_value = get_record(config, "actor", data["identifier"]).get("local_file")
+    else:
+        source_value = inspect_item(config, data["kind"], data["identifier"])["poster"].get("path")
+    source = Path(source_value) if source_value else None
+    if (source is None or not source.is_file() or source.is_symlink() or
+            source.suffix.casefold() not in {".jpg", ".jpeg", ".png", ".webp"}):
+        return {"available": False}
+    size = source.stat().st_size
+    if size > 20 * 1024 * 1024:
+        return {"available": False}
+    content = source.read_bytes()
+    identity = hashlib.sha256((data["kind"] + "\0" + data["identifier"]).encode() + content).hexdigest()[:24]
+    name = f"preview-{identity}{source.suffix.casefold()}"
+    with _cache_lock:
+        _prepare_cache_directory()
+        from harvester_core.storage import write_bytes_atomic
+        write_bytes_atomic(CACHE_DIR / name, content)
+    return {"available": True, "asset": f"asset://{PACKAGE_ID}/.cache/ui/{name}"}
+
+
 def parse_ndjson(output):
     """Return the single terminal result while ignoring progress events."""
     terminal = None
@@ -424,6 +455,8 @@ def run_action(action, data):
         return install_actor_image(data)
     if action == "inbox.install_image":
         return install_inbox_image(data)
+    if action == "preview.artifact":
+        return publish_artifact_preview(data)
     if action == "config.get":
         return get_configuration(data)
     if action == "config.save":
