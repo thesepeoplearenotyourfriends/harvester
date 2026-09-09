@@ -59,7 +59,7 @@
       <section id="bulk-drawer" hidden aria-label="Bulk work"></section>
       <button id="job-strip" type="button" aria-expanded="false">Bulk: idle</button>
     </main>
-    <dialog id="configuration"><form method="dialog"><h1>Configuration</h1><p class="muted">Environment variables override stored values; overridden fields are marked below.</p><div id="configuration-fields"></div><p class="error" id="configuration-error" hidden></p><div class="dialog-actions"><button value="cancel">Cancel</button><button id="save-configuration" value="default">Save</button></div></form></dialog>
+    <dialog id="configuration"><form><h1>Configuration</h1><p class="muted">Environment variables override stored values; overridden fields are marked below.</p><div id="configuration-fields"></div><p class="error" id="configuration-error" hidden></p><div class="dialog-actions"><button id="cancel-configuration" type="button">Cancel</button><button id="save-configuration" type="button">Save</button></div></form></dialog>
     <script>
       "use strict";
       const PACKAGE_ID = "com.harvester.app";
@@ -152,6 +152,14 @@
           inspect: "inspect.show",
           kind: "show",
         },
+        "missing-tv-nfo": {
+          title: "Missing TV NFO", action: "list.shows", data: { missing: "nfo" },
+          get: "get.show", inspect: "inspect.show", kind: "show",
+        },
+        "missing-tv-posters": {
+          title: "Missing TV Posters", action: "list.shows", data: { missing: "poster" },
+          get: "get.show", inspect: "inspect.show", kind: "show",
+        },
         "all-actors": {
           title: "All Actors",
           action: "list.actors",
@@ -187,6 +195,8 @@
         "ambiguous-tv": { kind: "show", aspect: "identity" },
         "not-found-tv": { kind: "show", aspect: "identity" },
         "tv-errors": { kind: "show", aspect: "identity" },
+        "missing-tv-nfo": { kind: "show", aspect: "nfo" },
+        "missing-tv-posters": { kind: "show", aspect: "poster" },
       };
       const App = {
         id: 1,
@@ -196,7 +206,7 @@
           if (!globalThis.severin?.send)
             throw Error("Severin bridge is not available");
           const requestId = this.id++;
-          if (["bulk.workflow", "bulk.item", "inbox.retry"].includes(action)) state.bulk.job.requestId = requestId;
+          if (["bulk.workflow", "bulk.item", "inbox.retry", "inbox.select_candidate"].includes(action)) state.bulk.job.requestId = requestId;
           const pending = globalThis.severin.send({
             id: requestId,
             session: SESSION_ID,
@@ -311,11 +321,10 @@
           {
             n: "All",
             w: "all-tv",
-            c: Object.values(state.inventory.tv || {}).reduce(
-              (a, b) => a + b,
-              0,
-            ),
+            c: count("tv", "total"),
           },
+          { n: "Missing NFO", w: "missing-tv-nfo", c: count("tv", "missing_nfo") },
+          { n: "Missing poster", w: "missing-tv-posters", c: count("tv", "missing_poster") },
           { n: "Ambiguous", w: "ambiguous-tv", c: count("tv", "ambiguous") },
           { n: "Not found", w: "not-found-tv", c: count("tv", "not_found") },
           { n: "Errors", w: "tv-errors", c: count("tv", "error") },
@@ -559,15 +568,16 @@
         const writes = item.actions.filter((action) => action.action === "write");
         const preview = writes.find((action) => /\.(jpe?g|png|webp)$/i.test(action.path));
         const previewUrl = preview ? `asset://${PACKAGE_ID}/.cache/bulk/inbox/${item.item_id}/${preview.blob}` : null;
-        const kind = item.workflow.includes("actor") ? "actor" : ["ambiguous-tv", "not-found-tv", "tv-errors"].includes(item.workflow) ? "show" : "movie";
-        const query = item.query?.override || item.query?.inferred || {};
+        const kind = item.workflow.includes("actor") ? "actor" : ["ambiguous-tv", "not-found-tv", "tv-errors", "missing-tv-nfo", "missing-tv-posters"].includes(item.workflow) ? "show" : "movie";
+        const query = { ...(item.query?.inferred || {}), ...(item.query?.override || {}) };
         const queryFields = kind === "actor"
           ? `<label>Name <input id="query-name" value="${esc(query.name || "")}" maxlength="300"></label>`
           : `<label>Title <input id="query-title" value="${esc(query.title || "")}" maxlength="300"></label><label>Year <input id="query-year" value="${esc(query.year || "")}" inputmode="numeric" maxlength="4"></label>`;
         const candidates = kind === "movie" ? (item.summary?.provider_results?.[0]?.candidates || []) : [];
         const candidateCards = candidates.length ? `<section class="candidate-results"><h2>Candidate results</h2>${candidates.map((candidate, candidateIndex) => `<article class="candidate"><strong>${esc(candidate.title || "Untitled")}</strong>${candidate.original_title && candidate.original_title !== candidate.title ? `<span>Original title: ${esc(candidate.original_title)}</span>` : ""}<span>Release: ${esc(candidate.release_date || "Unknown")}</span><span>Score: ${esc(candidate.score ?? "Unknown")}</span><button type="button" data-candidate-index="${candidateIndex}">Use this result</button></article>`).join("")}</section>` : "";
         const manualImage = ["actor", "movie"].includes(kind) && (kind === "actor" || item.workflow === "missing-posters") ? `<div id="inbox-drop-zone" class="drop-zone" tabindex="0">Drop an image here<br><span>or</span><br><button id="choose-inbox-image" type="button">Choose Image…</button><input id="inbox-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></div>` : "";
-        document.querySelector("#workspace").innerHTML = `<article class="inspector"><h1>${esc(item.display_title)}</h1><p><strong>${item.state === "ready" ? "Ready for review" : "Needs attention"}</strong></p>${item.reason ? `<p class="error">${esc(item.reason)}</p>` : ""}${previewUrl ? `<img class="inbox-preview" src="${previewUrl}" alt="Prepared artwork preview">` : ""}${manualImage}<h2>Proposal</h2><pre>${esc(JSON.stringify(item.summary, null, 2))}</pre>${candidateCards}<h2>Exact filesystem changes</h2><ul>${item.actions.map((action) => `<li>${esc(action.action)} · ${esc(action.path)}${action.size === undefined ? "" : ` · ${action.size} bytes`} · expected ${action.precondition?.exists ? esc(action.precondition.kind || "present") : "absent"}</li>`).join("")}</ul><section class="provider-query"><h2>Provider query</h2>${queryFields}</section><div class="inbox-actions"><button id="apply-item" ${item.state !== "ready" ? "disabled" : ""}>Apply</button><button id="discard-item">Discard</button><button id="retry-item">Retry Search…</button></div></article>`;
+        const applyReason = item.state === "ready" ? "Apply prepared filesystem changes" : (item.reason || "Resolve this item before applying");
+        document.querySelector("#workspace").innerHTML = `<article class="inspector"><h1>${esc(item.display_title)}</h1><p><strong>${item.state === "ready" ? "Ready for review" : "Needs attention"}</strong></p>${item.reason ? `<p class="error">${esc(item.reason)}</p>` : ""}${previewUrl ? `<img class="inbox-preview" src="${previewUrl}" alt="Prepared artwork preview">` : ""}${manualImage}<h2>Proposal</h2><pre>${esc(JSON.stringify(item.summary, null, 2))}</pre>${candidateCards}<h2>Exact filesystem changes</h2><ul>${item.actions.map((action) => `<li>${esc(action.action)} · ${esc(action.path)}${action.size === undefined ? "" : ` · ${action.size} bytes`} · expected ${action.precondition?.exists ? esc(action.precondition.kind || "present") : "absent"}</li>`).join("")}</ul><section class="provider-query"><h2>Provider query</h2>${queryFields}</section><div class="inbox-actions"><button id="apply-item" title="${esc(applyReason)}" ${item.state !== "ready" ? "disabled" : ""}>Apply</button><button id="discard-item">Discard</button><button id="retry-item">Retry Search…</button></div></article>`;
         document.querySelector("#apply-item").onclick = () => inboxDecision("inbox.apply", item.item_id);
         document.querySelector("#discard-item").onclick = () => inboxDecision("inbox.discard", item.item_id);
         document.querySelector("#retry-item").onclick = () => retryInboxItem(item, kind);
@@ -576,8 +586,12 @@
         await refreshInboxSummary();
       }
       async function selectCandidate(item, candidateIndex) {
-        await runBulk("inbox.select_candidate", { item_id: item.item_id, candidate_index: candidateIndex }, `${item.display_title}: selected result`);
+        const rows = [{ grouped: item.identities.length > 1,
+          manifest_identities: item.identities, identifier: item.identities[0] }];
+        await runBulk("inbox.select_candidate", { item_id: item.item_id, candidate_index: candidateIndex }, `${item.display_title}: selected result`, null, rows);
         await openInbox();
+        const index = state.inbox.items.findIndex((candidate) => candidate.item_id === item.item_id);
+        if (index >= 0) selectInboxItem(index);
       }
       function bindInboxImage(item) {
         const input = document.querySelector("#inbox-image-file"), zone = document.querySelector("#inbox-drop-zone");
@@ -1055,6 +1069,9 @@
           document.querySelector("#configuration-fields").innerHTML = configFields.map(([name, label]) => `<label><span>${esc(label)}${config.environment_overrides[name] ? ' <small>overridden by environment</small>' : ""}</span><input name="${name}" type="password" value="${esc(config.values[name])}" autocomplete="off"></label>`).join("");
           document.querySelector("#configuration").close();
         } catch (error) { const node = document.querySelector("#configuration-error"); node.textContent = error.message; node.hidden = false; }
+      };
+      document.querySelector("#cancel-configuration").onclick = () => {
+        document.querySelector("#configuration").close();
       };
       document.querySelector("#toggle-context").onclick = (e) => {
         state.contextVisible = !state.contextVisible;

@@ -104,6 +104,7 @@ def _rescan(data):
 BULK_WORKFLOWS = frozenset({
     "missing-actor-images", "failed-actors", "lost-found", "missing-posters",
     "unresolved-movies", "failed-movies", "ambiguous-tv", "not-found-tv", "tv-errors",
+    "missing-tv-nfo", "missing-tv-posters",
 })
 
 
@@ -181,7 +182,8 @@ def _inbox_retry(data):
     config = load_config(app_dir=PROJECT_DIR)
     item = get_inbox_item(config, data["item_id"])
     kind = "actor" if "actor" in item["workflow"] else "show" if item["workflow"] in {
-        "ambiguous-tv", "not-found-tv", "tv-errors"} else "movie"
+        "ambiguous-tv", "not-found-tv", "tv-errors", "missing-tv-nfo",
+        "missing-tv-posters"} else "movie"
     query = data["query"]
     valid_keys = (set(query) == {"name"} if kind == "actor" else
                   "title" in query and set(query) <= {"title", "year"})

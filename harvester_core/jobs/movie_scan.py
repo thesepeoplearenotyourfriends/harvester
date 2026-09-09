@@ -8,6 +8,20 @@ from ..events import emit
 from ..storage import load_json, save_json_atomic
 from .movie_actor_scan import clean_year, last_year, resolve_movie_tmdb_id
 
+
+def filename_query_title(stem, year):
+    """Return the human search title preceding the chosen filename year token."""
+    title = stem
+    if year:
+        import re
+        match = None
+        for candidate in re.finditer(r"(?<!\d)(?:19|20)\d{2}(?!\d)", stem):
+            if int(candidate.group()) == year:
+                match = candidate
+        if match and stem[:match.start()].strip(" ._-()[]"):
+            title = stem[:match.start()]
+    return " ".join(title.replace(".", " ").replace("_", " ").strip(" -._()[]").split())
+
 def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -48,6 +62,7 @@ def discover_movies(root):
             title = nfo_path.stem
             original_title = None
             year = last_year(base.name) or last_year(title)
+            query_title = filename_query_title(title, year) if not nfo_path.exists() else None
             imdb_id = tmdb_id = None
             if nfo_path.exists():
                 try:
@@ -62,6 +77,8 @@ def discover_movies(root):
                     tmdb_id = _id(node, "tmdb") or _text(node, "tmdbid")
                 except (ET.ParseError, OSError):
                     pass
+            if query_title is None:
+                query_title = title
             # Existing paths are receipts. A container with one movie has the
             # conventional extensionless ``poster`` target; content decides
             # the eventual suffix during preparation.
@@ -79,6 +96,7 @@ def discover_movies(root):
                 "poster_path": str(poster) if poster else None,
                 "poster_target_status": "resolved" if poster else "unresolved",
                 "title": title, "original_title": original_title,
+                "query_title": query_title,
                 "year": year, "imdb_id": imdb_id,
                 "local_tmdb_id": int(tmdb_id) if str(tmdb_id or "").isdigit() else None,
                 "status": "pending", "tries": 0, "tmdb_id": None, "match": None,
@@ -122,7 +140,7 @@ def run(config, provider, reporter=None, limit=None, rebuild=False, refresh=Fals
         # human since the prior scan. Provider results and receipts remain
         # intact until the selected item is resolved/materialized again.
         for field in (
-            "local_target", "nfo_path", "title", "original_title", "year",
+            "local_target", "nfo_path", "title", "query_title", "original_title", "year",
             "imdb_id", "local_tmdb_id", "poster_path",
             "poster_target_status",
         ):
@@ -150,7 +168,7 @@ def run(config, provider, reporter=None, limit=None, rebuild=False, refresh=Fals
             try:
                 override = record.get("query_override") or {}
                 identity = resolve_movie_tmdb_id(provider, {
-                    "title": override.get("title") or record.get("title"),
+                    "title": override.get("title") or record.get("query_title") or record.get("title"),
                     "original_title": (None if override.get("title") else
                                        record.get("original_title")),
                     "year": override.get("year") if "year" in override else record.get("year"),
