@@ -35,7 +35,8 @@
         </button>
         <div class="menu-items">
           <button id="toggle-context">Hide Context Pane</button
-          ><button id="reset-pane">Reset Pane Width</button>
+          ><button id="reset-pane">Reset Pane Width</button
+          ><button id="open-configuration">Configuration…</button>
         </div>
       </div>
       <label id="search-box"
@@ -57,10 +58,13 @@
       <section id="bulk-drawer" hidden aria-label="Bulk work"></section>
       <button id="job-strip" type="button" aria-expanded="false">Bulk: idle</button>
     </main>
+    <dialog id="configuration"><form method="dialog"><h1>Configuration</h1><p class="muted">Environment variables override stored values; overridden fields are marked below.</p><div id="configuration-fields"></div><p class="error" id="configuration-error"></p><div class="dialog-actions"><button value="cancel">Cancel</button><button id="save-configuration" value="default">Save</button></div></form></dialog>
     <script>
       "use strict";
       const PACKAGE_ID = "com.harvester.app";
       const COLLECTION_CACHE_VERSION = 1;
+      const SESSION_ID = [...crypto.getRandomValues(new Uint8Array(16))]
+        .map((value) => value.toString(16).padStart(2, "0")).join("");
       const state = {
         workflow: "overview",
         inventory: {},
@@ -72,6 +76,7 @@
         searchTimer: null,
         collectionDescriptor: null,
         bulk: { job: null, drawerOpen: false },
+        selectedIndex: null,
       };
       const workflows = {
         "missing-actor-images": {
@@ -183,16 +188,40 @@
       };
       const App = {
         id: 1,
-        async request(action, data = {}, selection = false, background = false) {
+        async request(action, data = {}, selection = false, background = false, onEvent = null) {
           const generation = state.generation,
             token = state.selectionGeneration;
           if (!globalThis.severin?.send)
             throw Error("Severin bridge is not available");
-          let reply = await globalThis.severin.send({
-            id: this.id++,
+          const requestId = this.id++;
+          const pending = globalThis.severin.send({
+            id: requestId,
+            session: SESSION_ID,
             action,
             data,
           });
+          let polling = true;
+          const poll = async () => {
+            let delivered = 0;
+            const readEvents = async () => {
+              const response = await fetch(`asset://${PACKAGE_ID}/.cache/ui/events-${SESSION_ID}-${requestId}.json`, { cache: "no-store" });
+              if (response.ok) {
+                const channel = await response.json();
+                while (delivered < (channel.events || []).length) onEvent(channel.events[delivered++]);
+              }
+            };
+            while (polling) {
+              try {
+                await readEvents();
+              } catch (_) { /* The host may not have published the channel yet. */ }
+              if (polling) await new Promise((resolve) => setTimeout(resolve, 80));
+            }
+            try { await readEvents(); } catch (_) { /* Terminal reply remains authoritative. */ }
+          };
+          const pollingTask = onEvent ? poll() : null;
+          let reply;
+          try { reply = await pending; } finally { polling = false; }
+          if (pollingTask) await pollingTask;
           if (
             !background &&
             (generation !== state.generation ||
@@ -386,22 +415,36 @@
         const cfg = workflows[workflow];
         const scope = state.collectionDescriptor && { ...state.collectionDescriptor };
         if (!scope) return;
+        await runBulk("bulk.workflow", { workflow, scope }, cfg.title, scope, state.rows);
+      }
+      async function runBulk(action, data, title, scope, rows, selectedIndex = null) {
+        const workflow = data.workflow;
+        const identityOwners = new Map();
+        rows.forEach((row, index) => {
+          const ids = row.grouped && Array.isArray(row.manifest_identities) ? row.manifest_identities : [rowIdentifier(row)];
+          ids.filter(Boolean).forEach((id) => identityOwners.set(String(id), index));
+        });
         state.bulk.job = {
           workflow,
-          title: cfg.title,
+          title,
           scope,
-          total: scope.count,
+          total: rows.length,
           processed: null,
+          liveProcessed: 0,
+          seenOwners: new Set(),
+          identityOwners,
+          activity: "",
+          stage: "",
           counts: {},
-          status: scope.count ? "running" : "complete",
-          message: scope.count ? "Working…" : "Nothing to process",
+          status: rows.length ? "running" : "complete",
+          message: rows.length ? "Working…" : "Nothing to process",
         };
         state.bulk.drawerOpen = true;
         setWriterControls();
         renderBulkPresentations();
-        if (!scope.count) return;
+        if (!rows.length) return;
         try {
-          const result = await App.request("bulk.workflow", { workflow, scope }, false, true);
+          const result = await App.request(action, data, false, true, updateBulkEvent);
           Object.assign(state.bulk.job, {
             status: result?.ok === false ? "attention" : result?.preparation ? "prepared" : "complete",
             processed: Number.isInteger(result?.processed) ? result.processed : null,
@@ -413,13 +456,33 @@
         }
         setWriterControls();
         renderBulkPresentations();
+        if (selectedIndex !== null && state.workflow === workflow) {
+          await refreshInventory();
+          await openWorkflow(workflow);
+          if (state.rows.length) selectRow(Math.min(selectedIndex, state.rows.length - 1));
+        }
+      }
+      function updateBulkEvent(event) {
+        const job = state.bulk.job;
+        if (!job || job.status !== "running") return;
+        advanceBulkProgress(job, event);
+        renderBulkPresentations();
+      }
+      function advanceBulkProgress(job, event) {
+        job.activity = event.id || event.message || "Working…";
+        job.stage = event.event === "prepared" ? "preparing" : event.event === "progress" ? "resolving" : event.event;
+        const owner = job.identityOwners.get(String(event.id));
+        if (owner !== undefined && !job.seenOwners.has(owner)) {
+          job.seenOwners.add(owner);
+          job.liveProcessed = job.seenOwners.size;
+        }
       }
       function writerActive() {
         return state.bulk.job?.status === "running";
       }
       function setWriterControls() {
         const active = writerActive();
-        document.querySelectorAll("#scan-all, #refresh-actor, #choose-image, #image-file").forEach((control) => {
+        document.querySelectorAll("#scan-all, #refetch-item, #choose-image, #image-file").forEach((control) => {
           control.disabled = active;
         });
         document.body.classList.toggle("bulk-writing", active);
@@ -427,9 +490,10 @@
       function bulkMarkup(full = false) {
         const job = state.bulk.job;
         if (!job) return '<div class="bulk-empty"><h1>Bulk</h1><p class="muted">No bulk work has been started.</p></div>';
-        const progress = job.status === "running" ? "In progress" : job.processed === null ? "Finished" : `${job.processed} processed`;
+        const progress = job.status === "running" ? `${job.liveProcessed} / ${job.total}` : job.processed === null ? "Finished" : `${job.processed} processed`;
         const counts = Object.entries(job.counts || {}).map(([name, value]) => `<li>${esc(name.replaceAll("_", " "))}: ${esc(value)}</li>`).join("");
-        return `<div class="bulk-content"><div class="bulk-title"><h1>Bulk</h1>${full ? "" : '<button id="close-bulk" type="button" aria-label="Close Bulk drawer">×</button>'}</div><h2>${esc(job.title)}</h2><p><strong>${esc(job.status)}</strong> · ${esc(progress)}</p>${job.status === "running" ? '<progress aria-label="Bulk work in progress"></progress>' : ""}<p class="muted">${esc(job.message)}</p>${counts ? `<ul>${counts}</ul>` : ""}</div>`;
+        const activity = job.status === "running" && job.activity ? `<p><strong>${esc(job.stage ? job.stage[0].toUpperCase() + job.stage.slice(1) + ":" : "Current:")}</strong><br>${esc(job.activity)}</p>` : "";
+        return `<div class="bulk-content"><div class="bulk-title"><h1>Bulk</h1>${full ? "" : '<button id="close-bulk" type="button" aria-label="Close Bulk drawer">×</button>'}</div><h2>${esc(job.title)}</h2><p><strong>${esc(job.status)}</strong> · ${esc(progress)}</p>${job.status === "running" ? '<progress aria-label="Bulk work in progress"></progress>' : ""}${activity}<p class="muted">${esc(job.message)}</p>${counts ? `<ul>${counts}</ul>` : ""}</div>`;
       }
       function renderBulkPresentations() {
         const job = state.bulk.job;
@@ -463,17 +527,29 @@
       function artifactLine(name, artifact) {
         return `<dt>${esc(name)}</dt><dd>${artifact?.present ? `Present${artifact.path ? ` · ${esc(artifact.path)}` : ""}` : "Missing"}</dd>`;
       }
+      function refetchButton() {
+        return bulkWorkflows[state.workflow]
+          ? '<button id="refetch-item" class="compact-action" type="button">Re-fetch this item</button>'
+          : "";
+      }
+      function bindRefetch() {
+        const button = document.querySelector("#refetch-item");
+        if (button) button.onclick = startSelectedBulk;
+        setWriterControls();
+      }
       function renderInspector(detail, raw = null) {
         const fields = detail.nfo?.fields || detail.nfos?.find((item) => item.present)?.fields || {};
         const identityNote = detail.ownership?.status === "ambiguous"
           ? `<p class="error"><strong>Ambiguous poster ownership.</strong> ${esc(detail.ownership.reason)}</p>` : "";
         document.querySelector("#workspace").innerHTML =
-          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${identityNote}<dl><dt>Directory</dt><dd>${esc(detail.directory)}</dd>${artifactLine("NFO", detail.nfo)}${artifactLine("Poster", detail.poster)}<dt>Video files</dt><dd>${esc(detail.video_count)}</dd>${Object.entries(fields).map(([key, value]) => `<dt>${esc(key.replaceAll("_", " "))}</dt><dd>${esc(typeof value === "object" ? JSON.stringify(value) : value)}</dd>`).join("")}</dl>${raw ? `<details><summary>Raw state</summary><pre>${esc(JSON.stringify(raw, null, 2))}</pre></details>` : ""}</article>`;
+          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}${identityNote}<dl><dt>Directory</dt><dd>${esc(detail.directory)}</dd>${artifactLine("NFO", detail.nfo)}${artifactLine("Poster", detail.poster)}<dt>Video files</dt><dd>${esc(detail.video_count)}</dd>${Object.entries(fields).map(([key, value]) => `<dt>${esc(key.replaceAll("_", " "))}</dt><dd>${esc(typeof value === "object" ? JSON.stringify(value) : value)}</dd>`).join("")}</dl>${raw ? `<details><summary>Raw state</summary><pre>${esc(JSON.stringify(raw, null, 2))}</pre></details>` : ""}</article>`;
+        bindRefetch();
       }
       function renderRecordInspector(detail) {
         const known = contexts(detail);
         document.querySelector("#workspace").innerHTML =
-          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1><dl>${detailPairs(detail)}</dl><h2>Known from</h2>${known.length ? `<ul>${known.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : '<p class="muted">No saved contexts.</p>'}<details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail, null, 2))}</pre></details></article>`;
+          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}<dl>${detailPairs(detail)}</dl><h2>Known from</h2>${known.length ? `<ul>${known.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : '<p class="muted">No saved contexts.</p>'}<details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail, null, 2))}</pre></details></article>`;
+        bindRefetch();
       }
       async function rawRecords(kind, identifiers) {
         const values = [];
@@ -510,7 +586,7 @@
       function renderActorRepair(detail) {
         let known = contexts(detail);
         document.querySelector("#workspace").innerHTML =
-          `<article class="actor-repair"><h1>${esc(detail.name)}</h1><p class="missing-note">No local actor image.</p><div id="drop-zone" tabindex="0">Drop an image here<br><span>or</span><br><button id="choose-image">Choose Image…</button><input id="image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></div><button id="refresh-actor">Refresh from API</button><h2>Known from</h2>${known.length ? `<ul>${known.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : '<p class="muted">No saved contexts.</p>'}<dl>${detailPairs(detail)}</dl><details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail, null, 2))}</pre></details></article>`;
+          `<article class="actor-repair"><h1>${esc(detail.name)}</h1>${refetchButton()}<p class="missing-note">No local actor image.</p><div id="drop-zone" tabindex="0">Drop an image here<br><span>or</span><br><button id="choose-image">Choose Image…</button><input id="image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></div><h2>Known from</h2>${known.length ? `<ul>${known.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : '<p class="muted">No saved contexts.</p>'}<dl>${detailPairs(detail)}</dl><details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail, null, 2))}</pre></details></article>`;
         const input = document.querySelector("#image-file"),
           zone = document.querySelector("#drop-zone");
         document.querySelector("#choose-image").onclick = (e) => {
@@ -530,8 +606,7 @@
           e.dataTransfer.files[0] &&
             installFile(detail.name, e.dataTransfer.files[0]);
         };
-        document.querySelector("#refresh-actor").onclick = () =>
-          repairActor("refresh.actor.image", { identifier: detail.name });
+        bindRefetch();
         setWriterControls();
       }
       async function installFile(name, file) {
@@ -622,6 +697,7 @@
         let row = state.rows[index],
           cfg = workflows[state.workflow];
         if (!row) return;
+        state.selectedIndex = index;
         state.selectionGeneration++;
         document
           .querySelectorAll("[data-row]")
@@ -650,6 +726,12 @@
         } catch (e) {
           if (e.name !== "AbortError") showError(e.message);
         }
+      }
+      async function startSelectedBulk() {
+        if (writerActive() || state.selectedIndex === null || !state.collectionDescriptor) return;
+        const index = state.selectedIndex, workflow = state.workflow, row = state.rows[index];
+        const scope = { ...state.collectionDescriptor };
+        await runBulk("bulk.item", { workflow, scope, index }, `${workflows[workflow].title}: ${rowLabel(row)}`, scope, [row], index);
       }
       async function search(query) {
         state.generation++;
@@ -808,6 +890,34 @@
       document.querySelector("#reset-pane").onclick = () => {
         setWidth(184);
         closeMenus();
+      };
+      const configFields = [
+        ["tmdb_api_key", "TMDB API key"], ["tmdb_bearer_token", "TMDB bearer token"],
+        ["tvdb_api_key", "TVDB API key"], ["tvdb_pin", "TVDB PIN"],
+        ["socks5", "SOCKS5 proxy"], ["socks5_username", "SOCKS5 username"],
+        ["socks5_password", "SOCKS5 password"],
+      ];
+      document.querySelector("#open-configuration").onclick = async () => {
+        closeMenus();
+        const dialog = document.querySelector("#configuration"), fields = document.querySelector("#configuration-fields");
+        document.querySelector("#configuration-error").textContent = "";
+        fields.innerHTML = '<p class="muted">Loading…</p>';
+        dialog.showModal();
+        try {
+          const config = await App.request("config.get");
+          fields.innerHTML = configFields.map(([name, label]) => `<label><span>${esc(label)}${config.environment_overrides[name] ? ' <small>overridden by environment</small>' : ""}</span><input name="${name}" type="password" value="${esc(config.values[name])}" autocomplete="off"></label>`).join("");
+        } catch (error) { document.querySelector("#configuration-error").textContent = error.message; }
+      };
+      document.querySelector("#save-configuration").onclick = async (event) => {
+        event.preventDefault();
+        const inputs = [...document.querySelectorAll("#configuration-fields input")];
+        if (inputs.length !== configFields.length) return;
+        const values = Object.fromEntries(inputs.map((input) => [input.name, input.value]));
+        try {
+          const config = await App.request("config.save", { values });
+          document.querySelector("#configuration-fields").innerHTML = configFields.map(([name, label]) => `<label><span>${esc(label)}${config.environment_overrides[name] ? ' <small>overridden by environment</small>' : ""}</span><input name="${name}" type="password" value="${esc(config.values[name])}" autocomplete="off"></label>`).join("");
+          document.querySelector("#configuration").close();
+        } catch (error) { document.querySelector("#configuration-error").textContent = error.message; }
       };
       document.querySelector("#toggle-context").onclick = (e) => {
         state.contextVisible = !state.contextVisible;
