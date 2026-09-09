@@ -87,13 +87,23 @@ def _show_targets(config, identities):
 def _combined(*results, message="Finished"):
     counts = Counter()
     processed = 0
+    phase_results = {}
     for prefix, result in results:
         processed += int(result.get("processed", 0))
-        phase_counts = (result.get("counts") or result.get("status_counts") or
-                        result.get("planned_counts") or {})
+        # Non-committing materializers can expose their normal/planned summary
+        # alongside a small augmentation in ``counts``. Merge distinct keys,
+        # letting the conventional ``counts`` value win when names overlap.
+        phase_counts = {}
+        for mapping_name in ("planned_counts", "status_counts", "counts"):
+            mapping = result.get(mapping_name)
+            if isinstance(mapping, dict):
+                phase_counts.update(mapping)
         for name, value in phase_counts.items():
             counts[name if name.startswith(prefix + "_") else f"{prefix}_{name}"] += value
-    return {"processed": processed, "counts": dict(counts), "message": message}
+        if result.get("planned_statuses"):
+            phase_results[prefix] = result["planned_statuses"]
+    return {"processed": processed, "counts": dict(counts), "message": message,
+            "phase_results": phase_results}
 
 
 def _item_result(identities, *results, message="Finished"):
@@ -143,6 +153,32 @@ def _scoped_record_outcome(workflow, identities, records):
             reason = (record.get("error") or record.get("reason") or status or
                       "Provider result needs attention")
             return True, str(reason)
+    return False, None
+
+
+def _scoped_artifact_outcome(workflow, result):
+    """Classify requested artifact preparation without consulting provider totals."""
+    expected = {
+        "missing-actor-images": ("image", ("failed", "unresolved_source")),
+        "missing-posters": ("poster", ("error", "no_url", "unresolved_target")),
+        "lost-found": ("nfo", ("error", "unresolved_target")),
+    }.get(workflow)
+    if expected is None:
+        return False, None
+    prefix, failures = expected
+    diagnostics = result.get("counts", {})
+    for failure in failures:
+        key = f"{prefix}_{failure}"
+        if diagnostics.get(key, 0):
+            details = result.get("phase_results", {}).get(prefix, {})
+            reason = next((value.get("error") or value.get("status")
+                           for value in details.values()
+                           if value.get("status") in failures), None)
+            return True, str(reason or f"{key.replace('_', ' ')}: {diagnostics[key]}")
+    successful = sum(int(diagnostics.get(f"{prefix}_{name}", 0))
+                     for name in ("planned", "exists"))
+    if not successful:
+        return True, f"No {prefix.replace('_', ' ')} artifact was prepared"
     return False, None
 
 
@@ -279,6 +315,7 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
             manifest["display_title"] = item.get("display_title") or manifest["display_title"]
             manifest["local_target"] = item.get("local_target") or manifest.get("local_target")
             manifest["summary"] = {"stage_diagnostics": result.get("counts", {}),
+                                   "artifact_results": result.get("phase_results", {}),
                                    "message": result.get("message")}
             records = []
             kind = "actor" if "actor" in workflow else "show" if workflow in {
@@ -291,7 +328,11 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
             manifest["summary"]["provider_results"] = records
             record_attention, record_reason = _scoped_record_outcome(
                 workflow, identities, records)
-            if record_attention and manifest["state"] == "ready":
+            artifact_attention, artifact_reason = _scoped_artifact_outcome(workflow, result)
+            if artifact_attention and manifest["state"] == "ready":
+                manifest["state"] = "needs_attention"
+                manifest["reason"] = artifact_reason
+            elif record_attention and manifest["state"] == "ready":
                 manifest["state"] = "needs_attention"
                 manifest["reason"] = record_reason
             result.setdefault("counts", {})["needs_attention"] = int(

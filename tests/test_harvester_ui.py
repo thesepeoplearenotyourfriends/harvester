@@ -400,6 +400,67 @@ if (identityless.liveProcessed !== 1 || identityless.activity !== 'Broken row') 
 
 
 class BulkRecipeTests(unittest.TestCase):
+    def test_scoped_artifact_result_controls_ready_state_after_provider_success(self):
+        from harvester_core.artifacts import RecordingCommitter, list_inbox
+        cases = (
+            ("missing-actor-images", "actor", "Actor", "image", "failed", "download broke"),
+            ("missing-posters", "movie", "movie.nfo", "poster", "error", "poster broke"),
+        )
+        for workflow, kind, identity_name, phase, failure, reason in cases:
+            for succeeds in (False, True):
+                with self.subTest(workflow=workflow, succeeds=succeeds), \
+                        tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    config = load_config({"state_dir": root / "state",
+                                          "movie_root": root / "movies",
+                                          "tv_root": root / "tv"}, environ={}, app_dir=root)
+                    config.movie_root.mkdir(); config.tv_root.mkdir()
+                    if kind == "actor":
+                        identity = identity_name
+                        save_json_atomic(config.state_path("movie_actor_queue.json"), {
+                            "actors": {identity: {"status": "ok"},
+                                       "Unrelated": {"status": "failed"}}})
+                    else:
+                        identity = str(config.movie_root / "Movie" / identity_name)
+                        save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {
+                            "movies": {identity: {"status": "ok", "local_target": identity},
+                                       "unrelated.nfo": {"status": "unresolved"}}})
+
+                    def prepared(*_args):
+                        recorder = RecordingCommitter()
+                        if succeeds:
+                            recorder.write(config.movie_root / "prepared" / f"{phase}.jpg",
+                                           b"artifact")
+                        plan = bulk.persist_preparation(config, workflow, [identity], recorder)
+                        status = "planned" if succeeds else failure
+                        details = {"status": status}
+                        if not succeeds:
+                            details["error"] = reason
+                        return {"processed": 1, "counts": {f"{phase}_{status}": 1},
+                                "phase_results": {phase: {str(identity): details}},
+                                "preparation": plan, "message": "Finished"}
+
+                    item = {"identities": [identity], "display_title": str(identity),
+                            "local_target": str(identity)}
+                    with mock.patch.object(bulk, "run", side_effect=prepared):
+                        bulk.run_scoped(config, workflow, [item], 1)
+                    inbox = list_inbox(config)[0]
+                    self.assertEqual(inbox["state"],
+                                     "ready" if succeeds else "needs_attention")
+                    self.assertEqual(sum(action["action"] == "write"
+                                         for action in inbox["actions"]), int(succeeds))
+                    if not succeeds:
+                        self.assertEqual(inbox["reason"], reason)
+
+    def test_combined_preserves_augmented_and_planned_artifact_counts(self):
+        combined = bulk._combined(("image", {
+            "counts": {"unresolved_source": 1, "failed": 9},
+            "planned_counts": {"planned": 2, "failed": 1, "exists": 3},
+        }))
+        self.assertEqual(combined["counts"], {
+            "image_unresolved_source": 1, "image_failed": 9,
+            "image_planned": 2, "image_exists": 3})
+
     def test_inbox_state_uses_only_scoped_provider_record(self):
         from harvester_core.artifacts import RecordingCommitter, list_inbox
         for scoped_status, unrelated_status, expected in (
@@ -425,7 +486,8 @@ class BulkRecipeTests(unittest.TestCase):
                     # Deliberately aggregate both records to reproduce the scanner
                     # summary that must not classify this scoped Inbox item.
                     return {"processed": 2, "counts": {"identity_ok": 1,
-                            "identity_unresolved": 1}, "preparation": plan,
+                            "identity_unresolved": 1, "nfo_planned": 1},
+                            "preparation": plan,
                             "message": "Finished"}
                 item = {"identities": [scoped], "display_title": "Scoped",
                         "local_target": scoped}
