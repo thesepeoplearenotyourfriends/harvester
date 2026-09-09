@@ -248,7 +248,7 @@ def _safe_machine_value(value, secrets=()):
 
 def _ndjson(record, secrets=()):
     print(json.dumps(_safe_machine_value(record, secrets), ensure_ascii=False,
-                     separators=(",", ":"), default=str))
+                     separators=(",", ":"), default=str), flush=True)
 
 
 def api_main(args, config):

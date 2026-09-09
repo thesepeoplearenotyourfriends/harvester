@@ -21,6 +21,12 @@ HARVESTER_PATH = PROJECT_DIR / "harvester.py"
 PACKAGE_ID = "com.harvester.app"
 CACHE_DIR = PROJECT_DIR / ".cache" / "ui"
 COLLECTION_CACHE_VERSION = 1
+CONFIG_FIELDS = {
+    "tmdb_api_key": "TMDB_API_KEY", "tmdb_bearer_token": "TMDB_BEARER_TOKEN",
+    "tvdb_api_key": "TVDB_API_KEY", "tvdb_pin": "TVDB_PIN",
+    "socks5": "HARVESTER_SOCKS5", "socks5_username": "HARVESTER_SOCKS5_USERNAME",
+    "socks5_password": "HARVESTER_SOCKS5_PASSWORD",
+}
 
 _cache_lock = threading.Lock()
 
@@ -116,6 +122,52 @@ def _bulk_workflow(data):
             "--generation", scope["generation"], "--count", str(scope["count"]))
 
 
+def _bulk_item(data):
+    """Freeze exactly one existing logical collection row for the Bulk recipe."""
+    if (set(data) != {"workflow", "scope", "index"} or
+            not isinstance(data.get("index"), int) or isinstance(data.get("index"), bool) or
+            data["index"] < 0):
+        raise BridgeError("bulk.item requires a known workflow, frozen scope, and row index")
+    _bulk_workflow({"workflow": data.get("workflow"), "scope": data.get("scope")})
+    source = _scope_path(data["scope"])
+    try:
+        collection = json.loads(source.read_text(encoding="utf-8"))
+        items = collection["items"]
+        actual_generation = hashlib.sha256(json.dumps(
+            items, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
+        ).encode("utf-8")).hexdigest()[:20]
+        if (collection.get("version") != COLLECTION_CACHE_VERSION or
+                collection.get("generation") != data["scope"]["generation"] or
+                len(items) != data["scope"]["count"] or
+                actual_generation != data["scope"]["generation"]):
+            raise BridgeError("bulk.item source no longer matches its descriptor")
+        row = collection["items"][data["index"]]
+    except BridgeError:
+        raise
+    except (OSError, ValueError, KeyError, IndexError, TypeError) as error:
+        raise BridgeError("bulk.item could not validate the selected logical row") from error
+    payload = {"version": COLLECTION_CACHE_VERSION, "items": [row]}
+    generation = hashlib.sha256(json.dumps(
+        payload["items"], ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
+    ).encode("utf-8")).hexdigest()[:20]
+    payload["generation"] = generation
+    name = f"collection-v{COLLECTION_CACHE_VERSION}-item-{generation}.json"
+    with _cache_lock:
+        _prepare_cache_directory()
+        atomic_write_json(CACHE_DIR / name, payload)
+    return ("bulk", data["workflow"], "--scope-file", str(CACHE_DIR / name),
+            "--generation", generation, "--count", "1")
+
+
+def _scope_path(scope):
+    prefix = f"asset://{PACKAGE_ID}/.cache/ui/"
+    asset = scope.get("asset") if isinstance(scope, dict) else None
+    suffix = asset[len(prefix):] if isinstance(asset, str) and asset.startswith(prefix) else ""
+    if not suffix or "/" in suffix:
+        raise BridgeError("invalid frozen scope asset")
+    return CACHE_DIR / suffix
+
+
 ACTION_REGISTRY = {
     "providers": _no_args(("providers",)), "inventory": _no_args(("inventory",)),
     "list.movies": _list("movie"), "list.shows": _list("show"),
@@ -125,6 +177,8 @@ ACTION_REGISTRY = {
     "search": _search, "rescan": _rescan,
     "refresh.actor.image": _refresh_actor,
     "bulk.workflow": _bulk_workflow,
+    "bulk.item": _bulk_item,
+    "config.get": None, "config.save": None,
     "actor.install_image": None,
 }
 BRIDGE_ACTIONS = frozenset({"__ping__", *ACTION_REGISTRY})
@@ -223,6 +277,10 @@ def run_action(action, data):
         raise BridgeError(f"unknown bridge action: {action}")
     if action == "actor.install_image":
         return install_actor_image(data)
+    if action == "config.get":
+        return get_configuration(data)
+    if action == "config.save":
+        return save_configuration(data)
     argv = action_argv(action, data)
     completed = subprocess.run(
         argv, cwd=PROJECT_DIR, text=True, capture_output=True, check=False,
@@ -236,6 +294,112 @@ def run_action(action, data):
     if action.startswith("list.") or action == "search":
         return publish_collection(action, data, result)
     return result
+
+
+def run_streaming_action(action, data, on_event):
+    """Consume Bulk stdout incrementally while preserving its strict terminal contract."""
+    argv = action_argv(action, data)
+    process = subprocess.Popen(argv, cwd=PROJECT_DIR, text=True, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, bufsize=1)
+    def drain_stderr():
+        # stderr is intentionally discarded after being drained: errors must
+        # arrive through the strict NDJSON terminal record, never an unbounded
+        # diagnostic buffer or a second response contract.
+        for _line in process.stderr:
+            pass
+    drain = threading.Thread(target=drain_stderr, daemon=True, name="harvester-bulk-stderr")
+    drain.start()
+    terminal = None
+    try:
+        for number, line in enumerate(process.stdout, 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError as error:
+                raise BridgeError(f"malformed Harvester NDJSON on line {number}") from error
+            if not isinstance(record, dict) or record.get("type") not in ("event", "result", "error"):
+                raise BridgeError(f"invalid Harvester NDJSON record on line {number}")
+            if record["type"] == "event":
+                on_event(record)
+                continue
+            if terminal is not None:
+                raise BridgeError("Harvester returned more than one terminal record")
+            terminal = record
+        returncode = process.wait()
+        drain.join()
+        if terminal is None:
+            raise BridgeError("Harvester returned no terminal result")
+        if terminal["type"] == "error" or not terminal.get("ok", False):
+            raise BridgeError(str(terminal.get("error") or "Harvester API request failed"))
+        if terminal["type"] != "result" or "result" not in terminal:
+            raise BridgeError("Harvester returned an invalid result record")
+        if returncode:
+            raise BridgeError(f"Harvester API exited with status {returncode}")
+        return terminal["result"]
+    finally:
+        if process.poll() is None:
+            process.kill()
+        drain.join(timeout=1)
+        process.stdout.close()
+        process.stderr.close()
+
+
+def get_configuration(data):
+    if data:
+        raise BridgeError("config.get does not accept arguments")
+    from harvester_core.config import load_config, parse_key_file
+    path = PROJECT_DIR / "keys_and_tokens.txt"
+    stored = parse_key_file(path)
+    effective = load_config(app_dir=PROJECT_DIR)
+    values, overridden = {}, {}
+    for field, key in CONFIG_FIELDS.items():
+        values[field] = stored.get(key, "")
+        runtime = getattr(effective, field) or ""
+        overridden[field] = key in os.environ and runtime != values[field]
+    return {"values": values, "environment_overrides": overridden}
+
+
+def save_configuration(data):
+    if set(data) != {"values"} or not isinstance(data["values"], dict):
+        raise BridgeError("config.save requires configuration values")
+    values = data["values"]
+    if set(values) != set(CONFIG_FIELDS) or not all(isinstance(v, str) for v in values.values()):
+        raise BridgeError("config.save received invalid configuration fields")
+    if any("\n" in value or "\r" in value or "\0" in value for value in values.values()):
+        raise BridgeError("configuration values must fit on one line")
+    path = PROJECT_DIR / "keys_and_tokens.txt"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        existed = True
+    except FileNotFoundError:
+        lines, existed = [], False
+    pending = {key: values[field] for field, key in CONFIG_FIELDS.items()}
+    output = []
+    for line in lines:
+        stripped = line.strip()
+        key = stripped.split("=", 1)[0].strip() if "=" in stripped and not stripped.startswith("#") else None
+        if key in pending:
+            ending = "\n" if line.endswith("\n") else ""
+            output.append(f"{key}={pending.pop(key)}{ending}")
+        else:
+            output.append(line)
+    if output and not output[-1].endswith("\n"):
+        output[-1] += "\n"
+    output.extend(f"{key}={value}\n" for key, value in pending.items())
+    descriptor, temporary = tempfile.mkstemp(prefix=".keys_and_tokens.", dir=PROJECT_DIR)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as target:
+            target.writelines(output); target.flush(); os.fsync(target.fileno())
+        os.replace(temporary, path)
+        if not existed:
+            os.chmod(path, 0o600)
+    except BaseException:
+        try: os.unlink(temporary)
+        except OSError: pass
+        raise
+    return get_configuration({})
 
 
 def publish_collection(action, data, result):
@@ -308,7 +472,24 @@ def _run_bridge_job(app, receipt, json_text):
     try:
         message = decode_message(json_text)
         message_id = message["id"]
-        result = run_action(message["action"], message["data"])
+        if message["action"] in ("bulk.workflow", "bulk.item"):
+            if (not isinstance(message_id, int) or isinstance(message_id, bool) or
+                    not 1 <= message_id <= 2**53 - 1):
+                raise BridgeError("Bulk request id must be a positive integer")
+            event_path = CACHE_DIR / f"events-{message_id}.json"
+            events = []
+            with _cache_lock:
+                _prepare_cache_directory()
+                atomic_write_json(event_path, {"events": events, "complete": False})
+            def publish_event(event):
+                events.append(event)
+                with _cache_lock:
+                    atomic_write_json(event_path, {"events": events, "complete": False})
+            result = run_streaming_action(message["action"], message["data"], publish_event)
+            with _cache_lock:
+                atomic_write_json(event_path, {"events": events, "complete": True})
+        else:
+            result = run_action(message["action"], message["data"])
         reply = make_reply(message_id, result=result)
     except Exception as error:
         reply = make_reply(message_id, error=error)
