@@ -59,7 +59,7 @@
       <section id="bulk-drawer" hidden aria-label="Bulk work"></section>
       <button id="job-strip" type="button" aria-expanded="false">Bulk: idle</button>
     </main>
-    <dialog id="configuration"><form method="dialog"><h1>Configuration</h1><p class="muted">Environment variables override stored values; overridden fields are marked below.</p><div id="configuration-fields"></div><p class="error" id="configuration-error"></p><div class="dialog-actions"><button value="cancel">Cancel</button><button id="save-configuration" value="default">Save</button></div></form></dialog>
+    <dialog id="configuration"><form method="dialog"><h1>Configuration</h1><p class="muted">Environment variables override stored values; overridden fields are marked below.</p><div id="configuration-fields"></div><p class="error" id="configuration-error" hidden></p><div class="dialog-actions"><button value="cancel">Cancel</button><button id="save-configuration" value="default">Save</button></div></form></dialog>
     <script>
       "use strict";
       const PACKAGE_ID = "com.harvester.app";
@@ -327,7 +327,7 @@
         state.selectionGeneration++;
         state.workflow = "overview";
         document.querySelector("#context-pane").innerHTML =
-          '<h1>Overview</h1><div class="toc">' +
+          '<div class="context-scroll"><h1>Overview</h1><div class="toc">' +
           tocRows()
             .map((r) =>
               r.h
@@ -335,7 +335,7 @@
                 : `<button data-work="${r.w}"><span>${r.n}</span>${r.c === undefined ? "" : `<b>${r.c}</b>`}</button>`,
             )
             .join("") +
-          "</div>";
+          "</div></div>";
         let groups = {
           Actors: tocRows().slice(1, 4),
           Movies: tocRows().slice(5, 10),
@@ -370,7 +370,7 @@
           ? '<button id="scan-all" class="compact-action" type="button">Re-fetch from web</button>'
           : "";
         document.querySelector("#context-pane").innerHTML =
-          `<div class="context-nav"><button id="back-overview">⮪ Overview</button></div><div class="workflow-heading"><h1>${esc(title)}</h1>${scan}</div><div class="queue">${rows.map((r, i) => `<button data-row="${i}"><span>${r.kind ? `<small>${esc(r.kind.toUpperCase())}</small>` : ""}${esc(rowLabel(r))}</span></button>`).join("")}</div>`;
+          `<div class="context-nav"><button id="back-overview">⮪ Overview</button></div><div class="context-scroll"><div class="workflow-heading"><h1>${esc(title)}</h1>${scan}</div><div class="queue">${rows.map((r, i) => `<button data-row="${i}"><span>${r.kind ? `<small>${esc(r.kind.toUpperCase())}</small>` : ""}${esc(rowLabel(r))}</span></button>`).join("")}</div></div>`;
         document.querySelector("#back-overview").onclick = () => loadOverview();
         const scanAll = document.querySelector("#scan-all");
         if (scanAll) scanAll.onclick = startBulkWorkflow;
@@ -527,7 +527,7 @@
         state.generation++;
         state.selectionGeneration++;
         state.workflow = "bulk";
-        document.querySelector("#context-pane").innerHTML = '<div class="context-nav"><button id="back-overview">⮪ Overview</button></div><h1>Bulk</h1><p class="muted">Application background work</p>';
+        document.querySelector("#context-pane").innerHTML = '<div class="context-nav"><button id="back-overview">⮪ Overview</button></div><div class="context-scroll"><h1>Bulk</h1><p class="muted">Application background work</p></div>';
         document.querySelector("#back-overview").onclick = () => loadOverview();
         renderBulkPresentations();
       }
@@ -545,7 +545,7 @@
         state.workflow = "inbox";
         await refreshInboxSummary();
         const items = state.inbox.items;
-        document.querySelector("#context-pane").innerHTML = `<div class="context-nav"><button id="back-overview">⮪ Overview</button></div><div class="workflow-heading"><h1>Bulk Inbox</h1></div><div class="queue">${items.map((item, index) => `<button data-inbox-row="${index}" class="${item.seen ? "" : "unseen"}"><span>${item.state === "needs_attention" ? "⚠ " : ""}${esc(item.display_title)}</span></button>`).join("")}</div><div class="inbox-actions"><button id="apply-ready">Apply All Ready</button><button id="discard-all">Discard All Pending</button></div>`;
+        document.querySelector("#context-pane").innerHTML = `<div class="context-nav"><button id="back-overview">⮪ Overview</button></div><div class="context-scroll"><div class="workflow-heading"><h1>Bulk Inbox</h1></div><div class="queue">${items.map((item, index) => `<button data-inbox-row="${index}" class="${item.seen ? "" : "unseen"}"><span>${item.state === "needs_attention" ? "⚠ " : ""}${esc(item.display_title)}</span></button>`).join("")}</div><div class="inbox-actions"><button id="apply-ready">Apply All Ready</button><button id="discard-all">Discard All Pending</button></div></div>`;
         document.querySelector("#workspace").innerHTML = items.length ? '<p class="muted">Select prepared work to review.</p>' : '<p class="muted">The Bulk Inbox is empty.</p>';
         document.querySelector("#back-overview").onclick = loadOverview;
         document.querySelectorAll("[data-inbox-row]").forEach((button) => button.onclick = () => selectInboxItem(+button.dataset.inboxRow));
@@ -564,11 +564,37 @@
         const queryFields = kind === "actor"
           ? `<label>Name <input id="query-name" value="${esc(query.name || "")}" maxlength="300"></label>`
           : `<label>Title <input id="query-title" value="${esc(query.title || "")}" maxlength="300"></label><label>Year <input id="query-year" value="${esc(query.year || "")}" inputmode="numeric" maxlength="4"></label>`;
-        document.querySelector("#workspace").innerHTML = `<article class="inspector"><h1>${esc(item.display_title)}</h1><p><strong>${item.state === "ready" ? "Ready for review" : "Needs attention"}</strong></p>${item.reason ? `<p class="error">${esc(item.reason)}</p>` : ""}${previewUrl ? `<img class="inbox-preview" src="${previewUrl}" alt="Prepared artwork preview">` : ""}<h2>Proposal</h2><pre>${esc(JSON.stringify(item.summary, null, 2))}</pre><h2>Exact filesystem changes</h2><ul>${item.actions.map((action) => `<li>${esc(action.action)} · ${esc(action.path)}${action.size === undefined ? "" : ` · ${action.size} bytes`} · expected ${action.precondition?.exists ? esc(action.precondition.kind || "present") : "absent"}</li>`).join("")}</ul><section class="provider-query"><h2>Provider query</h2>${queryFields}</section><div class="inbox-actions"><button id="apply-item" ${item.state !== "ready" ? "disabled" : ""}>Apply</button><button id="discard-item">Discard</button><button id="retry-item">Retry Search…</button></div></article>`;
+        const candidates = kind === "movie" ? (item.summary?.provider_results?.[0]?.candidates || []) : [];
+        const candidateCards = candidates.length ? `<section class="candidate-results"><h2>Candidate results</h2>${candidates.map((candidate, candidateIndex) => `<article class="candidate"><strong>${esc(candidate.title || "Untitled")}</strong>${candidate.original_title && candidate.original_title !== candidate.title ? `<span>Original title: ${esc(candidate.original_title)}</span>` : ""}<span>Release: ${esc(candidate.release_date || "Unknown")}</span><span>Score: ${esc(candidate.score ?? "Unknown")}</span><button type="button" data-candidate-index="${candidateIndex}">Use this result</button></article>`).join("")}</section>` : "";
+        const manualImage = ["actor", "movie"].includes(kind) && (kind === "actor" || item.workflow === "missing-posters") ? `<div id="inbox-drop-zone" class="drop-zone" tabindex="0">Drop an image here<br><span>or</span><br><button id="choose-inbox-image" type="button">Choose Image…</button><input id="inbox-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></div>` : "";
+        document.querySelector("#workspace").innerHTML = `<article class="inspector"><h1>${esc(item.display_title)}</h1><p><strong>${item.state === "ready" ? "Ready for review" : "Needs attention"}</strong></p>${item.reason ? `<p class="error">${esc(item.reason)}</p>` : ""}${previewUrl ? `<img class="inbox-preview" src="${previewUrl}" alt="Prepared artwork preview">` : ""}${manualImage}<h2>Proposal</h2><pre>${esc(JSON.stringify(item.summary, null, 2))}</pre>${candidateCards}<h2>Exact filesystem changes</h2><ul>${item.actions.map((action) => `<li>${esc(action.action)} · ${esc(action.path)}${action.size === undefined ? "" : ` · ${action.size} bytes`} · expected ${action.precondition?.exists ? esc(action.precondition.kind || "present") : "absent"}</li>`).join("")}</ul><section class="provider-query"><h2>Provider query</h2>${queryFields}</section><div class="inbox-actions"><button id="apply-item" ${item.state !== "ready" ? "disabled" : ""}>Apply</button><button id="discard-item">Discard</button><button id="retry-item">Retry Search…</button></div></article>`;
         document.querySelector("#apply-item").onclick = () => inboxDecision("inbox.apply", item.item_id);
         document.querySelector("#discard-item").onclick = () => inboxDecision("inbox.discard", item.item_id);
         document.querySelector("#retry-item").onclick = () => retryInboxItem(item, kind);
+        document.querySelectorAll("[data-candidate-index]").forEach((button) => button.onclick = () => selectCandidate(item, +button.dataset.candidateIndex));
+        bindInboxImage(item);
         await refreshInboxSummary();
+      }
+      async function selectCandidate(item, candidateIndex) {
+        await runBulk("inbox.select_candidate", { item_id: item.item_id, candidate_index: candidateIndex }, `${item.display_title}: selected result`);
+        await openInbox();
+      }
+      function bindInboxImage(item) {
+        const input = document.querySelector("#inbox-image-file"), zone = document.querySelector("#inbox-drop-zone");
+        if (!input || !zone) return;
+        document.querySelector("#choose-inbox-image").onclick = (event) => { event.stopPropagation(); input.click(); };
+        const prepare = async (file) => {
+          try {
+            const dataUrl = await normalizeActorImage(file);
+            await App.request("inbox.install_image", { item_id: item.item_id, data_url: dataUrl }, false, true);
+            const index = state.inbox.items.findIndex((candidate) => candidate.item_id === item.item_id);
+            if (index >= 0) await selectInboxItem(index);
+          } catch (error) { showError(error.message || "Could not prepare image"); }
+        };
+        input.onchange = () => input.files[0] && prepare(input.files[0]);
+        zone.ondragover = (event) => { event.preventDefault(); zone.classList.add("drag"); };
+        zone.ondragleave = () => zone.classList.remove("drag");
+        zone.ondrop = (event) => { event.preventDefault(); zone.classList.remove("drag"); if (event.dataTransfer.files[0]) prepare(event.dataTransfer.files[0]); };
       }
       async function retryInboxItem(item, kind) {
         const query = kind === "actor"
@@ -622,19 +648,32 @@
         if (button) button.onclick = startSelectedBulk;
         setWriterControls();
       }
+      function previewSlot() {
+        return '<div class="artifact-preview" aria-live="polite"></div>';
+      }
+      async function loadArtifactPreview(kind, identifier) {
+        try {
+          const preview = await App.request("preview.artifact", { kind, identifier }, true);
+          const slot = document.querySelector(".artifact-preview");
+          if (slot && preview?.available && preview.asset?.startsWith(`asset://${PACKAGE_ID}/.cache/ui/preview-`))
+            slot.innerHTML = `<img class="inbox-preview" src="${esc(preview.asset)}" alt="Local ${kind === "actor" ? "mugshot" : "poster"} preview">`;
+        } catch (_) { /* Textual artifact state remains the safe fallback. */ }
+      }
       function renderInspector(detail, raw = null) {
         const fields = detail.nfo?.fields || detail.nfos?.find((item) => item.present)?.fields || {};
         const identityNote = detail.ownership?.status === "ambiguous"
           ? `<p class="error"><strong>Ambiguous poster ownership.</strong> ${esc(detail.ownership.reason)}</p>` : "";
         document.querySelector("#workspace").innerHTML =
-          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}${identityNote}<dl><dt>Directory</dt><dd>${esc(detail.directory)}</dd>${artifactLine("NFO", detail.nfo)}${artifactLine("Poster", detail.poster)}<dt>Video files</dt><dd>${esc(detail.video_count)}</dd>${Object.entries(fields).map(([key, value]) => `<dt>${esc(key.replaceAll("_", " "))}</dt><dd>${esc(typeof value === "object" ? JSON.stringify(value) : value)}</dd>`).join("")}</dl>${raw ? `<details><summary>Raw state</summary><pre>${esc(JSON.stringify(raw, null, 2))}</pre></details>` : ""}</article>`;
+          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}${identityNote}${previewSlot()}<dl><dt>Directory</dt><dd>${esc(detail.directory)}</dd>${artifactLine("NFO", detail.nfo)}${artifactLine("Poster", detail.poster)}<dt>Video files</dt><dd>${esc(detail.video_count)}</dd>${Object.entries(fields).map(([key, value]) => `<dt>${esc(key.replaceAll("_", " "))}</dt><dd>${esc(typeof value === "object" ? JSON.stringify(value) : value)}</dd>`).join("")}</dl>${raw ? `<details><summary>Raw state</summary><pre>${esc(JSON.stringify(raw, null, 2))}</pre></details>` : ""}</article>`;
         bindRefetch();
+        if (detail.poster?.present) loadArtifactPreview(detail.kind, detail.identifier);
       }
       function renderRecordInspector(detail) {
         const known = contexts(detail);
         document.querySelector("#workspace").innerHTML =
-          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}<dl>${detailPairs(detail)}</dl><h2>Known from</h2>${known.length ? `<ul>${known.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : '<p class="muted">No saved contexts.</p>'}<details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail, null, 2))}</pre></details></article>`;
+          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}${detail.kind === "actor" ? previewSlot() : ""}<dl>${detailPairs(detail)}</dl><h2>Known from</h2>${known.length ? `<ul>${known.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : '<p class="muted">No saved contexts.</p>'}<details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail, null, 2))}</pre></details></article>`;
         bindRefetch();
+        if (detail.kind === "actor" && detail.local_file) loadArtifactPreview("actor", detail.name);
       }
       async function rawRecords(kind, identifiers) {
         const values = [];
@@ -863,9 +902,17 @@
         }
       }
       async function loadOverview() {
-        state.generation++;
-        await refreshInventory();
+        const generation = ++state.generation;
         renderOverview();
+        try {
+          const inventory = await App.request("inventory", {}, false, true);
+          if (generation !== state.generation || state.workflow !== "overview") return;
+          state.inventory = inventory;
+          renderOverview();
+        } catch (e) {
+          if (e.name !== "AbortError" && generation === state.generation && state.workflow === "overview")
+            showError(e.message);
+        }
       }
       async function start() {
         const generation = ++state.generation;
@@ -990,12 +1037,13 @@
         closeMenus();
         const dialog = document.querySelector("#configuration"), fields = document.querySelector("#configuration-fields");
         document.querySelector("#configuration-error").textContent = "";
+        document.querySelector("#configuration-error").hidden = true;
         fields.innerHTML = '<p class="muted">Loading…</p>';
         dialog.showModal();
         try {
           const config = await App.request("config.get");
           fields.innerHTML = configFields.map(([name, label]) => `<label><span>${esc(label)}${config.environment_overrides[name] ? ' <small>overridden by environment</small>' : ""}</span><input name="${name}" type="password" value="${esc(config.values[name])}" autocomplete="off"></label>`).join("");
-        } catch (error) { document.querySelector("#configuration-error").textContent = error.message; }
+        } catch (error) { const node = document.querySelector("#configuration-error"); node.textContent = error.message; node.hidden = false; }
       };
       document.querySelector("#save-configuration").onclick = async (event) => {
         event.preventDefault();
@@ -1006,7 +1054,7 @@
           const config = await App.request("config.save", { values });
           document.querySelector("#configuration-fields").innerHTML = configFields.map(([name, label]) => `<label><span>${esc(label)}${config.environment_overrides[name] ? ' <small>overridden by environment</small>' : ""}</span><input name="${name}" type="password" value="${esc(config.values[name])}" autocomplete="off"></label>`).join("");
           document.querySelector("#configuration").close();
-        } catch (error) { document.querySelector("#configuration-error").textContent = error.message; }
+        } catch (error) { const node = document.querySelector("#configuration-error"); node.textContent = error.message; node.hidden = false; }
       };
       document.querySelector("#toggle-context").onclick = (e) => {
         state.contextVisible = !state.contextVisible;

@@ -120,6 +120,53 @@ class HarvesterUIBridgeTests(unittest.TestCase):
                     harvester_ui.install_actor_image(
                         {"identifier": "Actor", "data_url": payload})
 
+    def test_artifact_preview_resolves_semantic_identity_not_renderer_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); cache = root / ".cache" / "ui"
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            actors = movies / ".actors"; actors.mkdir()
+            mugshot = actors / "Actor.jpg"; mugshot.write_bytes(b"jpeg")
+            movie = movies / "Movie"; movie.mkdir()
+            nfo = movie / "movie.nfo"; nfo.write_text("<movie/>")
+            poster = movie / "poster.jpg"; poster.write_bytes(b"poster")
+            show = tv / "Show"; show.mkdir()
+            show_poster = show / "poster.png"; show_poster.write_bytes(b"show poster")
+            save_json_atomic(config.state_path("movie_actor_queue.json"),
+                             {"actors": {"Actor": {"status": "ok"}}})
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"movies": {
+                str(nfo): {"nfo_path": str(nfo), "poster_path": str(poster)}}})
+            save_json_atomic(config.state_path("tv_show_urls_tvdb.json"),
+                             {"shows": {str(show): {"status": "matched"}}})
+            with mock.patch("harvester_core.config.load_config", return_value=config), \
+                    mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                    mock.patch.object(harvester_ui, "CACHE_DIR", cache):
+                actor = harvester_ui.publish_artifact_preview(
+                    {"kind": "actor", "identifier": "Actor"})
+                movie_result = harvester_ui.publish_artifact_preview(
+                    {"kind": "movie", "identifier": str(nfo)})
+                show_result = harvester_ui.publish_artifact_preview(
+                    {"kind": "show", "identifier": str(show)})
+                with self.assertRaisesRegex(harvester_ui.BridgeError, "semantic"):
+                    harvester_ui.publish_artifact_preview(
+                        {"kind": "actor", "identifier": "Actor", "path": "/etc/passwd"})
+            self.assertTrue(actor["available"])
+            self.assertTrue(movie_result["available"])
+            self.assertTrue(show_result["available"])
+
+    def test_missing_artifact_preview_is_text_only_result(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir()
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            save_json_atomic(config.state_path("movie_actor_queue.json"),
+                             {"actors": {"Actor": {"status": "ok"}}})
+            with mock.patch("harvester_core.config.load_config", return_value=config):
+                self.assertEqual(harvester_ui.publish_artifact_preview(
+                    {"kind": "actor", "identifier": "Actor"}), {"available": False})
+
     def test_ndjson_result_ignores_events(self):
         output = '\n'.join((
             '{"schema":1,"type":"event","event":"progress"}',
@@ -365,6 +412,31 @@ class HarvesterUIBridgeTests(unittest.TestCase):
 
 
 class HarvesterUICacheTests(unittest.TestCase):
+    def test_context_navigation_is_outside_scrollable_long_queue(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        ordinary = re.search(r'`<div class="context-nav">.*?class="context-scroll">.*?class="queue"',
+                             page, re.DOTALL)
+        inbox = re.search(r'`<div class="context-nav">.*?class="context-scroll">.*?data-inbox-row',
+                          page, re.DOTALL)
+        self.assertIsNotNone(ordinary)
+        self.assertIsNotNone(inbox)
+        css = (harvester_ui.PROJECT_DIR / "css" / "my.css").read_text(encoding="utf-8")
+        self.assertRegex(css, r"\.context-scroll\s*\{[^}]*overflow: auto")
+        self.assertNotRegex(css, r"\.context-nav\s*\{[^}]*position: sticky")
+
+    def test_overview_renders_before_background_inventory_reply(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        body = page.split("async function loadOverview()", 1)[1].split("async function start()", 1)[0]
+        self.assertLess(body.index("renderOverview();"), body.index('await App.request("inventory"'))
+        self.assertIn("generation !== state.generation", body)
+
+    def test_renderers_request_only_semantic_artifact_previews(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        self.assertIn('App.request("preview.artifact", { kind, identifier }', page)
+        self.assertNotIn('preview.artifact", { path', page)
+        self.assertIn("if (detail.poster?.present)", page)
+        self.assertIn('detail.kind === "actor" && detail.local_file', page)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -764,7 +836,8 @@ class BulkRecipeTests(unittest.TestCase):
         self.assertIn("renderRecordInspector(detail)", page)
         self.assertIn("row.grouped", page)
         self.assertIn("await rawRecords(detail.kind, rawIds)", page)
-        self.assertIn("position: sticky", css)
+        self.assertIn(".context-scroll", css)
+        self.assertIn("overflow: auto", css)
 
 
 if __name__ == "__main__":
