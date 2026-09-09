@@ -63,6 +63,8 @@
       "use strict";
       const PACKAGE_ID = "com.harvester.app";
       const COLLECTION_CACHE_VERSION = 1;
+      const SESSION_ID = [...crypto.getRandomValues(new Uint8Array(16))]
+        .map((value) => value.toString(16).padStart(2, "0")).join("");
       const state = {
         workflow: "overview",
         inventory: {},
@@ -194,6 +196,7 @@
           const requestId = this.id++;
           const pending = globalThis.severin.send({
             id: requestId,
+            session: SESSION_ID,
             action,
             data,
           });
@@ -201,7 +204,7 @@
           const poll = async () => {
             let delivered = 0;
             const readEvents = async () => {
-              const response = await fetch(`asset://${PACKAGE_ID}/.cache/ui/events-${requestId}.json`, { cache: "no-store" });
+              const response = await fetch(`asset://${PACKAGE_ID}/.cache/ui/events-${SESSION_ID}-${requestId}.json`, { cache: "no-store" });
               if (response.ok) {
                 const channel = await response.json();
                 while (delivered < (channel.events || []).length) onEvent(channel.events[delivered++]);

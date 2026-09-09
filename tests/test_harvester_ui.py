@@ -175,6 +175,35 @@ class HarvesterUIBridgeTests(unittest.TestCase):
             self.assertTrue(result["environment_overrides"]["tmdb_api_key"])
             self.assertNotIn("environment", content)
 
+    def test_bulk_event_channel_is_session_scoped_and_always_completes(self):
+        class App:
+            reply = None
+            def write(self, receipt, reply):
+                self.reply = json.loads(reply)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); cache = root / ".cache" / "ui"
+            def fail(_action, _data, publish):
+                publish({"type": "event", "event": "progress", "id": "one"})
+                raise harvester_ui.BridgeError("failed after progress")
+            def succeed(_action, _data, publish):
+                publish({"type": "event", "event": "progress", "id": "one"})
+                return {"processed": 1}
+            for session, operation, expected_ok in (("a" * 32, fail, False),
+                                                     ("b" * 32, succeed, True)):
+                app = App()
+                message = json.dumps({"id": 7, "session": session,
+                                      "action": "bulk.workflow", "data": {}})
+                with mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                        mock.patch.object(harvester_ui, "CACHE_DIR", cache), \
+                        mock.patch.object(harvester_ui, "run_streaming_action",
+                                          side_effect=operation):
+                    harvester_ui._run_bridge_job(app, object(), message)
+                channel = json.loads((cache / f"events-{session}-7.json").read_text())
+                self.assertTrue(channel["complete"])
+                self.assertEqual(channel["events"][0]["id"], "one")
+                self.assertEqual(app.reply["ok"], expected_ok)
+            self.assertFalse((cache / "events-7.json").exists())
+
     def test_large_collection_is_published_outside_bridge_reply(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -232,18 +261,19 @@ class HarvesterUICacheTests(unittest.TestCase):
         self.assertIn(f'const PACKAGE_ID = "{harvester_ui.PACKAGE_ID}";', page)
 
     @unittest.skipUnless(shutil.which("node"), "Node is unavailable for renderer regression")
-    def test_repeated_phase_events_do_not_inflate_live_item_progress(self):
+    def test_grouped_row_uses_one_live_progress_unit_across_phase_events(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
         function = re.search(
             r"      function advanceBulkProgress\(job, event\) \{.*?\n      \}",
             page, re.DOTALL,
         ).group(0)
         script = function + """
-const job = {activity: '', stage: '', identityOwners: new Map([['same', 0]]),
+const job = {activity: '', stage: '', total: 1,
+             identityOwners: new Map([['group-a', 0], ['group-b', 0]]),
              seenOwners: new Set(), liveProcessed: 0};
-advanceBulkProgress(job, {event: 'progress', id: 'same'});
-advanceBulkProgress(job, {event: 'prepared', id: 'same'});
-if (job.liveProcessed !== 1 || job.stage !== 'preparing') process.exit(1);
+advanceBulkProgress(job, {event: 'progress', id: 'group-a'});
+advanceBulkProgress(job, {event: 'prepared', id: 'group-b'});
+if (`${job.liveProcessed} / ${job.total}` !== '1 / 1' || job.stage !== 'preparing') process.exit(1);
 """
         subprocess.run(["node", "-e", script], check=True)
         self.assertIn("asset://${PACKAGE_ID}/.cache/ui/collection-v", page)
@@ -287,6 +317,16 @@ if (job.liveProcessed !== 1 || job.stage !== 'preparing') process.exit(1);
 
 
 class BulkRecipeTests(unittest.TestCase):
+    def test_grouped_scope_terminal_processed_uses_logical_row_count(self):
+        underlying = {"processed": 2, "counts": {"identity_ok": 2},
+                      "message": "Finished"}
+        with mock.patch.object(bulk, "run", return_value=underlying):
+            result = bulk.run_scoped(mock.Mock(), "missing-posters",
+                                     ["group-a", "group-b"], 1)
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(result["counts"]["scoped_identities"], 2)
+        self.assertEqual(result["counts"]["identity_ok"], 2)
+
     def test_lost_found_scans_before_materializing_nfo(self):
         config = mock.Mock(tmdb_api_key="key", tmdb_bearer_token=None)
         config.state_path.return_value = Path("cache.json")

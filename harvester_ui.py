@@ -469,6 +469,8 @@ def make_reply(message_id, *, result=None, error=None):
 
 def _run_bridge_job(app, receipt, json_text):
     message_id = None
+    event_path = None
+    events = []
     try:
         message = decode_message(json_text)
         message_id = message["id"]
@@ -476,8 +478,11 @@ def _run_bridge_job(app, receipt, json_text):
             if (not isinstance(message_id, int) or isinstance(message_id, bool) or
                     not 1 <= message_id <= 2**53 - 1):
                 raise BridgeError("Bulk request id must be a positive integer")
-            event_path = CACHE_DIR / f"events-{message_id}.json"
-            events = []
+            session = message.get("session")
+            if (not isinstance(session, str) or len(session) != 32 or
+                    any(character not in "0123456789abcdef" for character in session)):
+                raise BridgeError("Bulk request requires a valid UI session id")
+            event_path = CACHE_DIR / f"events-{session}-{message_id}.json"
             with _cache_lock:
                 _prepare_cache_directory()
                 atomic_write_json(event_path, {"events": events, "complete": False})
@@ -486,13 +491,18 @@ def _run_bridge_job(app, receipt, json_text):
                 with _cache_lock:
                     atomic_write_json(event_path, {"events": events, "complete": False})
             result = run_streaming_action(message["action"], message["data"], publish_event)
-            with _cache_lock:
-                atomic_write_json(event_path, {"events": events, "complete": True})
         else:
             result = run_action(message["action"], message["data"])
         reply = make_reply(message_id, result=result)
     except Exception as error:
         reply = make_reply(message_id, error=error)
+    finally:
+        if event_path is not None:
+            try:
+                with _cache_lock:
+                    atomic_write_json(event_path, {"events": events, "complete": True})
+            except Exception as error:
+                print(f"Harvester UI event channel completion failed: {error}", file=sys.stderr)
     try:
         app.write(receipt, reply)
     except Exception as error:
