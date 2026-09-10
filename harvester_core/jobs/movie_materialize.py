@@ -50,13 +50,21 @@ def render_movie_nfo(payload):
 
 def run(config, reporter=None, limit=None, overwrite_nfo=False, overwrite_poster=False,
         targets=None, transport=None, downloader=None, write_nfo=True,
-        write_poster=True, committer=None):
+        write_poster=True, committer=None, replace_nfo_targets=None):
+    """Materialize frozen movie records.
+
+    ``replace_nfo_targets`` is intentionally narrower than ``overwrite_nfo``: it
+    lets a repair workflow replace only NFO files it has already classified as
+    unusable, without weakening skip-existing behavior for other records in the
+    same batch.
+    """
     committer = use_committer(committer)
     path = config.state_path("movie_manifest_tmdb.json")
     manifest = copy.deepcopy(load_json(path, None))
     if not isinstance(manifest, dict) or not isinstance(manifest.get("movies"), dict):
         raise FileNotFoundError(f"movie manifest not found: {path}; run movies scan first")
     selected = set(targets or [])
+    replace_nfo_targets = set(replace_nfo_targets or ())
     processed = 0
     counts = Counter()
     try:
@@ -70,7 +78,9 @@ def run(config, reporter=None, limit=None, overwrite_nfo=False, overwrite_poster
             state = record.setdefault("materialize", {})
             nfo_path = Path(record["nfo_path"])
             if write_nfo:
-                if committer.exists(nfo_path) and not overwrite_nfo:
+                replace_nfo = (overwrite_nfo or key in replace_nfo_targets or
+                               str(nfo_path) in replace_nfo_targets)
+                if committer.exists(nfo_path) and not replace_nfo:
                     state["nfo"] = {"status": "exists", "file": str(nfo_path), "bytes": committer.stat(nfo_path).st_size, "updated": now_iso()}
                 else:
                     data = render_movie_nfo(record.get("nfo"))

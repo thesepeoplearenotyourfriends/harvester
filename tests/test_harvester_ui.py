@@ -1323,8 +1323,8 @@ class BulkRecipeTests(unittest.TestCase):
             "image_unresolved_source": 1, "image_failed": 9,
             "image_planned": 2, "image_exists": 3})
 
-    def test_lost_found_keeps_existing_malformed_nfo_in_attention(self):
-        from harvester_core.artifacts import get_inbox_item
+    def test_lost_found_prepares_and_applies_replacement_for_malformed_nfo(self):
+        from harvester_core.artifacts import apply_inbox_item, get_inbox_item
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); movies = root / "movies"; tv = root / "tv"
             movies.mkdir(); tv.mkdir(); folder = movies / "Broken"; folder.mkdir()
@@ -1340,16 +1340,16 @@ class BulkRecipeTests(unittest.TestCase):
                     mock.patch("harvester_core.transport.transport_from_config",
                                return_value=object()), \
                     mock.patch("harvester_core.jobs.movie_scan.run",
-                               return_value={"processed": 1, "counts": {"ok": 1}}), \
-                    mock.patch("harvester_core.jobs.movie_materialize.run") as materialize:
+                               return_value={"processed": 1, "counts": {"ok": 1}}):
                 result = bulk.run(config, "lost-found", [str(nfo)])
             item = get_inbox_item(config, result["preparation"]["plan_id"])
-            self.assertEqual(item["state"], "needs_attention")
-            self.assertIn("NFO unusable", item["reason"])
-            self.assertIn("line 1, column 7", item["reason"])
-            self.assertEqual(item["actions"], [])
+            self.assertEqual(item["state"], "ready")
+            self.assertIsNone(item["reason"])
+            self.assertEqual(len(item["actions"]), 1)
+            self.assertEqual(item["actions"][0]["path"], str(nfo))
             self.assertEqual(nfo.read_text(), "<movie>")
-            materialize.assert_not_called()
+            apply_inbox_item(config, result["preparation"]["plan_id"])
+            self.assertIn("<title>Provider title</title>", nfo.read_text())
 
     def test_inbox_state_uses_only_scoped_provider_record(self):
         from harvester_core.artifacts import RecordingCommitter, list_inbox
