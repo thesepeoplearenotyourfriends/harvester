@@ -284,16 +284,13 @@ def _inbox_candidate(data):
     from harvester_core.config import load_config
     config = load_config(app_dir=PROJECT_DIR)
     item = get_inbox_item(config, data["item_id"])
-    if item["workflow"] not in {"lost-found", "unresolved-movies", "failed-movies",
-                                "unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors"}:
-        raise BridgeError("candidate selection is unavailable for this Inbox workflow")
+    kind = item.get("kind")
+    if kind not in {"movie", "show"}:
+        raise BridgeError("candidate Inbox item has no authoritative movie/show kind")
     try:
         candidate = item["summary"]["provider_results"][0]["candidates"][data["candidate_index"]]
     except (KeyError, IndexError, TypeError) as error:
         raise BridgeError("candidate index is not present in the frozen Inbox item") from error
-    kind = item.get("kind")
-    if kind not in {"movie", "show"}:
-        raise BridgeError("candidate Inbox item has no authoritative movie/show kind")
     identity_key = "tmdb_id" if kind == "movie" else "tvdb_id"
     provider_id = candidate.get("id" if identity_key == "tmdb_id" else "tvdb_id")
     if not isinstance(provider_id, int) or isinstance(provider_id, bool) or provider_id <= 0:
@@ -983,17 +980,25 @@ def run_inbox_action(action, data):
                     item["state"] == "ready"]
         operation = apply_inbox_item if action == "inbox.apply_all" else discard_inbox_item
         counts = {"applied": 0, "discarded": 0, "needs_attention": 0, "failed": 0}
+        # Apply validates durable provenance, but a batch must not parse the
+        # actor/movie/show databases anew for every prepared item.
+        provenance_records = {} if action == "inbox.apply_all" else None
         with _library_commit_lock:
             for item in selected:
                 if item["item_id"] in _retrying_items:
                     counts["failed"] += 1
                     continue
                 try:
-                    outcome = operation(config, item["item_id"])
+                    outcome = (operation(config, item["item_id"],
+                                         provenance_records=provenance_records)
+                               if action == "inbox.apply_all"
+                               else operation(config, item["item_id"]))
                     counts["applied" if outcome.get("applied") else "discarded"] += 1
                 except (OSError, ValueError, KeyError, json.JSONDecodeError):
                     try:
-                        current = get_inbox_item(config, item["item_id"])
+                        current = get_inbox_item(
+                            config, item["item_id"],
+                            provenance_records=provenance_records)
                     except (OSError, ValueError, KeyError, json.JSONDecodeError):
                         counts["failed"] += 1
                     else:

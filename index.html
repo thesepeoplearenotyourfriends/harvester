@@ -507,11 +507,13 @@
       function bulkMarkup(full = false) {
         const job = state.bulk.job;
         if (!job) return `<div class="bulk-empty"><h1>Bulk Inbox</h1><p>${state.inbox.unseen} unseen · ${state.inbox.ready} ready · ${state.inbox.attention} needs attention</p><button id="open-inbox" type="button">Open Inbox</button></div>`;
-        const progress = job.status === "running" ? `${job.liveProcessed} / ${job.total}` : job.processed === null ? "Finished" : `${job.processed} processed`;
+        const progress = job.status === "running" ? `${job.liveProcessed} / ${job.total}`
+          : job.processed !== null ? `${job.processed} processed`
+          : ["failed", "interrupted"].includes(job.status) ? "" : "Finished";
         const counts = Object.entries(job.counts || {}).map(([name, value]) => `<li>${esc(name.replaceAll("_", " "))}: ${esc(value)}</li>`).join("");
         const activity = job.status === "running" && job.activity ? `<p><strong>${esc(job.stage ? job.stage[0].toUpperCase() + job.stage.slice(1) + ":" : "Current:")}</strong><br>${esc(job.activity)}${job.activityStatus ? ` · ${esc(job.activityStatus)}` : ""}</p>` : "";
         const inbox = state.inbox;
-        return `<div class="bulk-content"><div class="bulk-title"><h1>Bulk Inbox</h1>${full ? "" : '<button id="close-bulk" type="button" aria-label="Close Bulk drawer">×</button>'}</div><h2>${esc(job.title)}</h2><p><strong>${esc(job.status)}</strong> · ${esc(progress)}</p>${job.status === "running" ? '<progress aria-label="Bulk work in progress"></progress><button id="stop-bulk">Stop acquisition</button>' : ""}${activity}<dl><dt>Unseen</dt><dd>${inbox.unseen}</dd><dt>Ready</dt><dd>${inbox.ready}</dd><dt>Needs attention</dt><dd>${inbox.attention}</dd><dt>Applied</dt><dd>${inbox.applied}</dd></dl><button id="open-inbox" type="button">Open Inbox</button><p class="muted">${esc(job.message)}</p>${counts ? `<ul>${counts}</ul>` : ""}</div>`;
+        return `<div class="bulk-content"><div class="bulk-title"><h1>Bulk Inbox</h1>${full ? "" : '<button id="close-bulk" type="button" aria-label="Close Bulk drawer">×</button>'}</div><h2>${esc(job.title)}</h2><p><strong>${esc(job.status)}</strong>${progress ? ` · ${esc(progress)}` : ""}</p>${job.status === "running" ? '<progress aria-label="Bulk work in progress"></progress><button id="stop-bulk">Stop acquisition</button>' : ""}${activity}<dl><dt>Unseen</dt><dd>${inbox.unseen}</dd><dt>Ready</dt><dd>${inbox.ready}</dd><dt>Needs attention</dt><dd>${inbox.attention}</dd><dt>Applied</dt><dd>${inbox.applied}</dd></dl><button id="open-inbox" type="button">Open Inbox</button><p class="muted">${esc(job.message)}</p>${counts ? `<ul>${counts}</ul>` : ""}</div>`;
       }
       function renderBulkPresentations() {
         const job = state.bulk.job;
@@ -600,9 +602,19 @@
         const index = state.inbox.items.findIndex((candidate) => candidate.item_id === item.item_id);
         if (index >= 0) selectInboxItem(index);
       }
+      function bindServoPasteRepaint(input) {
+        input.addEventListener("paste", () => setTimeout(() => {
+          // Servo updates the value on mouse paste but sometimes misses the
+          // paint invalidation.  Replacing it with itself forces that repaint.
+          const pasted = input.value;
+          input.value = "";
+          input.value = pasted;
+        }, 0));
+      }
       function bindInboxImage(item) {
         const input = document.querySelector("#inbox-image-url"), button = document.querySelector("#use-inbox-image-url");
         if (!input || !button) return;
+        bindServoPasteRepaint(input);
         button.onclick = async () => {
           const generation = state.generation, selectionGeneration = state.selectionGeneration;
           try {
@@ -703,6 +715,7 @@
       function bindSearchArtwork(row) {
         const input = document.querySelector("#search-image-url"), button = document.querySelector("#use-search-image-url");
         if (!input || !button) return;
+        bindServoPasteRepaint(input);
         button.onclick = async () => {
           try {
             await App.request("item.install_image_url", { kind: row.kind, identifier: row.identifier, url: input.value }, false, true);
