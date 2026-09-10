@@ -709,7 +709,17 @@ def run(
         record["updated"] = now_iso()
         sleep_after_show = True
         try:
-            resolved = resolve_tvdb_series(provider, title, year)
+            selected_tvdb_id = override.get("tvdb_id")
+            if selected_tvdb_id:
+                # Candidate selection freezes provider identity at the host boundary.
+                # Preserve the local/query identity while bypassing another ambiguous search.
+                selected = next((candidate for candidate in record.get("candidates", [])
+                                 if candidate.get("tvdb_id") == selected_tvdb_id), {})
+                resolved = {"ok": True, "tvdb_id": selected_tvdb_id,
+                            "selected": selected, "candidates": record.get("candidates", []),
+                            "cache_hit": True}
+            else:
+                resolved = resolve_tvdb_series(provider, title, year)
             if resolved.get("cache_hit"):
                 api_cache_hits += 1
             else:
@@ -745,7 +755,8 @@ def run(
                 record.update({
                     "status": "matched", "tvdb_id": tvdb_id,
                     "match": {
-                        "method": "folder_title_search", "query_title": title,
+                        "method": ("human_selected_tvdb_id" if selected_tvdb_id
+                                   else "folder_title_search"), "query_title": title,
                         "query_year": year, "local_season": record.get("local_season"),
                         "selected": resolved["selected"],
                     },

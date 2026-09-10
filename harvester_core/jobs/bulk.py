@@ -283,7 +283,8 @@ def run(config, workflow, identities, reporter=None):
     provider = TVDBClient(config.tvdb_api_key, config.tvdb_pin,
                           config.state_path("tvdb_api_cache.json"), transport)
     records = [get_record(config, "show", value) for value in identities]
-    needs_resolution = [record for record in records if record.get("status") != "matched"]
+    needs_resolution = [record for record in records if (
+        workflow == "tv-errors" or record.get("status") != "matched")]
     scanned = {"processed": 0, "counts": {}}
     if needs_resolution:
         scanned = scan(
@@ -393,6 +394,14 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
             elif record_attention and manifest["state"] == "ready":
                 manifest["state"] = "needs_attention"
                 manifest["reason"] = record_reason
+            # Persist presentation semantics with the work receipt. The renderer
+            # must not reverse-engineer provider status or diagnostics.
+            usable_partial = bool(manifest["actions"] or any(
+                record.get("candidates") or record.get("status") in {"ok", "matched"}
+                for record in records))
+            manifest["summary"]["outcome"] = (
+                "ready" if manifest["state"] == "ready" else
+                "partial" if usable_partial else "failure")
             result.setdefault("counts", {})["needs_attention"] = int(
                 manifest["state"] == "needs_attention")
             save_json_atomic(manifest_path, manifest)
