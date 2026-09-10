@@ -268,12 +268,25 @@ def apply_inbox_item(config, item_id):
         if not _inside_library(config, path):
             raise ValueError("prepared destination is outside configured media roots")
         observed = _precondition(path)
+        already_written = (action["action"] == "write" and
+                           observed.get("exists") is True and
+                           observed.get("kind") == "file" and
+                           observed.get("size") == action.get("size") and
+                           observed.get("sha256") == action.get("sha256"))
         harmless_created_directory = (action["action"] == "mkdir" and
                                       action.get("precondition") == {"exists": False} and
                                       observed == {"exists": True, "kind": "directory"})
-        if observed != action.get("precondition") and not harmless_created_directory:
+        if (observed != action.get("precondition") and not harmless_created_directory
+                and not already_written):
+            expected = action.get("precondition") or {}
+            expected_description = ("no existing path" if not expected.get("exists") else
+                                    f"the unchanged {expected.get('kind', 'path')} recorded during preparation")
+            observed_description = ("no path" if not observed.get("exists") else
+                                    f"a {observed.get('kind', 'path')}")
             manifest.update({"state": "needs_attention",
-                             "reason": "filesystem changed since preparation"})
+                             "reason": (f"Cannot {action['action']} {path}: expected "
+                                        f"{expected_description}, but found {observed_description}. "
+                                        "The destination was not changed.")})
             save_json_atomic(root / "manifest.json", manifest)
             raise ValueError(manifest["reason"])
         if action["action"] == "write":
@@ -285,7 +298,8 @@ def apply_inbox_item(config, item_id):
             data = blob.read_bytes()
             if len(data) != action["size"] or hashlib.sha256(data).hexdigest() != action["sha256"]:
                 raise ValueError("prepared blob failed size/hash validation")
-            prepared.append((action, data))
+            if not already_written:
+                prepared.append((action, data))
         else:
             prepared.append((action, None))
     committer = FilesystemCommitter()

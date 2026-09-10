@@ -20,7 +20,7 @@ from ..events import emit
 
 WORKFLOWS = frozenset({
     "missing-actor-images", "failed-actors", "lost-found", "missing-posters",
-    "unresolved-movies", "failed-movies", "ambiguous-tv", "not-found-tv", "tv-errors",
+    "unresolved-movies", "failed-movies", "unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors",
     "missing-tv-nfo", "missing-tv-posters",
 })
 
@@ -148,7 +148,7 @@ def _scoped_record_outcome(workflow, identities, records):
     """Classify only provider records owned by one frozen logical row."""
     successful = {"actor": {"ok"}, "movie": {"ok"}, "show": {"matched"}}
     kind = "actor" if "actor" in workflow else "show" if workflow in {
-        "ambiguous-tv", "not-found-tv", "tv-errors", "missing-tv-nfo",
+        "unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors", "missing-tv-nfo",
         "missing-tv-posters"} else "movie"
     if identities and len(records) != len(identities):
         return True, "Scoped provider record is missing"
@@ -174,7 +174,7 @@ def _scoped_artifact_outcome(workflow, result):
     # successful match. Once that phase runs, its artifact outcome—not merely
     # the provider status—decides whether Apply is safe.
     if expected is None and workflow in {
-            "unresolved-movies", "failed-movies", "ambiguous-tv", "not-found-tv",
+            "unresolved-movies", "failed-movies", "unresolved-tv", "ambiguous-tv", "not-found-tv",
             "tv-errors"}:
         diagnostics = result.get("counts", {})
         if (result.get("phase_results", {}).get("nfo") or
@@ -303,7 +303,7 @@ def run(config, workflow, identities, reporter=None):
     records = [get_record(config, "show", value) for value in identities]
     targets = [record["local_target"] for record in records if record.get("status") == "matched"]
     write_nfo = workflow == "missing-tv-nfo" or (
-        workflow in {"ambiguous-tv", "not-found-tv", "tv-errors"} and
+        workflow in {"unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors"} and
         any(not (Path(record["local_target"]) / "show.nfo").is_file() for record in records
             if record.get("status") == "matched"))
     write_poster = workflow == "missing-tv-posters"
@@ -370,7 +370,7 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
                                    "message": result.get("message")}
             records = []
             kind = "actor" if "actor" in workflow else "show" if workflow in {
-                "ambiguous-tv", "not-found-tv", "tv-errors", "missing-tv-nfo",
+                "unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors", "missing-tv-nfo",
                 "missing-tv-posters"} else "movie"
             for identity in identities:
                 try:

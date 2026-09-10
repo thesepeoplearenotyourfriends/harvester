@@ -175,11 +175,20 @@ class ArtifactCommitSeamTests(unittest.TestCase):
         recorder = RecordingCommitter(); recorder.write(target, b"prepared")
         plan = persist_preparation(self.config, "lost-found", ["movie"], recorder)
         target.write_bytes(b"newer local work")
-        with self.assertRaisesRegex(ValueError, "filesystem changed"):
+        with self.assertRaisesRegex(ValueError, "expected no existing path, but found a file"):
             apply_inbox_item(self.config, plan["plan_id"])
         self.assertEqual(target.read_bytes(), b"newer local work")
         self.assertEqual(get_inbox_item(self.config, plan["plan_id"])["state"],
                          "needs_attention")
+
+    def test_apply_accepts_a_write_already_completed_before_retry(self):
+        target = self.movies / "Movie" / "movie.nfo"; target.parent.mkdir()
+        recorder = RecordingCommitter(); recorder.write(target, b"prepared")
+        plan = persist_preparation(self.config, "lost-found", ["movie"], recorder)
+        target.write_bytes(b"prepared")
+        self.assertEqual(apply_inbox_item(self.config, plan["plan_id"])["applied"], 1)
+        self.assertEqual(target.read_bytes(), b"prepared")
+        self.assertEqual(list_inbox(self.config), [])
 
     def test_apply_rejects_escape_and_tampered_blob(self):
         outside = self.root / "outside"

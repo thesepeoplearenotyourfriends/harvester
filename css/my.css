@@ -23,6 +23,9 @@ dialog { border: 1px solid var(--line); border-radius: 8px; min-width: min(30rem
 dialog::backdrop { background: rgb(0 0 0 / 45%); }
 #configuration-fields { display: grid; gap: .65rem; }
 #configuration-fields label { display: grid; gap: .2rem; }
+.config-provider h2 { margin: .25rem 0; }
+.config-row { display: grid; grid-template-columns: repeat(3, minmax(9rem, 1fr)); gap: .65rem; }
+.config-provider:not(:last-child) .config-row { grid-template-columns: repeat(2, minmax(12rem, 1fr)); }
 #configuration-fields input,
 .provider-query input { padding: .45rem; border: 1px solid var(--line); border-radius: 4px; background: var(--background); color: var(--text); }
 #configuration-fields small { color: #a24b00; }
@@ -40,9 +43,11 @@ dialog::backdrop { background: rgb(0 0 0 / 45%); }
 .queue button.unseen { font-weight: 700; }
 .inbox-actions { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: .8rem; }
 .inbox-preview { display: block; max-width: min(280px, 100%); max-height: 340px; object-fit: contain; margin: .75rem 0; }
-.provider-query { margin-top: 1rem; }
-.provider-query label { display: grid; gap: .2rem; margin: .4rem 0; max-width: 24rem; }
+.provider-query { display: flex; flex-direction: column; align-items: flex-start; margin-top: 1rem; }
+.provider-query label { display: grid; width: 100%; gap: .2rem; margin: .4rem 0; max-width: 40rem; }
 #query-title { width: min(40ch, 100%); }
+#query-year { width: 10ch; }
+@media (max-width: 650px) { .config-row, .config-provider:not(:last-child) .config-row { grid-template-columns: 1fr; } }
 body {
   background: var(--background);
   color: var(--text);

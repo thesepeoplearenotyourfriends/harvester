@@ -784,6 +784,27 @@ if (!closed || saved) process.exit(1);
 """
         subprocess.run(["node", "-e", script], check=True)
 
+    def test_configuration_and_inspector_layouts_are_task_oriented(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        css = (harvester_ui.PROJECT_DIR / "css" / "my.css").read_text(encoding="utf-8")
+        self.assertIn('class="config-provider"', page)
+        self.assertIn('name === "socks5_password" ? "password" : "text"', page)
+        self.assertIn(".config-row", css)
+        self.assertIn("<label><span>Title</span><input", page)
+        self.assertIn("<label><span>Year</span><input", page)
+        inspector = page[page.index("function renderInspector"):page.index("function renderRecordInspector")]
+        self.assertLess(inspector.index("refetchButton()"), inspector.index("previewSlot()"))
+        self.assertLess(inspector.index("previewSlot()"), inspector.index("searchArtworkInput"))
+        self.assertLess(inspector.index("searchArtworkInput"), inspector.index("<dl>"))
+        self.assertLess(inspector.index("</dl>"), inspector.index("searchNfoInput"))
+        inbox = page[page.index("const describeAction"):page.index('document.querySelector("#apply-item")')]
+        self.assertLess(inbox.index('id="apply-item"'), inbox.index("<h2>Proposal</h2>"))
+        self.assertIn("destination was ${action.precondition", page)
+        for label in ('n: "All"', 'n: "Missing NFO"', 'n: "Missing poster"',
+                      'n: "Unresolved"', 'n: "Failed"'):
+            self.assertGreaterEqual(page.count(label), 2)
+        self.assertIn('state.workflow === "search" || bulkWorkflows[state.workflow]', page)
+
 
 class BulkRecipeTests(unittest.TestCase):
     def test_movie_nfo_only_materialization_never_inspects_a_poster_target(self):
