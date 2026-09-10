@@ -206,7 +206,7 @@
           if (!globalThis.severin?.send)
             throw Error("Severin bridge is not available");
           const requestId = this.id++;
-          if (["bulk.workflow", "bulk.item", "inbox.retry", "inbox.select_candidate"].includes(action)) state.bulk.job.requestId = requestId;
+          if (["bulk.workflow", "bulk.item", "item.refetch", "inbox.retry", "inbox.select_candidate"].includes(action)) state.bulk.job.requestId = requestId;
           const pending = globalThis.severin.send({
             id: requestId,
             session: SESSION_ID,
@@ -502,7 +502,7 @@
       }
       function setWriterControls() {
         const active = writerActive();
-        document.querySelectorAll("#scan-all, #refetch-item, #choose-image, #image-file").forEach((control) => {
+        document.querySelectorAll("#scan-all, #refetch-item, #choose-image, #image-file, #choose-search-image, #search-image-file").forEach((control) => {
           control.disabled = active;
         });
         document.body.classList.toggle("bulk-writing", active);
@@ -554,7 +554,8 @@
         state.workflow = "inbox";
         await refreshInboxSummary();
         const items = state.inbox.items;
-        document.querySelector("#context-pane").innerHTML = `<div class="context-nav"><button id="back-overview">⮪ Overview</button></div><div class="context-scroll"><div class="workflow-heading"><h1>Bulk Inbox</h1></div><div class="queue">${items.map((item, index) => `<button data-inbox-row="${index}" class="${item.seen ? "" : "unseen"}"><span>${item.state === "needs_attention" ? "⚠ " : ""}${esc(item.display_title)}</span></button>`).join("")}</div><div class="inbox-actions"><button id="apply-ready">Apply All Ready</button><button id="discard-all">Discard All Pending</button></div></div>`;
+        const outcomeMarker = (item) => ({ ready: "🟢", partial: "🟡", failure: "⚠" })[item.summary?.outcome || (item.state === "ready" ? "ready" : "failure")];
+        document.querySelector("#context-pane").innerHTML = `<div class="context-nav"><button id="back-overview">⮪ Overview</button></div><div class="context-scroll"><div class="workflow-heading"><h1>Bulk Inbox</h1></div><div class="queue">${items.map((item, index) => `<button data-inbox-row="${index}" class="${item.seen ? "" : "unseen"}"><span>${outcomeMarker(item)} ${esc(item.display_title)}</span></button>`).join("")}</div><div class="inbox-actions"><button id="apply-ready">Apply All Ready</button><button id="discard-all">Discard All Pending</button></div></div>`;
         document.querySelector("#workspace").innerHTML = items.length ? '<p class="muted">Select prepared work to review.</p>' : '<p class="muted">The Bulk Inbox is empty.</p>';
         document.querySelector("#back-overview").onclick = loadOverview;
         document.querySelectorAll("[data-inbox-row]").forEach((button) => button.onclick = () => selectInboxItem(+button.dataset.inboxRow));
@@ -573,8 +574,8 @@
         const queryFields = kind === "actor"
           ? `<label>Name <input id="query-name" value="${esc(query.name || "")}" maxlength="300"></label>`
           : `<label>Title <input id="query-title" value="${esc(query.title || "")}" maxlength="300"></label><label>Year <input id="query-year" value="${esc(query.year || "")}" inputmode="numeric" maxlength="4"></label>`;
-        const candidates = kind === "movie" ? (item.summary?.provider_results?.[0]?.candidates || []) : [];
-        const candidateCards = candidates.length ? `<section class="candidate-results"><h2>Candidate results</h2>${candidates.map((candidate, candidateIndex) => `<article class="candidate"><strong>${esc(candidate.title || "Untitled")}</strong>${candidate.original_title && candidate.original_title !== candidate.title ? `<span>Original title: ${esc(candidate.original_title)}</span>` : ""}<span>Release: ${esc(candidate.release_date || "Unknown")}</span><span>Score: ${esc(candidate.score ?? "Unknown")}</span><button type="button" data-candidate-index="${candidateIndex}">Use this result</button></article>`).join("")}</section>` : "";
+        const candidates = ["movie", "show"].includes(kind) ? (item.summary?.provider_results?.[0]?.candidates || []) : [];
+        const candidateCards = candidates.length ? `<section class="candidate-results"><h2>Candidate results</h2>${candidates.map((candidate, candidateIndex) => `<article class="candidate"><strong>${esc(candidate.title || candidate.name || "Untitled")}</strong>${candidate.original_title && candidate.original_title !== candidate.title ? `<span>Original title: ${esc(candidate.original_title)}</span>` : ""}<span>${kind === "show" ? "Year" : "Release"}: ${esc(candidate.release_date || candidate.year || "Unknown")}</span><span>Score: ${esc(candidate.score ?? "Unknown")}</span><button type="button" data-candidate-index="${candidateIndex}">Use this result</button></article>`).join("")}</section>` : "";
         const manualImage = ["actor", "movie"].includes(kind) && (kind === "actor" || item.workflow === "missing-posters") ? `<div id="inbox-drop-zone" class="drop-zone" tabindex="0">Drop an image here<br><span>or</span><br><button id="choose-inbox-image" type="button">Choose Image…</button><input id="inbox-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></div>` : "";
         const applyReason = item.state === "ready" ? "Apply prepared filesystem changes" : (item.reason || "Resolve this item before applying");
         document.querySelector("#workspace").innerHTML = `<article class="inspector"><h1>${esc(item.display_title)}</h1><p><strong>${item.state === "ready" ? "Ready for review" : "Needs attention"}</strong></p>${item.reason ? `<p class="error">${esc(item.reason)}</p>` : ""}${previewUrl ? `<img class="inbox-preview" src="${previewUrl}" alt="Prepared artwork preview">` : ""}${manualImage}<h2>Proposal</h2><pre>${esc(JSON.stringify(item.summary, null, 2))}</pre>${candidateCards}<h2>Exact filesystem changes</h2><ul>${item.actions.map((action) => `<li>${esc(action.action)} · ${esc(action.path)}${action.size === undefined ? "" : ` · ${action.size} bytes`} · expected ${action.precondition?.exists ? esc(action.precondition.kind || "present") : "absent"}</li>`).join("")}</ul><section class="provider-query"><h2>Provider query</h2>${queryFields}</section><div class="inbox-actions"><button id="apply-item" title="${esc(applyReason)}" ${item.state !== "ready" ? "disabled" : ""}>Apply</button><button id="discard-item">Discard</button><button id="retry-item">Retry Search…</button></div></article>`;
@@ -653,13 +654,46 @@
         return `<dt>${esc(name)}</dt><dd>${artifact?.present ? `Present${artifact.path ? ` · ${esc(artifact.path)}` : ""}` : "Missing"}</dd>`;
       }
       function refetchButton() {
-        return bulkWorkflows[state.workflow]
+        return bulkWorkflows[state.workflow] || state.workflow === "search"
           ? '<button id="refetch-item" class="compact-action" type="button">Re-fetch this item</button>'
           : "";
       }
-      function bindRefetch() {
+      function searchArtworkInput(kind) {
+        if (state.workflow !== "search" || !["actor", "movie", "show"].includes(kind)) return "";
+        const noun = kind === "actor" ? "mugshot" : "poster";
+        return `<div id="search-drop-zone" class="drop-zone" tabindex="0">Drop ${noun} here<br><span>or</span><br><button id="choose-search-image" type="button">Choose Image…</button><input id="search-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></div><p id="search-prepared" class="prepared-note" hidden>🟢 Prepared — <button id="search-open-inbox" type="button">Open Inbox</button></p>`;
+      }
+      function showSearchPrepared() {
+        const note = document.querySelector("#search-prepared");
+        if (note) { note.hidden = false; document.querySelector("#search-open-inbox").onclick = openInbox; }
+      }
+      async function refetchSearchItem(row) {
+        await runBulk("item.refetch", { kind: row.kind, identifier: row.identifier }, `Re-fetch ${rowLabel(row)}`, null, [row]);
+        await refreshInboxSummary();
+        showSearchPrepared();
+      }
+      function bindSearchArtwork(row) {
+        const input = document.querySelector("#search-image-file"), zone = document.querySelector("#search-drop-zone");
+        if (!input || !zone) return;
+        document.querySelector("#choose-search-image").onclick = (event) => { event.stopPropagation(); input.click(); };
+        const prepare = async (file) => {
+          if (file.size > 8000000) { showError("Image is larger than 8 MB"); return; }
+          try {
+            const dataUrl = await normalizeActorImage(file);
+            await App.request("item.install_image", { kind: row.kind, identifier: row.identifier, data_url: dataUrl }, false, true);
+            await refreshInboxSummary();
+            showSearchPrepared();
+          } catch (error) { showError(error.message || "Could not prepare image"); }
+        };
+        input.onchange = () => input.files[0] && prepare(input.files[0]);
+        zone.ondragover = (event) => { event.preventDefault(); zone.classList.add("drag"); };
+        zone.ondragleave = () => zone.classList.remove("drag");
+        zone.ondrop = (event) => { event.preventDefault(); zone.classList.remove("drag"); event.dataTransfer.files[0] && prepare(event.dataTransfer.files[0]); };
+      }
+      function bindRefetch(row = null) {
         const button = document.querySelector("#refetch-item");
-        if (button) button.onclick = startSelectedBulk;
+        if (button) button.onclick = state.workflow === "search" ? () => refetchSearchItem(row) : startSelectedBulk;
+        if (row) bindSearchArtwork(row);
         setWriterControls();
       }
       function previewSlot() {
@@ -678,15 +712,15 @@
         const identityNote = detail.ownership?.status === "ambiguous"
           ? `<p class="error"><strong>Ambiguous poster ownership.</strong> ${esc(detail.ownership.reason)}</p>` : "";
         document.querySelector("#workspace").innerHTML =
-          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}${identityNote}${previewSlot()}<dl><dt>Directory</dt><dd>${esc(detail.directory)}</dd>${artifactLine("NFO", detail.nfo)}${artifactLine("Poster", detail.poster)}<dt>Video files</dt><dd>${esc(detail.video_count)}</dd>${Object.entries(fields).map(([key, value]) => `<dt>${esc(key.replaceAll("_", " "))}</dt><dd>${esc(typeof value === "object" ? JSON.stringify(value) : value)}</dd>`).join("")}</dl>${raw ? `<details><summary>Raw state</summary><pre>${esc(JSON.stringify(raw, null, 2))}</pre></details>` : ""}</article>`;
-        bindRefetch();
+          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}${identityNote}${previewSlot()}${searchArtworkInput(detail.kind)}<dl><dt>Directory</dt><dd>${esc(detail.directory)}</dd>${artifactLine("NFO", detail.nfo)}${artifactLine("Poster", detail.poster)}<dt>Video files</dt><dd>${esc(detail.video_count)}</dd>${Object.entries(fields).map(([key, value]) => `<dt>${esc(key.replaceAll("_", " "))}</dt><dd>${esc(typeof value === "object" ? JSON.stringify(value) : value)}</dd>`).join("")}</dl>${raw ? `<details><summary>Raw state</summary><pre>${esc(JSON.stringify(raw, null, 2))}</pre></details>` : ""}</article>`;
+        bindRefetch({ kind: detail.kind, identifier: detail.identifier, label: rowLabel(detail) });
         if (detail.poster?.present) loadArtifactPreview(detail.kind, detail.identifier);
       }
       function renderRecordInspector(detail) {
         const known = contexts(detail);
         document.querySelector("#workspace").innerHTML =
-          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}${detail.kind === "actor" ? previewSlot() : ""}<dl>${detailPairs(detail)}</dl><h2>Known from</h2>${known.length ? `<ul>${known.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : '<p class="muted">No saved contexts.</p>'}<details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail, null, 2))}</pre></details></article>`;
-        bindRefetch();
+          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}${detail.kind === "actor" ? previewSlot() : ""}${searchArtworkInput(detail.kind)}<dl>${detailPairs(detail)}</dl><h2>Known from</h2>${known.length ? `<ul>${known.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : '<p class="muted">No saved contexts.</p>'}<details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail, null, 2))}</pre></details></article>`;
+        bindRefetch({ kind: detail.kind, identifier: detail.name, label: rowLabel(detail) });
         if (detail.kind === "actor" && detail.local_file) loadArtifactPreview("actor", detail.name);
       }
       async function rawRecords(kind, identifiers) {

@@ -164,6 +164,35 @@ def _bulk_item(data):
             "--generation", generation, "--count", "1")
 
 
+def _item_refetch(data):
+    """Derive a preparation recipe from one durable record identity."""
+    if (set(data) != {"kind", "identifier"} or data.get("kind") not in
+            {"actor", "movie", "show"} or not isinstance(data.get("identifier"), str)):
+        raise BridgeError("item.refetch requires kind and trusted durable identifier")
+    _identifier(data["kind"])({"identifier": data["identifier"]})
+    from harvester_core.api import get_record
+    from harvester_core.config import load_config
+    config = load_config(app_dir=PROJECT_DIR)
+    record = get_record(config, data["kind"], data["identifier"])
+    identity = record.get("name") if data["kind"] == "actor" else (
+        record.get("nfo_path") or record.get("local_target") if data["kind"] == "movie"
+        else record.get("local_target"))
+    workflow = {"actor": "missing-actor-images", "movie": "unresolved-movies",
+                "show": "tv-errors"}[data["kind"]]
+    row = {"identifier": identity, "display_name": data["identifier"],
+           "local_target": record.get("local_target")}
+    generation = hashlib.sha256(json.dumps(
+        [row], ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
+    ).encode("utf-8")).hexdigest()[:20]
+    name = f"collection-v{COLLECTION_CACHE_VERSION}-item-{generation}.json"
+    with _cache_lock:
+        _prepare_cache_directory()
+        atomic_write_json(CACHE_DIR / name, {"version": COLLECTION_CACHE_VERSION,
+                                            "generation": generation, "items": [row]})
+    return ("bulk", workflow, "--scope-file", str(CACHE_DIR / name),
+            "--generation", generation, "--count", "1")
+
+
 def _scope_path(scope):
     prefix = f"asset://{PACKAGE_ID}/.cache/ui/"
     asset = scope.get("asset") if isinstance(scope, dict) else None
@@ -251,16 +280,20 @@ def _inbox_candidate(data):
     from harvester_core.config import load_config
     config = load_config(app_dir=PROJECT_DIR)
     item = get_inbox_item(config, data["item_id"])
-    if item["workflow"] not in {"lost-found", "unresolved-movies", "failed-movies"}:
-        raise BridgeError("candidate selection is available for movies only")
+    movie_workflows = {"lost-found", "unresolved-movies", "failed-movies"}
+    tv_workflows = {"ambiguous-tv", "not-found-tv", "tv-errors"}
+    if item["workflow"] not in movie_workflows | tv_workflows:
+        raise BridgeError("candidate selection is unavailable for this Inbox workflow")
     try:
         candidate = item["summary"]["provider_results"][0]["candidates"][data["candidate_index"]]
-        movie_id = candidate["id"]
     except (KeyError, IndexError, TypeError) as error:
         raise BridgeError("candidate index is not present in the frozen Inbox item") from error
-    if not isinstance(movie_id, int) or isinstance(movie_id, bool) or movie_id <= 0:
-        raise BridgeError("frozen candidate has no usable TMDB identity")
-    return _prepare_inbox_rerun(config, item, "movie", {"tmdb_id": movie_id})
+    identity_key = "tmdb_id" if item["workflow"] in movie_workflows else "tvdb_id"
+    provider_id = candidate.get("id" if identity_key == "tmdb_id" else "tvdb_id")
+    if not isinstance(provider_id, int) or isinstance(provider_id, bool) or provider_id <= 0:
+        raise BridgeError(f"frozen candidate has no usable {identity_key[:-3].upper()} identity")
+    kind = "movie" if identity_key == "tmdb_id" else "show"
+    return _prepare_inbox_rerun(config, item, kind, {identity_key: provider_id})
 
 
 ACTION_REGISTRY = {
@@ -273,6 +306,7 @@ ACTION_REGISTRY = {
     "refresh.actor.image": _refresh_actor,
     "bulk.workflow": _bulk_workflow,
     "bulk.item": _bulk_item,
+    "item.refetch": _item_refetch,
     "bulk.stop": None,
     "inbox.retry": _inbox_retry,
     "inbox.select_candidate": _inbox_candidate,
@@ -280,6 +314,7 @@ ACTION_REGISTRY = {
     "inbox.list": None, "inbox.get": None, "inbox.apply": None,
     "inbox.discard": None, "inbox.apply_all": None, "inbox.discard_all": None,
     "actor.install_image": None, "inbox.install_image": None,
+    "item.install_image": None,
     "preview.artifact": None,
 }
 BRIDGE_ACTIONS = frozenset({"__ping__", *ACTION_REGISTRY})
@@ -390,6 +425,66 @@ def install_inbox_image(data):
     return {"item_id": item["item_id"], "prepared": 1, "bytes": len(source)}
 
 
+def prepare_item_image(data):
+    """Prepare a canonical Search-item image without accepting a destination."""
+    if (set(data) != {"kind", "identifier", "data_url"} or data.get("kind") not in
+            {"actor", "movie", "show"} or not all(
+                isinstance(data.get(key), str) for key in ("identifier", "data_url"))):
+        raise BridgeError("item.install_image requires kind, identifier, and image data")
+    try:
+        header, encoded = data["data_url"].split(",", 1)
+        source = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError) as error:
+        raise BridgeError("invalid image data") from error
+    if (";base64" not in header or len(source) > 512_000 or
+            not source.startswith(b"\xff\xd8\xff")):
+        raise BridgeError("manual item image must be a canonical JPEG up to 512 KB")
+    from harvester_core.api import get_record, inspect_item
+    from harvester_core.artifacts import (RecordingCommitter, get_inbox_item, list_inbox,
+                                          persist_preparation)
+    from harvester_core.config import load_config
+    from harvester_core.images import safe_actor_filename
+    from harvester_core.storage import save_json_atomic, write_bytes_atomic
+    config = load_config(app_dir=PROJECT_DIR)
+    kind = data["kind"]
+    record = get_record(config, kind, data["identifier"])
+    if kind == "actor":
+        identity = record["name"]
+        target = config.movie_root / ".actors" / safe_actor_filename(identity)
+        workflow = "missing-actor-images"
+    else:
+        detail = inspect_item(config, kind, data["identifier"])
+        if detail.get("ownership", {}).get("status") == "ambiguous":
+            raise BridgeError("manual poster ownership is ambiguous")
+        identity = detail["selected_manifest_identity"]
+        target = Path(detail["directory"]) / "poster.jpg"
+        workflow = "unresolved-movies" if kind == "movie" else "tv-errors"
+    previous = next((item for item in list_inbox(config)
+                     if item.get("workflow") == workflow and item.get("identities") == [identity]), None)
+    plan = persist_preparation(config, workflow, [identity], RecordingCommitter(),
+                               display_title=data["identifier"],
+                               local_target=record.get("local_target"),
+                               summary={"outcome": "ready", "message": "Manual image prepared"},
+                               requested_artifacts=["actor_image" if kind == "actor" else "poster"])
+    item = get_inbox_item(config, plan["plan_id"])
+    if previous:
+        item["actions"] = previous.get("actions", [])
+        item["summary"] = previous.get("summary", item["summary"])
+    root = config.app_dir / ".cache" / "bulk" / "inbox" / item["item_id"]
+    digest = hashlib.sha256(source).hexdigest()
+    write_bytes_atomic(root / "blobs" / digest, source)
+    from harvester_core.artifacts import _precondition
+    action = {"action": "write", "path": str(target), "precondition": _precondition(target),
+              "blob": f"blobs/{digest}", "size": len(source), "sha256": digest}
+    item["actions"] = [existing for existing in item["actions"] if not (
+        existing.get("action") == "write" and Path(existing.get("path", "")) == target)]
+    item["actions"].append(action)
+    item.update({"state": "ready", "reason": None})
+    item.setdefault("summary", {})["outcome"] = "ready"
+    save_json_atomic(root / "manifest.json", item)
+    return {"item_id": item["item_id"], "prepared": 1, "bytes": len(source)}
+
+
 def publish_artifact_preview(data):
     """Publish one already-known library image as disposable UI state."""
     if (set(data) != {"kind", "identifier"} or
@@ -457,6 +552,8 @@ def run_action(action, data):
         return install_actor_image(data)
     if action == "inbox.install_image":
         return install_inbox_image(data)
+    if action == "item.install_image":
+        return prepare_item_image(data)
     if action == "preview.artifact":
         return publish_artifact_preview(data)
     if action == "config.get":
@@ -737,7 +834,7 @@ def _run_bridge_job(app, receipt, json_text):
                 if process is not None:
                     process.terminate()
             result = {"stopped": process is not None}
-        elif message["action"] in ("bulk.workflow", "bulk.item", "inbox.retry",
+        elif message["action"] in ("bulk.workflow", "bulk.item", "item.refetch", "inbox.retry",
                                   "inbox.select_candidate"):
             if (not isinstance(message_id, int) or isinstance(message_id, bool) or
                     not 1 <= message_id <= 2**53 - 1):

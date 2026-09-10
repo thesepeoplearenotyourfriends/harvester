@@ -29,7 +29,9 @@ dialog::backdrop { background: rgb(0 0 0 / 45%); }
 .dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: 1rem; }
 .dialog-actions button,
 .inbox-actions button,
-.candidate button { padding: 4px 9px; border: 1px solid #626558; border-radius: 3px; background: #41423c; color: var(--text); }
+.candidate button,
+.bulk-content button,
+.bulk-empty button { padding: 4px 9px; border: 1px solid #626558; border-radius: 3px; background: #41423c; color: var(--text); }
 .error[hidden] { display: none; }
 .candidate-results { display: grid; gap: .45rem; }
 .candidate { display: grid; gap: .2rem; padding: .6rem; border: 1px solid var(--line); border-radius: 4px; background: var(--background); }
@@ -390,6 +392,8 @@ pre {
   color: var(--muted);
 }
 #choose-image,
+#choose-search-image,
+#search-open-inbox,
 #refresh-actor {
   margin: 4px;
   padding: 4px 9px;
@@ -397,6 +401,7 @@ pre {
   border: 1px solid #626558;
   border-radius: 3px;
 }
+.prepared-note { color: var(--accent-hot); }
 .error {
   padding: 5px 8px;
   color: #ffd4cc;

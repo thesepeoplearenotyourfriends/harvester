@@ -148,7 +148,11 @@ List and search results are written atomically to filter-specific, versioned fil
 under `.cache/ui/`. Only an asset descriptor crosses the Severin bridge, and the
 renderer reads the collection through `asset://com.harvester.app/`. The cache is
 not authoritative and `rm -rf .cache/` is always safe; the next request recreates
-any missing collection file.
+any missing collection file. A selected Search result is also the normal targeted
+work surface: **Re-fetch this item** derives its allowlisted recipe from the durable
+record identity, while dropped movie/show posters and actor mugshots are normalized
+and stored as Inbox proposals. Both paths preserve existing library files until the
+user explicitly applies the resulting Inbox item.
 
 ## Changelog
 
