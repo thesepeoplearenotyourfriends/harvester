@@ -361,6 +361,23 @@ def apply_inbox_item(config, item_id):
 
 
 def discard_inbox_item(config, item_id):
-    get_inbox_item(config, item_id)
-    shutil.rmtree(_prepared_root(config) / "inbox" / item_id)
+    """Remove cached work without consulting its now-stale media provenance.
+
+    Discard is intentionally weaker than inspect/apply: a user must be able to
+    remove an Inbox item after its referenced media or durable record has been
+    renamed, moved, or deleted.  Only the cache path itself is authoritative
+    here, so validate the bounded ID and refuse symlinked cache ancestors.
+    """
+    if (not isinstance(item_id, str) or len(item_id) != 32 or
+            any(character not in "0123456789abcdef" for character in item_id)):
+        raise ValueError("invalid Bulk Inbox item id")
+    current = config.app_dir
+    for component in (".cache", "bulk", "inbox"):
+        current /= component
+        if current.is_symlink():
+            raise ValueError("refusing symlinked Bulk Inbox path")
+    root = current / item_id
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("Bulk Inbox item does not exist or is unsafe")
+    shutil.rmtree(root)
     return {"item_id": item_id, "discarded": 1}

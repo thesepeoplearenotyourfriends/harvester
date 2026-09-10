@@ -187,6 +187,34 @@ class ArtifactCommitSeamTests(unittest.TestCase):
         discard_inbox_item(self.config, plan["plan_id"])
         self.assertFalse(untouched.exists())
 
+    def test_discard_ignores_stale_or_unreadable_media_provenance(self):
+        """Broken references must never trap disposable work in the Inbox."""
+        target = self.movies / "Renamed" / "movie.nfo"
+        recorder = RecordingCommitter(); recorder.write(target, b"discarded")
+        plan = persist_preparation(self.config, "lost-found", ["old identity"], recorder)
+        root = self.root / ".cache" / "bulk" / "inbox" / plan["plan_id"]
+
+        # This represents the strongest stale case: even the cached provenance
+        # can no longer be interpreted after the media and state have changed.
+        (root / "manifest.json").write_text("no longer readable", encoding="utf-8")
+        self.movies.rename(self.root / "movies-renamed")
+
+        self.assertEqual(discard_inbox_item(self.config, plan["plan_id"]), {
+            "item_id": plan["plan_id"], "discarded": 1})
+        self.assertFalse(root.exists())
+
+    def test_discard_rejects_unsafe_or_unknown_cache_paths(self):
+        inbox = self.root / ".cache" / "bulk" / "inbox"
+        inbox.mkdir(parents=True)
+        outside = self.root / "outside"; outside.mkdir()
+        unsafe_id = "a" * 32
+        (inbox / unsafe_id).symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "unsafe"):
+            discard_inbox_item(self.config, unsafe_id)
+        with self.assertRaisesRegex(ValueError, "invalid"):
+            discard_inbox_item(self.config, "../outside")
+        self.assertTrue(outside.exists())
+
     def test_newly_applied_nfo_is_readable_by_library_users(self):
         target = self.movies / "Movie" / "movie.nfo"
         recorder = RecordingCommitter(); recorder.write(target, b"<movie/>")
