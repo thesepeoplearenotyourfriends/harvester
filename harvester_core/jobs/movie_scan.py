@@ -5,6 +5,7 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 
 from ..events import emit
+from ..nfo import first_indexable_nfo
 from ..storage import load_json, save_json_atomic
 from .movie_actor_scan import clean_year, last_year, resolve_movie_tmdb_id
 
@@ -50,14 +51,18 @@ def discover_movies(root):
     for base in sorted(path for path in root.iterdir()
                        if path.is_dir() and not path.name.startswith(".")):
         files = [path.name for path in base.iterdir() if path.is_file()]
-        nfos = sorted(base / name for name in files if name.lower().endswith(".nfo"))
+        nfos = sorted((base / name for name in files if name.lower().endswith(".nfo")),
+                      key=lambda path: (path.name.casefold(), path.name))
         videos = sorted(
             base / name for name in files
             if Path(name).suffix.casefold() in {".mkv", ".mp4", ".avi", ".m4v", ".mov"}
         )
         # A lone video supplies an unambiguous sibling NFO target. Multiple
         # videos without an NFO remain untouched because no title owns the path.
-        targets = nfos or ([videos[0].with_suffix(".nfo")] if len(videos) == 1 else [])
+        selected_nfo, nfo_diagnostics, _ = first_indexable_nfo(base)
+        targets = ([base / selected_nfo["name"]] if selected_nfo else
+                   [nfos[0]] if nfos else
+                   [videos[0].with_suffix(".nfo")] if len(videos) == 1 else [])
         for nfo_path in targets:
             title = nfo_path.stem
             original_title = None
@@ -102,6 +107,8 @@ def discover_movies(root):
                 "status": "pending", "tries": 0, "tmdb_id": None, "match": None,
                 "candidates": [], "nfo": None, "poster_url": None,
                 "last_error": None, "materialize": {}, "updated": None,
+                "nfo_consumer_usable": bool(selected_nfo),
+                "nfo_candidates": nfo_diagnostics,
             }
     return found
 
@@ -134,6 +141,13 @@ def run(config, provider, reporter=None, limit=None, rebuild=False, refresh=Fals
     for key, record in discovered.items():
         existing = manifest["movies"].get(key)
         if existing is None:
+            same_directory = [old_key for old_key, old_record in manifest["movies"].items()
+                              if Path(old_record.get("nfo_path") or old_key).parent ==
+                              Path(record["nfo_path"]).parent]
+            if len(same_directory) == 1:
+                existing = manifest["movies"].pop(same_directory[0])
+                manifest["movies"][key] = existing
+        if existing is None:
             manifest["movies"][key] = record
             continue
         # NFO identity is local source data and may have been corrected by a
@@ -143,6 +157,7 @@ def run(config, provider, reporter=None, limit=None, rebuild=False, refresh=Fals
             "local_target", "nfo_path", "title", "query_title", "original_title", "year",
             "imdb_id", "local_tmdb_id", "poster_path",
             "poster_target_status",
+            "nfo_consumer_usable", "nfo_candidates",
         ):
             existing[field] = record[field]
     selected = set(targets or [])
@@ -159,7 +174,8 @@ def run(config, provider, reporter=None, limit=None, rebuild=False, refresh=Fals
             if not refresh and record.get("status") == "ok":
                 continue
             poster_path = Path(record["poster_path"]) if record.get("poster_path") else None
-            if not refresh and Path(record["nfo_path"]).exists() and poster_path and poster_path.exists():
+            if (not refresh and first_indexable_nfo(Path(record["nfo_path"]).parent)[0]
+                    and poster_path and poster_path.exists()):
                 continue
             if limit is not None and processed >= limit:
                 break

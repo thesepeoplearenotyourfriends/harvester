@@ -84,12 +84,17 @@ def rescan_movies(config, discovered=None):
     local_fields = (
         "kind", "local_target", "nfo_path", "poster_path",
         "poster_target_status", "title", "original_title", "year",
-        "imdb_id", "local_tmdb_id",
+        "imdb_id", "local_tmdb_id", "nfo_consumer_usable", "nfo_candidates",
     )
-    movies = {
-        key: _preserve_remote_state(fresh, previous_movies.get(key), local_fields)
-        for key, fresh in discovered.items()
-    }
+    movies = {}
+    for key, fresh in discovered.items():
+        previous_record = previous_movies.get(key)
+        if previous_record is None:
+            siblings = [record for old_key, record in previous_movies.items()
+                        if Path(record.get("nfo_path") or old_key).parent ==
+                        Path(fresh["nfo_path"]).parent]
+            previous_record = siblings[0] if len(siblings) == 1 else None
+        movies[key] = _preserve_remote_state(fresh, previous_record, local_fields)
     fresh_manifest = {"_meta": {
         "version": 1, "source": "TMDB", "created": movie_now_iso(),
         "updated": movie_now_iso(),

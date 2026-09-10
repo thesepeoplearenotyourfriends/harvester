@@ -110,10 +110,7 @@ def persist_preparation(config, workflow, identities, committer, *, state="ready
                         display_title=None, local_target=None, summary=None,
                         reason=None, requested_artifacts=None, logical_identity=None):
     """Persist one durable, independently reviewable logical Inbox item."""
-    stable = json.dumps({"workflow": workflow, "identities": list(identities),
-                         "logical_identity": logical_identity},
-                        ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    plan_id = hashlib.sha256(stable.encode("utf-8")).hexdigest()[:32]
+    plan_id = preparation_id(workflow, identities, logical_identity)
     root = _safe_root(config, "inbox", plan_id)
     previous = None
     try:
@@ -139,6 +136,7 @@ def persist_preparation(config, workflow, identities, committer, *, state="ready
                 (str(identities[0]) if identities else workflow),
                 "local_target": local_target, "state": state, "seen": False,
                 "reason": reason, "summary": summary or {},
+                "logical_identity": logical_identity,
                 "query": (previous or {}).get("query", {}),
                 "history": [*((previous or {}).get("history", [])), *([{
                     "state": previous.get("state"), "reason": previous.get("reason"),
@@ -150,6 +148,64 @@ def persist_preparation(config, workflow, identities, committer, *, state="ready
     return {"plan_id": plan_id,
             "manifest": f"asset://com.harvester.app/.cache/bulk/inbox/{plan_id}/manifest.json",
             "prepared": sum(action["action"] == "write" for action in manifest_actions)}
+
+
+def preparation_id(workflow, identities, logical_identity=None):
+    """Return the stable Inbox identity for a logical preparation proposal."""
+    stable = json.dumps({"workflow": workflow, "identities": list(identities),
+                         "logical_identity": logical_identity},
+                        ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(stable.encode("utf-8")).hexdigest()[:32]
+
+
+def migrate_inbox_identity(config, old_identity, new_identity):
+    """Move a live proposal to a replacement durable identity without losing work."""
+    inbox = _prepared_root(config) / "inbox"
+    matches = [item for item in list_inbox(config)
+               if item.get("identities") == [old_identity]]
+    migrated = []
+    for old in matches:
+        migrated.append(_migrate_inbox_item(inbox, old, old_identity, new_identity))
+    return migrated
+
+
+def _migrate_inbox_item(inbox, old, old_identity, new_identity):
+    """Move one manifest; split out so every matching workflow is migrated."""
+    import shutil
+    old_root = inbox / old["item_id"]
+    new_id = preparation_id(old["workflow"], [new_identity], old.get("logical_identity"))
+    new_root = inbox / new_id
+    existing = None
+    if new_root != old_root and (new_root / "manifest.json").is_file():
+        existing = json.loads((new_root / "manifest.json").read_text(encoding="utf-8"))
+    if new_root != old_root and not new_root.exists():
+        old_root.rename(new_root)
+    elif new_root != old_root:
+        (new_root / "blobs").mkdir(parents=True, exist_ok=True)
+        for blob in (old_root / "blobs").glob("*"):
+            target = new_root / "blobs" / blob.name
+            if not target.exists():
+                shutil.copy2(blob, target)
+        shutil.rmtree(old_root)
+    manifest = old
+    if existing:
+        actions = [*existing.get("actions", []), *old.get("actions", [])]
+        manifest["actions"] = list({(action.get("action"), action.get("path")): action
+                                    for action in actions}.values())
+        manifest["requested_artifacts"] = list(dict.fromkeys(
+            [*existing.get("requested_artifacts", []), *old.get("requested_artifacts", [])]))
+        if existing.get("state") == "needs_attention":
+            manifest["state"] = "needs_attention"
+            manifest["reason"] = existing.get("reason")
+    # Adoption makes a prepared write to the dead inferred NFO target obsolete;
+    # poster and other independent work remains reviewable under the new key.
+    manifest["actions"] = [action for action in manifest.get("actions", []) if not (
+        action.get("action") == "write" and action.get("path") == old_identity)]
+    manifest.update({"item_id": new_id, "identities": [new_identity]})
+    if manifest.get("local_target") == old_identity:
+        manifest["local_target"] = new_identity
+    save_json_atomic(new_root / "manifest.json", manifest)
+    return new_id
 
 
 def list_inbox(config):

@@ -651,7 +651,12 @@
           .join("");
       }
       function artifactLine(name, artifact) {
-        return `<dt>${esc(name)}</dt><dd>${artifact?.present ? `Present${artifact.path ? ` · ${esc(artifact.path)}` : ""}` : "Missing"}</dd>`;
+        const state = artifact?.unusable
+          ? `Unusable${artifact.name ? ` · ${esc(artifact.name)}` : ""}${artifact.parse_error ? ` · XML parse error: ${esc(artifact.parse_error)}` : ""}`
+          : artifact?.present
+            ? `${artifact.ambiguous ? `Present · ambiguous (${artifact.candidate_count} candidates)` : `Present${artifact.path ? ` · ${esc(artifact.path)}` : ""}`}`
+            : "Missing";
+        return `<dt>${esc(name)}</dt><dd>${state}</dd>`;
       }
       function refetchButton() {
         return bulkWorkflows[state.workflow] || state.workflow === "search"
@@ -667,7 +672,7 @@
         if (state.workflow !== "search" || !["movie", "show"].includes(detail.kind)) return "";
         const candidates = detail.nfo_candidates || [], usable = candidates.filter((item) => item.usable);
         const existing = candidates.length ? `<h3>Existing NFOs on disk</h3><ul class="nfo-candidates">${candidates.map((item, index) =>
-          `<li><strong>${esc(item.name)}</strong><br><span class="muted">${item.parseable ? `parseable · &lt;${esc(item.root)}&gt;${item.title ? ` · title: ${esc(item.title)}` : ""}` : "unusable · malformed XML"}</span>${item.usable ? `<br><button type="button" data-nfo-candidate="${index}" class="${usable.length === 1 ? "primary" : "compact-action"}">Use this NFO</button>` : ""}</li>`).join("")}</ul>` : '<p class="muted">No .nfo files found in this directory.</p>';
+          `<li><strong>${esc(item.name)}</strong><br><span class="muted">${item.parseable ? `parseable · &lt;${esc(item.root)}&gt;${item.title ? ` · title: ${esc(item.title)}` : ""}` : `unusable · XML parse error: ${esc(item.parse_error || "unknown error")}`}</span>${item.usable ? `<br><button type="button" data-nfo-token="${esc(item.token)}" class="${usable.length === 1 ? "primary" : "compact-action"}">Use this NFO</button>` : ""}</li>`).join("")}</ul>` : '<p class="muted">No .nfo files found in this directory.</p>';
         return `<section class="search-nfo"><h2>NFO</h2><p><strong>${detail.nfo?.present ? "Present" : "Missing"}</strong></p><button id="copy-nfo-prompt" type="button" class="compact-action">Copy NFO prompt</button>${existing}<h3>Use NFO:</h3><div id="search-nfo-drop-zone" class="drop-zone" tabindex="0">Drop .nfo here<br><span>or</span><br><button id="choose-search-nfo" type="button">Choose .nfo…</button><input id="search-nfo-file" type="file" accept=".nfo,text/xml,application/xml" hidden></div><label><input id="replace-search-nfo" type="checkbox"> Replace Existing NFO</label><textarea id="search-nfo-paste" rows="7" placeholder="Paste XML…"></textarea><button id="prepare-pasted-nfo" type="button">Use pasted XML</button></section>`;
       }
       function showSearchPrepared() {
@@ -724,9 +729,9 @@
           try { const result = await App.request("item.nfo_prompt", { kind: detail.kind, identifier: detail.identifier }, true); await navigator.clipboard.writeText(result.text); }
           catch (error) { showError(error.message || "Could not copy NFO prompt"); }
         };
-        document.querySelectorAll("[data-nfo-candidate]").forEach((button) => button.onclick = async () => {
+        document.querySelectorAll("[data-nfo-token]").forEach((button) => button.onclick = async () => {
           try {
-            const result = await App.request("item.adopt_nfo", { kind: detail.kind, identifier: detail.identifier, candidate_index: +button.dataset.nfoCandidate, replace: replace() }, false, true);
+            const result = await App.request("item.adopt_nfo", { kind: detail.kind, identifier: detail.identifier, candidate_token: button.dataset.nfoToken, candidate_generation: detail.nfo_candidates_generation, replace: replace() }, false, true);
             if (result.prepared) { await refreshInboxSummary(); showSearchPrepared(); }
             else {
               const index = state.rows.findIndex((row) => row.identifier === detail.identifier);

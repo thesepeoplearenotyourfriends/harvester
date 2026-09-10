@@ -11,6 +11,7 @@ from collections import Counter
 from pathlib import Path
 
 from ..api import get_record
+from ..nfo import first_indexable_nfo
 from ..artifacts import RecordingCommitter, persist_preparation
 from ..storage import load_json
 from ..storage import save_json_atomic
@@ -165,7 +166,7 @@ def _scoped_artifact_outcome(workflow, result):
     expected = {
         "missing-actor-images": ("image", ("failed", "unresolved_source")),
         "missing-posters": ("poster", ("error", "no_url", "unresolved_target")),
-        "lost-found": ("nfo", ("error", "unresolved_target")),
+        "lost-found": ("nfo", ("error", "unresolved_target", "unusable")),
         "missing-tv-nfo": ("nfo", ("error",)),
         "missing-tv-posters": ("poster", ("error", "no_url")),
     }.get(workflow)
@@ -247,8 +248,25 @@ def run(config, workflow, identities, reporter=None):
                               config.state_path("tmdb_api_cache.json"), transport)
         scanned = scan(config, provider, reporter, refresh=True, targets=targets)
         records = [get_record(config, "movie", value) for value in identities]
+        unusable = [record for record in records
+                    if Path(record.get("nfo_path") or record.get("local_target", "")).is_file() and
+                    not first_indexable_nfo(Path(
+                        record.get("nfo_path") or record.get("local_target", "")).parent)[0]]
+        if unusable:
+            detail = next((candidate.get("parse_error") for record in unusable
+                           for candidate in record.get("nfo_candidates", [])
+                           if candidate.get("parse_error")), "XML parse error")
+            result = _item_result(identities, ("identity", scanned), ("nfo", {
+                "processed": len(unusable), "counts": {"nfo_unusable": len(unusable)},
+                "planned_statuses": {record["local_target"]: {
+                    "status": "unusable", "error": detail} for record in unusable}}),
+                message=f"NFO unusable: {detail}")
+            result["ok"] = False
+            return _finish(config, workflow, identities, recorder, result, len(unusable))
         should_prepare_nfo = workflow == "lost-found" or any(
-            record.get("status") == "ok" and not Path(record["nfo_path"]).is_file()
+            record.get("status") == "ok" and
+            not first_indexable_nfo(Path(
+                record.get("nfo_path") or record.get("local_target", "")).parent)[0]
             for record in records)
         if not should_prepare_nfo:
             return _finish(config, workflow, identities, recorder,

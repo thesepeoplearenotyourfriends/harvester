@@ -606,23 +606,25 @@ def prepare_item_nfo(data):
 
 def adopt_item_nfo(data):
     """Resolve a bounded inspection candidate entirely on the host side."""
-    if (set(data) != {"kind", "identifier", "candidate_index", "replace"} or
+    if (set(data) != {"kind", "identifier", "candidate_token", "candidate_generation", "replace"} or
             data.get("kind") not in {"movie", "show"} or
             not isinstance(data.get("identifier"), str) or
-            not isinstance(data.get("candidate_index"), int) or
-            isinstance(data.get("candidate_index"), bool) or data["candidate_index"] < 0 or
+            not isinstance(data.get("candidate_token"), str) or
+            not isinstance(data.get("candidate_generation"), str) or
             not isinstance(data.get("replace"), bool)):
-        raise BridgeError("item.adopt_nfo requires a Search identity and candidate index")
+        raise BridgeError("item.adopt_nfo requires a Search identity and candidate token")
     config, record, detail = _nfo_context(data)
-    try:
-        candidate = detail["nfo_candidates"][data["candidate_index"]]
-    except (KeyError, IndexError, TypeError) as error:
-        raise BridgeError("NFO candidate is not present in current inspection") from error
+    if detail.get("nfo_candidates_generation") != data["candidate_generation"]:
+        raise BridgeError("NFO candidates changed; refresh the item")
+    candidate = next((item for item in detail["nfo_candidates"]
+                      if item.get("token") == data["candidate_token"]), None)
+    if candidate is None:
+        raise BridgeError("NFO candidates changed; refresh the item")
     if not candidate.get("usable"):
         raise BridgeError("selected NFO candidate is unusable")
     path = Path(detail["directory"]) / candidate["name"]
     try:
-        source = _validated_nfo(data["kind"], path.read_bytes())
+        source = path.read_bytes()
     except OSError as error:
         raise BridgeError("selected NFO is no longer available") from error
     if data["kind"] == "movie":
@@ -639,9 +641,12 @@ def adopt_item_nfo(data):
             migrated.update({"local_target": new_key, "nfo_path": new_key})
             movies[new_key] = migrated
             save_json_atomic(manifest_path, manifest)
+            from harvester_core.artifacts import migrate_inbox_identity
+            migrate_inbox_identity(config, old_key, new_key)
             return {"adopted": True, "identifier": new_key, "prepared": 0}
         raise BridgeError("selected NFO is no longer available")
     canonical = Path(detail["directory"]) / "show.nfo"
+    source = _validated_nfo("show", source)
     if path == canonical:
         return {"adopted": True, "identifier": data["identifier"], "prepared": 0}
     return _prepare_nfo_bytes(config, "show", data["identifier"], record, detail,

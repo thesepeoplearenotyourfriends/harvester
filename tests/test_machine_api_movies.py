@@ -477,7 +477,7 @@ class MachineApiMovieTests(unittest.TestCase):
         saved = load_json(self.state / "movie_manifest_tmdb.json")["movies"][str(nfo.resolve())]
         self.assertEqual(saved["tries"], 2)
 
-    def test_one_poster_is_not_assigned_to_multiple_nfos(self):
+    def test_movies_ui_first_parseable_nfo_owns_the_directory_poster(self):
         folder = self.movies / "Anthology"
         folder.mkdir()
         first = folder / "first.nfo"
@@ -486,8 +486,38 @@ class MachineApiMovieTests(unittest.TestCase):
         second.write_text("<movie><title>Second</title></movie>")
         (folder / "poster.jpg").write_bytes(b"poster")
         records = discover_movies(self.movies)
-        self.assertIsNone(records[str(first.resolve())]["poster_path"])
-        self.assertIsNone(records[str(second.resolve())]["poster_path"])
+        self.assertIn(str(first.resolve()), records)
+        self.assertNotIn(str(second.resolve()), records)
+        self.assertEqual(records[str(first.resolve())]["poster_path"],
+                         str((folder / "poster.jpg").resolve()))
+
+    def test_movie_nfo_classification_matches_movies_ui_parse_rule(self):
+        fixtures = (
+            ("valid", [("one.nfo", b"<movie><title>Valid</title></movie>")], "one.nfo", True),
+            ("malformed", [("one.nfo", b"<movie>")], "one.nfo", False),
+            ("skip-bad", [("a.nfo", b"<movie>"),
+                          ("b.nfo", b"<movie><title>Valid</title></movie>")], "b.nfo", True),
+            ("other-root", [("one.nfo", b"<something><value>ok</value></something>")],
+             "one.nfo", True),
+        )
+        for name, files, selected, usable in fixtures:
+            with self.subTest(name=name):
+                root = Path(self.temp.name) / ("parity-" + name)
+                folder = root / "Movie"; folder.mkdir(parents=True)
+                for filename, content in files:
+                    (folder / filename).write_bytes(content)
+                records = discover_movies(root)
+                self.assertEqual(list(records), [str((folder / selected).resolve())])
+                record = next(iter(records.values()))
+                self.assertEqual(record["nfo_consumer_usable"], usable)
+                malformed = next((item for item in record["nfo_candidates"]
+                                  if item["name"] == "a.nfo" or
+                                  (name == "malformed" and item["name"] == "one.nfo")), None)
+                if malformed:
+                    self.assertFalse(malformed["parseable"])
+                    self.assertIsNotNone(malformed["parse_error"])
+                    self.assertIsInstance(malformed["parse_line"], int)
+                    self.assertIsInstance(malformed["parse_column"], int)
 
     def test_tvdb_profile_advertises_person_images(self):
         tvdb = next(item for item in profiles(self.config) if item["key"] == "tvdb")

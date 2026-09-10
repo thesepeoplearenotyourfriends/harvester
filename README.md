@@ -160,6 +160,15 @@ exact-byte Inbox proposals until Apply, with replacement requiring explicit inte
 **Copy NFO prompt** produces provider-free clipboard guidance from local facts and
 the tags emitted by Harvester's own movie or TV renderer.
 
+Movie filesystem classification deliberately matches Movies UI: sorted `.nfo`
+files are tried with `ElementTree.parse`, and the first parseable file is the usable
+receipt regardless of root element or title. Parse failures remain visible as Lost &
+Found attention and are never overwritten automatically. This consumer-compatibility
+classification is separate from manual intake, which continues to require safe UTF-8,
+the kind-specific root, and a title. Search candidate actions carry a content-bound
+token plus a candidate-set generation; directory changes require refreshing before
+selection can proceed.
+
 ## Changelog
 
 Entries are listed newest first. Each entry describes behavior that changed rather than

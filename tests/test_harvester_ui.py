@@ -645,7 +645,7 @@ function selectInboxItem(index) {{ selected = index; }}
         self.assertIn("Existing NFOs on disk", page)
         self.assertIn("Drop .nfo here", page)
         self.assertIn('App.request("item.install_nfo", { kind: detail.kind, identifier: detail.identifier, content_base64:', page)
-        self.assertIn('App.request("item.adopt_nfo", { kind: detail.kind, identifier: detail.identifier, candidate_index:', page)
+        self.assertIn('App.request("item.adopt_nfo", { kind: detail.kind, identifier: detail.identifier, candidate_token:', page)
         install = page[page.index('App.request("item.install_nfo"'):
                        page.index('App.request("item.install_nfo"') + 260]
         adopt = page[page.index('App.request("item.adopt_nfo"'):
@@ -702,7 +702,7 @@ class BulkRecipeTests(unittest.TestCase):
             root = Path(temporary); movies = root / "movies"; tv = root / "tv"
             movies.mkdir(); tv.mkdir(); movie = movies / "Movie"; show = tv / "Show"
             movie.mkdir(); show.mkdir(); movie_nfo = movie / "movie.nfo"
-            movie_nfo.write_bytes(b"existing nfo")
+            movie_nfo.write_bytes(b"<movie><title>Movie</title></movie>")
             (movie / "poster.jpg").write_bytes(b"existing movie poster")
             (show / "show.nfo").write_bytes(b"existing show nfo")
             (show / "poster.jpg").write_bytes(b"existing show poster")
@@ -768,7 +768,7 @@ class BulkRecipeTests(unittest.TestCase):
             prepared = list_inbox(config)
             self.assertEqual(len(prepared), 2)
             self.assertTrue(all(item["state"] == "ready" for item in prepared))
-            self.assertEqual(movie_nfo.read_bytes(), b"existing nfo")
+            self.assertEqual(movie_nfo.read_bytes(), b"<movie><title>Movie</title></movie>")
             self.assertEqual((movie / "poster.jpg").read_bytes(), b"existing movie poster")
             self.assertEqual((show / "show.nfo").read_bytes(), b"existing show nfo")
             self.assertEqual((show / "poster.jpg").read_bytes(), b"existing show poster")
@@ -855,7 +855,7 @@ class BulkRecipeTests(unittest.TestCase):
             self.assertEqual(len(item["actions"]), 1)
             self.assertEqual(Path(item["actions"][0]["path"]), show / "poster.jpg")
 
-    def test_search_existing_movie_nfos_are_inspected_and_adopted_by_index(self):
+    def test_search_existing_movie_nfos_are_inspected_and_adopted_by_token(self):
         from harvester_core.api import inspect_item
         from harvester_core.storage import load_json
         with tempfile.TemporaryDirectory() as temporary:
@@ -882,19 +882,27 @@ class BulkRecipeTests(unittest.TestCase):
             self.assertEqual([item["name"] for item in detail["nfo_candidates"]],
                              [alternate.name, malformed.name, chosen.name])
             self.assertEqual(sum(item["usable"] for item in detail["nfo_candidates"]), 2)
-            self.assertEqual(detail["nfo_candidates"][2], {
-                "name": chosen.name, "present": True, "parseable": True,
-                "root": "movie", "title": "Burnt", "usable": True})
+            self.assertTrue(detail["nfo"]["ambiguous"])
+            self.assertNotIn("path", detail["nfo"])
+            self.assertEqual(detail["nfo"]["fields"], {})
+            candidate = detail["nfo_candidates"][2]
+            self.assertEqual((candidate["name"], candidate["root"], candidate["title"]),
+                             (chosen.name, "movie", "Burnt"))
+            self.assertTrue(candidate["parseable"] and candidate["usable"])
             self.assertFalse(detail["nfo_candidates"][1]["usable"])
             with mock.patch("harvester_core.config.load_config", return_value=config), \
                     mock.patch.object(harvester_ui, "PROJECT_DIR", root):
                 result = harvester_ui.run_action("item.adopt_nfo", {
                     "kind": "movie", "identifier": str(inferred),
-                    "candidate_index": 2, "replace": False})
+                    "candidate_token": candidate["token"],
+                    "candidate_generation": detail["nfo_candidates_generation"],
+                    "replace": False})
                 with self.assertRaises(harvester_ui.BridgeError):
                     harvester_ui.run_action("item.adopt_nfo", {
                         "kind": "movie", "identifier": result["identifier"],
-                        "candidate_index": 99, "replace": False})
+                        "candidate_token": "0" * 32,
+                        "candidate_generation": detail["nfo_candidates_generation"],
+                        "replace": False})
             state = load_json(config.state_path("movie_manifest_tmdb.json"))["movies"]
             self.assertNotIn(str(inferred), state)
             self.assertEqual(state[str(chosen)]["nfo_path"], str(chosen))
@@ -903,6 +911,92 @@ class BulkRecipeTests(unittest.TestCase):
             self.assertEqual(chosen.read_bytes(),
                              b"<movie><title>Burnt</title><custom>keep</custom></movie>")
             self.assertFalse(inferred.exists())
+
+    def test_search_effective_nfo_is_the_single_actual_alternate_receipt(self):
+        from harvester_core.api import inspect_item
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); folder = movies / "Alternate"; folder.mkdir()
+            inferred = folder / "missing.nfo"; actual = folder / "actual.nfo"
+            actual.write_text("<movie><title>Actual title</title><year>2020</year></movie>")
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"movies": {
+                str(inferred): {"status": "pending", "local_target": str(inferred),
+                                "nfo_path": str(inferred)}}})
+            nfo = inspect_item(config, "movie", str(inferred))["nfo"]
+            self.assertEqual(nfo["path"], str(actual))
+            self.assertEqual(nfo["name"], actual.name)
+            self.assertEqual(nfo["fields"], {"title": "Actual title", "year": "2020"})
+            self.assertTrue(nfo["present"])
+
+    def test_search_nfo_candidate_generation_rejects_shifted_directory(self):
+        from harvester_core.api import inspect_item
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); folder = movies / "Changing"; folder.mkdir()
+            inferred = folder / "missing.nfo"; clicked = folder / "z.nfo"
+            clicked.write_text("<movie><title>Clicked</title></movie>")
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"movies": {
+                str(inferred): {"status": "pending", "local_target": str(inferred),
+                                "nfo_path": str(inferred)}}})
+            detail = inspect_item(config, "movie", str(inferred))
+            candidate = detail["nfo_candidates"][0]
+            (folder / "a.nfo").write_text("<movie><title>Inserted</title></movie>")
+            with mock.patch("harvester_core.config.load_config", return_value=config), \
+                    mock.patch.object(harvester_ui, "PROJECT_DIR", root):
+                with self.assertRaisesRegex(
+                        harvester_ui.BridgeError,
+                        "NFO candidates changed; refresh the item"):
+                    harvester_ui.run_action("item.adopt_nfo", {
+                        "kind": "movie", "identifier": str(inferred),
+                        "candidate_token": candidate["token"],
+                        "candidate_generation": detail["nfo_candidates_generation"],
+                        "replace": False})
+            state = json.loads(config.state_path("movie_manifest_tmdb.json").read_text())
+            self.assertIn(str(inferred), state["movies"])
+
+    def test_movie_nfo_adoption_migrates_pending_inbox_identity_and_work(self):
+        from harvester_core.artifacts import RecordingCommitter, list_inbox, persist_preparation
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); folder = movies / "Inbox"; folder.mkdir()
+            inferred = folder / "missing.nfo"; actual = folder / "actual.nfo"
+            actual.write_text("<movie><title>Inbox</title></movie>")
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"movies": {
+                str(inferred): {"status": "ok", "local_target": str(inferred),
+                                "nfo_path": str(inferred), "tmdb_id": 55}}})
+            recorder = RecordingCommitter()
+            poster = folder / "poster.jpg"
+            recorder.write(poster, b"poster bytes")
+            persist_preparation(
+                config, "unresolved-movies", [str(inferred)], recorder,
+                state="needs_attention", reason="Keep attention",
+                summary={"message": "Keep summary"}, requested_artifacts=["poster"])
+            from harvester_core.api import inspect_item
+            detail = inspect_item(config, "movie", str(inferred))
+            with mock.patch("harvester_core.config.load_config", return_value=config), \
+                    mock.patch.object(harvester_ui, "PROJECT_DIR", root):
+                harvester_ui.run_action("item.adopt_nfo", {
+                    "kind": "movie", "identifier": str(inferred),
+                    "candidate_token": detail["nfo_candidates"][0]["token"],
+                    "candidate_generation": detail["nfo_candidates_generation"],
+                    "replace": False})
+            inbox = list_inbox(config)
+            self.assertEqual(len(inbox), 1)
+            self.assertEqual(inbox[0]["identities"], [str(actual)])
+            self.assertEqual(inbox[0]["state"], "needs_attention")
+            self.assertEqual(inbox[0]["reason"], "Keep attention")
+            self.assertEqual(inbox[0]["summary"], {"message": "Keep summary"})
+            self.assertEqual(inbox[0]["requested_artifacts"], ["poster"])
+            self.assertEqual(inbox[0]["actions"][0]["path"], str(poster))
+            blob = root / ".cache" / "bulk" / "inbox" / inbox[0]["item_id"] / inbox[0]["actions"][0]["blob"]
+            self.assertEqual(blob.read_bytes(), b"poster bytes")
+            self.assertFalse(poster.exists())
 
     def test_search_nfo_intake_preserves_exact_xml_and_requires_replace_intent(self):
         from harvester_core.artifacts import get_inbox_item
@@ -1175,6 +1269,34 @@ class BulkRecipeTests(unittest.TestCase):
         self.assertEqual(combined["counts"], {
             "image_unresolved_source": 1, "image_failed": 9,
             "image_planned": 2, "image_exists": 3})
+
+    def test_lost_found_keeps_existing_malformed_nfo_in_attention(self):
+        from harvester_core.artifacts import get_inbox_item
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); folder = movies / "Broken"; folder.mkdir()
+            nfo = folder / "old-file.nfo"; nfo.write_text("<movie>")
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"movies": {
+                str(nfo): {"status": "ok", "local_target": str(nfo),
+                           "nfo_path": str(nfo), "nfo": {"title": "Provider title"},
+                           "nfo_candidates": [{"name": nfo.name,
+                                               "parse_error": "line 1, column 7"}]}}})
+            with mock.patch("harvester_core.providers.tmdb.TMDBClient", return_value=object()), \
+                    mock.patch("harvester_core.transport.transport_from_config",
+                               return_value=object()), \
+                    mock.patch("harvester_core.jobs.movie_scan.run",
+                               return_value={"processed": 1, "counts": {"ok": 1}}), \
+                    mock.patch("harvester_core.jobs.movie_materialize.run") as materialize:
+                result = bulk.run(config, "lost-found", [str(nfo)])
+            item = get_inbox_item(config, result["preparation"]["plan_id"])
+            self.assertEqual(item["state"], "needs_attention")
+            self.assertIn("NFO unusable", item["reason"])
+            self.assertIn("line 1, column 7", item["reason"])
+            self.assertEqual(item["actions"], [])
+            self.assertEqual(nfo.read_text(), "<movie>")
+            materialize.assert_not_called()
 
     def test_inbox_state_uses_only_scoped_provider_record(self):
         from harvester_core.artifacts import RecordingCommitter, list_inbox

@@ -4,6 +4,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from .images import safe_actor_filename
+from .nfo import first_indexable_nfo, inspect_nfo_candidate, inspect_nfo_directory
 from .storage import load_json
 
 
@@ -28,7 +29,8 @@ def decorate(config, kind, key, record):
         result["local_receipts"] = {"nfo": (base / "show.nfo").is_file(), "poster": (base / "poster.jpg").is_file() or (base / "poster.png").is_file()}
     else:
         poster = Path(record.get("poster_path", "")) if record.get("poster_path") else None
-        result["local_receipts"] = {"nfo": Path(record.get("nfo_path", key)).is_file(), "poster": bool(poster and (poster.is_file() or poster.with_suffix(".png").is_file()))}
+        selected, _, _ = first_indexable_nfo(_movie_directory(key, record))
+        result["local_receipts"] = {"nfo": bool(selected), "poster": bool(poster and (poster.is_file() or poster.with_suffix(".png").is_file()))}
     return result
 
 
@@ -75,31 +77,6 @@ def _nfo_fields(path):
     if unique_ids:
         fields["unique_ids"] = unique_ids
     return fields, None
-
-
-def _nfo_candidate(path):
-    """Describe an on-disk NFO without exposing its path as a write capability."""
-    try:
-        if path.stat().st_size > 1_000_000:
-            raise ValueError("NFO exceeds inspection limit")
-        raw = path.read_bytes()
-        text = raw.decode("utf-8")
-        if "<!doctype" in text.casefold() or "<!entity" in text.casefold():
-            raise ValueError("unsafe XML declaration")
-    except (OSError, UnicodeDecodeError, ValueError):
-        return {"name": path.name, "present": True, "parseable": False,
-                "root": None, "title": None, "usable": False}
-    fields, error = _nfo_fields(path)
-    root_name = None
-    if error is None:
-        try:
-            root_name = ET.parse(path).getroot().tag
-        except (OSError, ET.ParseError) as parse_error:
-            error = str(parse_error)
-    return {"name": path.name, "present": True, "parseable": error is None,
-            "root": root_name, "title": fields.get("title"),
-            "usable": error is None and root_name in ("movie", "tvshow") and
-            bool(fields.get("title"))}
 
 
 def _poster_candidates(directory, preferred=None):
@@ -164,24 +141,41 @@ def inspect_item(config, kind, identifier):
         nfo_path = (Path(record.get("nfo_path") or key) if kind == "movie"
                     else directory / "show.nfo")
         fields, parse_error = _nfo_fields(nfo_path)
-        nfos.append({"manifest_identity": key, "present": nfo_path.is_file(),
+        consumer_present = (inspect_nfo_candidate(nfo_path)["indexable_by_movies_ui"]
+                            if kind == "movie" and nfo_path.is_file() else nfo_path.is_file())
+        nfos.append({"manifest_identity": key, "present": consumer_present,
+                     "filesystem_present": nfo_path.is_file(),
                      "path": str(nfo_path), "fields": fields,
                      **({"parse_error": parse_error} if parse_error else {})})
     preferred = matches[0][1].get("poster_path") if kind == "movie" else None
     posters = _poster_candidates(directory, preferred)
-    try:
-        candidate_paths = sorted((path for path in directory.iterdir()
-                                  if path.is_file() and not path.is_symlink()
-                                  and path.suffix.casefold() == ".nfo"),
-                                 key=lambda path: path.name.casefold())
-    except OSError:
-        candidate_paths = []
-    expected_root = "movie" if kind == "movie" else "tvshow"
-    nfo_candidates = [_nfo_candidate(path) for path in candidate_paths]
+    nfo_candidates, nfo_generation = inspect_nfo_directory(directory)
     for candidate in nfo_candidates:
-        candidate["usable"] = candidate["usable"] and candidate["root"] == expected_root
-    usable_candidates = [candidate for candidate in nfo_candidates
-                         if candidate["usable"]]
+        candidate["usable"] = (candidate["indexable_by_movies_ui"] if kind == "movie" else
+                               candidate["valid_for_manual_intake"] and
+                               candidate["root"] == "tvshow")
+    usable_candidates = [candidate for candidate in nfo_candidates if candidate["usable"]]
+    expected = Path(matches[0][1].get("nfo_path") or matches[0][0]) if kind == "movie" else directory / "show.nfo"
+    selected_candidate = next((candidate for candidate in usable_candidates
+                               if candidate["name"] == expected.name and expected.is_file()), None)
+    effective = None
+    if selected_candidate or len(usable_candidates) == 1:
+        candidate = selected_candidate or usable_candidates[0]
+        actual = directory / candidate["name"]
+        fields, _ = _nfo_fields(actual)
+        effective = {"present": True, "path": str(actual), "name": candidate["name"],
+                     "fields": fields, "ambiguous": False, "candidate_count": len(usable_candidates)}
+    elif len(usable_candidates) > 1:
+        effective = {"present": True, "ambiguous": True,
+                     "candidate_count": len(usable_candidates), "fields": {}}
+    else:
+        malformed = next((candidate for candidate in nfo_candidates if candidate["present"]), None)
+        effective = {"present": False, "unusable": bool(malformed),
+                     "name": malformed.get("name") if malformed else None,
+                     "parse_error": malformed.get("parse_error") if malformed else None,
+                     "parse_line": malformed.get("parse_line") if malformed else None,
+                     "parse_column": malformed.get("parse_column") if malformed else None,
+                     "fields": {}}
     videos = sorted(str(path) for path in directory.iterdir()
                     if path.is_file() and path.suffix.casefold() in
                     {".mkv", ".mp4", ".avi", ".mov", ".m4v"}) if directory.is_dir() else []
@@ -194,10 +188,9 @@ def inspect_item(config, kind, identifier):
             "manifest_identities": identities,
             "ownership": {"status": "ambiguous" if ambiguous else "unambiguous",
                           "reason": "multiple movie NFO records share this directory" if ambiguous else None},
-            "nfo": {**(nfos[0] if len(nfos) == 1 else {
-                "present": any(x["present"] for x in nfos), "count": len(nfos)}),
-                "present": any(x["present"] for x in nfos) or bool(usable_candidates)},
+            "nfo": effective,
             "nfo_candidates": nfo_candidates,
+            "nfo_candidates_generation": nfo_generation,
             "nfos": nfos, "poster": {"present": bool(posters),
                                        "path": str(posters[0]) if posters else None,
                                        "candidates": [str(path) for path in posters]},
@@ -229,7 +222,9 @@ def list_artifacts(config, kind, status=None, missing=None, group_directories=Fa
         key, record, directory = entries[0]
         nfo = Path(record.get("nfo_path") or key) if kind == "movie" else directory / "show.nfo"
         posters = _poster_candidates(directory, record.get("poster_path") if kind == "movie" else None)
-        presence = {"nfo": nfo.is_file(), "poster": bool(posters)}
+        selected_nfo, _, _ = first_indexable_nfo(directory) if kind == "movie" else (None, None, None)
+        presence = {"nfo": bool(selected_nfo) if kind == "movie" else nfo.is_file(),
+                    "poster": bool(posters)}
         if missing and presence[missing]:
             continue
         all_identities = (directory_members[directory]
@@ -311,7 +306,7 @@ def inventory(config):
     movie_directories = {_movie_directory(key, record) for key, record in movies.items()}
     return {
         "actors": {"total": len(actors), "local": local, "pending_unresolved": actor_counts["pending"], "ok": actor_counts["ok"], "failed": actor_counts["failed"], "error": actor_counts["error"]},
-        "movies": {"total": len(movies), "missing_nfo": sum(not Path(x.get("nfo_path", "")).is_file() for x in movies.values()), "missing_poster": sum(not _poster_candidates(directory) for directory in movie_directories), "unresolved": sum(x.get("status") == "unresolved" for x in movies.values()), "failed": sum(x.get("status") in ("failed", "error") for x in movies.values())},
+        "movies": {"total": len(movies), "missing_nfo": sum(not first_indexable_nfo(_movie_directory(key, value))[0] for key, value in movies.items()), "missing_poster": sum(not _poster_candidates(directory) for directory in movie_directories), "unresolved": sum(x.get("status") == "unresolved" for x in movies.values()), "failed": sum(x.get("status") in ("failed", "error") for x in movies.values())},
         "tv": {"total": len(shows),
                "missing_nfo": sum(not (Path(key) / "show.nfo").is_file()
                                   for key in shows),
