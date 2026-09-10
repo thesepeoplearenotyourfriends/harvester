@@ -524,6 +524,10 @@ if (identityless.liveProcessed !== 1 || identityless.activity !== 'Broken row') 
         self.assertNotIn('#apply-item, #discard-item', page.split('querySelectorAll("#scan-all', 1)[1].split(')', 1)[0])
         self.assertIn('runBulk("bulk.item", { workflow, scope, index }', page)
         self.assertIn("job.seenOwners.has(owner)", page)
+        self.assertNotIn("state.bulk.drawerOpen = true", page)
+        self.assertNotIn("await openWorkflow(workflow)", page)
+        self.assertIn('#query-title { width: min(40ch, 100%); }',
+                      (harvester_ui.PROJECT_DIR / "css" / "my.css").read_text(encoding="utf-8"))
 
     def test_candidate_click_supplies_frozen_row_and_issues_semantic_request(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
@@ -534,7 +538,8 @@ if (identityless.liveProcessed !== 1 || identityless.activity !== 'Broken row') 
 let captured;
 async function runBulk(...args) {{ captured = args; }}
 async function openInbox() {{}}
-const state = {{inbox: {{items: []}}}};
+const state = {{workflow: 'inbox', generation: 3, selectionGeneration: 4,
+               inbox: {{items: []}}}};
 function selectInboxItem() {{}}
 {function}
 (async () => {{
@@ -544,6 +549,26 @@ function selectInboxItem() {{}}
   if (captured[1].candidate_index !== 2 || captured[4][0].identifier !== 'movie.nfo') process.exit(2);
   if (state.inbox.items.length !== 0) process.exit(3);
 }})().catch(() => process.exit(3));
+"""
+        subprocess.run(["node", "-e", script], check=True)
+
+    def test_candidate_completion_does_not_steal_focus_after_navigation(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        start = page.index("async function selectCandidate")
+        end = page.index("\n      function bindInboxImage", start)
+        function = page[start:end]
+        script = f"""
+let reopened = false;
+const state = {{workflow: 'inbox', generation: 3, selectionGeneration: 4,
+               inbox: {{items: []}}}};
+async function runBulk() {{ state.workflow = 'search'; state.generation++; }}
+async function openInbox() {{ reopened = true; }}
+function selectInboxItem() {{}}
+{function}
+(async () => {{
+  await selectCandidate({{item_id:'stable', display_title:'Movie', identities:['movie.nfo']}}, 0);
+  if (reopened || state.workflow !== 'search') process.exit(1);
+}})().catch(() => process.exit(2));
 """
         subprocess.run(["node", "-e", script], check=True)
 
@@ -614,7 +639,8 @@ function selectInboxItem() {{}}
         script = f"""
 let selected = -1;
 async function runBulk() {{}}
-const state = {{inbox: {{items: []}}}};
+const state = {{workflow: 'inbox', generation: 3, selectionGeneration: 4,
+               inbox: {{items: []}}}};
 async function openInbox() {{ state.inbox.items = [{{item_id:'stable'}}]; }}
 function selectInboxItem(index) {{ selected = index; }}
 {function}

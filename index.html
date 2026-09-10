@@ -456,7 +456,6 @@
           status: rows.length ? "running" : "complete",
           message: rows.length ? "Working…" : "Nothing to process",
         };
-        state.bulk.drawerOpen = true;
         setWriterControls();
         renderBulkPresentations();
         if (!rows.length) return;
@@ -473,11 +472,6 @@
         }
         setWriterControls();
         renderBulkPresentations();
-        if (selectedIndex !== null && state.workflow === workflow) {
-          await refreshInventory();
-          await openWorkflow(workflow);
-          if (state.rows.length) selectRow(Math.min(selectedIndex, state.rows.length - 1));
-        }
       }
       function updateBulkEvent(event) {
         const job = state.bulk.job;
@@ -563,6 +557,7 @@
         document.querySelector("#discard-all").onclick = () => inboxBatch("inbox.discard_all");
       }
       async function selectInboxItem(index) {
+        state.selectionGeneration++;
         const summary = state.inbox.items[index];
         const item = await App.request("inbox.get", { item_id: summary.item_id }, true);
         summary.seen = true;
@@ -587,9 +582,11 @@
         await refreshInboxSummary();
       }
       async function selectCandidate(item, candidateIndex) {
+        const generation = state.generation, selectionGeneration = state.selectionGeneration;
         const rows = [{ grouped: item.identities.length > 1,
           manifest_identities: item.identities, identifier: item.identities[0] }];
         await runBulk("inbox.select_candidate", { item_id: item.item_id, candidate_index: candidateIndex }, `${item.display_title}: selected result`, null, rows);
+        if (state.workflow !== "inbox" || generation !== state.generation || selectionGeneration !== state.selectionGeneration) return;
         await openInbox();
         const index = state.inbox.items.findIndex((candidate) => candidate.item_id === item.item_id);
         if (index >= 0) selectInboxItem(index);
@@ -612,6 +609,7 @@
         zone.ondrop = (event) => { event.preventDefault(); zone.classList.remove("drag"); if (event.dataTransfer.files[0]) prepare(event.dataTransfer.files[0]); };
       }
       async function retryInboxItem(item, kind) {
+        const generation = state.generation, selectionGeneration = state.selectionGeneration;
         const query = kind === "actor"
           ? { name: document.querySelector("#query-name").value }
           : { title: document.querySelector("#query-title").value,
@@ -623,6 +621,7 @@
           [{ grouped: item.identities.length > 1,
              manifest_identities: item.identities,
              identifier: item.identities[0] }]);
+        if (state.workflow !== "inbox" || generation !== state.generation || selectionGeneration !== state.selectionGeneration) return;
         await openInbox();
         const index = state.inbox.items.findIndex((candidate) => candidate.item_id === item.item_id);
         if (index >= 0) selectInboxItem(index);

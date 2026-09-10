@@ -434,7 +434,10 @@ class MachineApiMovieTests(unittest.TestCase):
         for filename, expected_title, expected_year in (
                 ("Don't.Worry.Darling.2022.1080p.mkv", "Don't Worry Darling", 2022),
                 ("Megalopolis.2024.10bit.mkv", "Megalopolis", 2024),
-                ("1922 - 2017.720p.mkv", "1922", 2017)):
+                ("1922 - 2017.720p.mkv", "", 1922),
+                ("Drive_().avi", "Drive", None),
+                ("Willy-Wonka_&_The.Chocolate.Factory.[1971].mkv",
+                 "Willy Wonka & The Chocolate Factory", 1971)):
             with self.subTest(filename=filename):
                 root = Path(self.temp.name) / ("query-" + str(expected_year))
                 folder = root / "Movie"
