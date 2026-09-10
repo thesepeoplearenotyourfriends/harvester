@@ -223,6 +223,12 @@ def _migrate_inbox_item(inbox, old, old_identity, new_identity):
 
 
 def list_inbox(config):
+    """Return lightweight manifest summaries without consulting media state.
+
+    Listing drives badges and navigation and can happen frequently.  Full
+    provenance belongs at the inspect/apply boundary; loading all three durable
+    databases for every row made this otherwise local directory scan costly.
+    """
     root = _prepared_root(config) / "inbox"
     if not root.is_dir() or root.is_symlink():
         return []
@@ -232,20 +238,15 @@ def list_inbox(config):
             if path.parent.is_symlink() or path.is_symlink():
                 continue
             value = json.loads(path.read_text(encoding="utf-8"))
-            if value.get("version") == 2 and value.get("state") in ("ready", "needs_attention"):
-                try:
-                    value = get_inbox_item(config, path.parent.name)
-                except (KeyError, ValueError) as error:
-                    value.update({"state": "needs_attention", "kind": None,
-                                  "reason": str(error)})
-                    save_json_atomic(path, value)
+            if (value.get("version") == 2 and value.get("item_id") == path.parent.name
+                    and value.get("state") in ("ready", "needs_attention")):
                 items.append(value)
         except (OSError, ValueError):
             continue
     return items
 
 
-def get_inbox_item(config, item_id, *, mark_seen=False):
+def get_inbox_item(config, item_id, *, mark_seen=False, provenance_records=None):
     if not isinstance(item_id, str) or len(item_id) != 32 or any(c not in "0123456789abcdef" for c in item_id):
         raise ValueError("invalid Bulk Inbox item id")
     path = _prepared_root(config) / "inbox" / item_id / "manifest.json"
@@ -256,24 +257,29 @@ def get_inbox_item(config, item_id, *, mark_seen=False):
         raise ValueError("invalid Bulk Inbox manifest")
     kind = value.get("kind")
     if kind not in {"actor", "movie", "show"}:
-        kind = _recover_manifest_kind(config, value)
+        kind = _recover_manifest_kind(config, value, provenance_records)
         if kind is None:
             raise ValueError("Bulk Inbox item has no authoritative media kind")
         value["kind"] = kind
         save_json_atomic(path, value)
-    _validate_manifest_provenance(config, value)
+    _validate_manifest_provenance(config, value, provenance_records)
     if mark_seen and not value.get("seen"):
         value["seen"] = True
         save_json_atomic(path, value)
     return value
 
 
-def _recover_manifest_kind(config, manifest):
+def _recover_manifest_kind(config, manifest, provenance_records=None):
     """Migrate old manifests only when one durable authority proves their kind."""
     from .api import records
     identities = manifest.get("identities") or []
-    matches = [kind for kind in ("actor", "movie", "show")
-               if identities and all(identity in records(config, kind) for identity in identities)]
+    cached = provenance_records if provenance_records is not None else {}
+    matches = []
+    for kind in ("actor", "movie", "show"):
+        if kind not in cached:
+            cached[kind] = records(config, kind)
+        if identities and all(identity in cached[kind] for identity in identities):
+            matches.append(kind)
     paths = [manifest.get("local_target"),
              *(action.get("path") for action in manifest.get("actions", [])
                if isinstance(action, dict))]
@@ -289,11 +295,10 @@ def _recover_manifest_kind(config, manifest):
     return matches[0] if len(matches) == 1 else None
 
 
-def _validate_manifest_provenance(config, manifest):
-    from .api import records
+def _validate_manifest_provenance(config, manifest, provenance_records=None):
     kind = manifest["kind"]
     identities = manifest.get("identities") or []
-    proven = _recover_manifest_kind(config, manifest)
+    proven = _recover_manifest_kind(config, manifest, provenance_records)
     if proven != kind:
         raise ValueError(f'Bulk Inbox {kind} item conflicts with authoritative provenance')
 
@@ -304,9 +309,9 @@ def _inside_library(config, path):
                for root in (config.movie_root, config.tv_root))
 
 
-def apply_inbox_item(config, item_id):
+def apply_inbox_item(config, item_id, *, provenance_records=None):
     """Validate and apply frozen bytes without constructing a provider client."""
-    manifest = get_inbox_item(config, item_id)
+    manifest = get_inbox_item(config, item_id, provenance_records=provenance_records)
     if manifest["state"] != "ready":
         raise ValueError("Bulk Inbox item is not ready to apply")
     root = _prepared_root(config) / "inbox" / item_id

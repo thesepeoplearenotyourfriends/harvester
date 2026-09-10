@@ -604,7 +604,7 @@ async function runBulk() {{}}
         function = page[start:end]
         script = f"""
 let selected = false, shownError = false;
-const input = {{value: 'https://example.test/poster.png'}}, button = {{}};
+const input = {{value: 'https://example.test/poster.png', addEventListener() {{}}}}, button = {{}};
 const document = {{querySelector(selector) {{
   if (selector === '#inbox-image-url') return input;
   if (selector === '#use-inbox-image-url') return button;
@@ -656,9 +656,10 @@ function showError() {{ errors++; }}
     def test_bulk_buttons_and_all_durable_inbox_outcomes_are_themed(self):
         css = (harvester_ui.PROJECT_DIR / "css" / "my.css").read_text(encoding="utf-8")
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
-        shared_rule = re.search(r"\.dialog-actions button,.*?\{[^}]+\}", css, re.DOTALL).group(0)
-        self.assertIn(".bulk-content button", shared_rule)
-        self.assertIn(".bulk-empty button", shared_rule)
+        shared_rule = re.search(r"button\s*\{[^}]+background: #41423c;[^}]+\}",
+                                css, re.DOTALL).group(0)
+        self.assertIn("border: 1px solid #626558", shared_rule)
+        self.assertIn("color: var(--text)", shared_rule)
         self.assertRegex(css, r"#close-bulk\s*\{\s*font-size: 16px")
         for outcome, marker in (("ready", "🟢"), ("partial", "🟡"), ("failure", "⚠")):
             self.assertIn(f'{outcome}: "{marker}"', page)
@@ -727,6 +728,46 @@ function showError() {{ errors++; }}
             self.assertEqual(item["state"], "ready")
             self.assertIn("show.nfo", [Path(action["path"]).name for action in item["actions"]])
             self.assertEqual(provider.get.call_args.args[0], "/series/202/extended")
+
+    def test_candidate_selection_is_driven_by_kind_not_workflow_name(self):
+        from harvester_core.artifacts import RecordingCommitter, persist_preparation
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); folder = movies / "Movie"; folder.mkdir()
+            identity = str(folder / "movie.nfo")
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"movies": {
+                identity: {"status": "unresolved", "local_target": identity}}})
+            plan = persist_preparation(
+                config, "future-repair-operation", [identity], RecordingCommitter(),
+                kind="movie", summary={"provider_results": [{"candidates": [
+                    {"id": 404, "title": "Movie"}]}]})
+            with mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                    mock.patch.object(harvester_ui, "CACHE_DIR", root / ".cache" / "ui"), \
+                    mock.patch("harvester_core.config.load_config", return_value=config):
+                argv = harvester_ui.action_argv("inbox.select_candidate", {
+                    "item_id": plan["plan_id"], "candidate_index": 0})
+            self.assertEqual(argv[3:5], ["bulk", "future-repair-operation"])
+            record = json.loads(config.state_path("movie_manifest_tmdb.json").read_text())
+            self.assertEqual(record["movies"][identity]["query_override"], {"tmdb_id": 404})
+
+    def test_failed_bulk_status_does_not_claim_finished(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        start = page.index("function bulkMarkup")
+        end = page.index("\n      function renderBulkPresentations", start)
+        function = page[start:end]
+        script = f"""
+const state = {{bulk: {{job: {{status: 'failed', processed: null, counts: {{}},
+  title: 'Repair', message: 'Provider failed'}}, drawerOpen: true}},
+  inbox: {{unseen: 0, ready: 0, attention: 1, applied: 0}}}};
+function esc(value) {{ return String(value); }}
+{function}
+const markup = bulkMarkup(true);
+if (markup.includes('failed</strong> · Finished') || !markup.includes('failed</strong>'))
+  process.exit(1);
+"""
+        subprocess.run(["node", "-e", script], check=True)
 
     def test_candidate_selection_reselects_stable_item_and_merges_inferred_query(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")

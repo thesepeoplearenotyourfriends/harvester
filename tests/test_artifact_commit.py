@@ -4,6 +4,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from harvester_core.artifacts import (RecordingCommitter, apply_inbox_item,
                                       discard_inbox_item, get_inbox_item,
@@ -143,6 +144,34 @@ class ArtifactCommitSeamTests(unittest.TestCase):
         items = list_inbox(self.config)
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["identities"], ["first.nfo", "second.nfo"])
+
+    def test_inbox_listing_does_not_load_provenance_databases(self):
+        recorder = RecordingCommitter()
+        recorder.write(self.movies / "Movie" / "poster.jpg", b"poster")
+        persist_preparation(self.config, "missing-posters", ["movie"], recorder)
+        with mock.patch("harvester_core.api.records",
+                        side_effect=AssertionError("listing loaded durable state")):
+            self.assertEqual(len(list_inbox(self.config)), 1)
+
+    def test_multiple_applies_share_loaded_provenance_databases(self):
+        plans = []
+        for name in ("One", "Two", "Three"):
+            recorder = RecordingCommitter()
+            recorder.write(self.movies / name / "poster.jpg", name.encode())
+            plans.append(persist_preparation(
+                self.config, "missing-posters", [name], recorder,
+                logical_identity=name, kind="movie"))
+        from harvester_core import api
+        real_records = api.records
+        calls = []
+        cache = {}
+        with mock.patch("harvester_core.api.records",
+                        side_effect=lambda config, kind: (
+                            calls.append(kind) or real_records(config, kind))):
+            for plan in plans:
+                apply_inbox_item(self.config, plan["plan_id"],
+                                 provenance_records=cache)
+        self.assertEqual(calls, ["actor", "movie", "show"])
 
     def test_manifest_kind_is_provenance_not_workflow_name(self):
         movie = self.movies / "Movie" / "movie.nfo"
