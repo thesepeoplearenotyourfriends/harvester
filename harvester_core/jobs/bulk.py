@@ -71,10 +71,26 @@ def load_scope_items(config, workflow, scope_file, generation, count):
             row.get("identifier") or row.get("name") or row.get("local_target")]
         identities = list(dict.fromkeys(value for value in candidates
                                         if isinstance(value, str) and value))
+        kind = row.get("kind")
+        if kind not in {"actor", "movie", "show"}:
+            raise ValueError("frozen Bulk row has no authoritative kind")
+        authoritative = []
+        for identity in identities:
+            try:
+                authoritative.append(get_record(config, kind, identity))
+            except KeyError as error:
+                raise ValueError(f"frozen {kind} row conflicts with authoritative records") from error
+        local_target = row.get("local_target")
+        if local_target and kind in {"movie", "show"}:
+            targets = {str(record.get("local_target")) for record in authoritative}
+            if kind == "movie":
+                targets |= {str(Path(target).parent) for target in targets}
+            if str(local_target) not in targets:
+                raise ValueError(f"frozen {kind} row local target conflicts with authoritative records")
         grouped.append({"identities": identities, "display_title":
                         row.get("display_name") or row.get("label") or row.get("name") or
                         row.get("local_target") or (identities[0] if identities else "Item"),
-                        "local_target": row.get("local_target")})
+                        "local_target": row.get("local_target"), "kind": kind})
     return grouped
 
 
@@ -115,7 +131,7 @@ def _item_result(identities, *results, message="Finished"):
     return combined
 
 
-def _finish(config, workflow, identities, recorder, result, attention=0):
+def _finish(config, workflow, kind, identities, recorder, result, attention=0):
     # Scanner summaries may describe the entire durable provider manifest. Only
     # explicit failures from this item's own recipe are safe to classify here;
     # run_scoped resolves provider-record outcome after loading this row alone.
@@ -126,7 +142,7 @@ def _finish(config, workflow, identities, recorder, result, attention=0):
         local_target=result.pop("_local_target", None), summary={
             "counts": result.get("counts", {}), "message": result.get("message")},
         reason=result.get("message") if state == "needs_attention" else None,
-        logical_identity=result.pop("_logical_identity", None),
+        logical_identity=result.pop("_logical_identity", None), kind=kind,
         requested_artifacts={"missing-actor-images": ["actor_image"],
                              "lost-found": ["nfo"], "missing-posters": ["poster"],
                              "missing-tv-nfo": ["nfo"],
@@ -144,12 +160,11 @@ def _finish(config, workflow, identities, recorder, result, attention=0):
     return result
 
 
-def _scoped_record_outcome(workflow, identities, records):
+def _scoped_record_outcome(kind, identities, records):
     """Classify only provider records owned by one frozen logical row."""
     successful = {"actor": {"ok"}, "movie": {"ok"}, "show": {"matched"}}
-    kind = "actor" if "actor" in workflow else "show" if workflow in {
-        "unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors", "missing-tv-nfo",
-        "missing-tv-posters"} else "movie"
+    if kind not in successful:
+        return True, "Frozen row has no authoritative media kind"
     if identities and len(records) != len(identities):
         return True, "Scoped provider record is missing"
     for record in records:
@@ -199,10 +214,17 @@ def _scoped_artifact_outcome(workflow, result):
     return False, None
 
 
-def run(config, workflow, identities, reporter=None):
+def run(config, workflow, kind, identities, reporter=None):
     """Run the allowlisted recipe while preserving pre-existing artifacts."""
     if workflow not in WORKFLOWS:
         raise ValueError("unknown Bulk workflow")
+    if kind not in {"actor", "movie", "show"}:
+        raise ValueError("Bulk recipe requires an authoritative kind")
+    for identity in identities:
+        try:
+            get_record(config, kind, identity)
+        except KeyError as error:
+            raise ValueError(f"Bulk {kind} identity conflicts with authoritative records") from error
     recorder = RecordingCommitter()
     if workflow == "missing-actor-images":
         from .movie_actor_scan import run as scan
@@ -225,7 +247,7 @@ def run(config, workflow, identities, reporter=None):
                    fetch(config, reporter, retry_failed=True, overwrite=False,
                          targets=available, transport=transport, committer=recorder))
         fetched.setdefault("counts", {})["unresolved_source"] = unresolved
-        return _finish(config, workflow, identities, recorder,
+        return _finish(config, workflow, kind, identities, recorder,
                        _item_result(identities, ("identity", scanned), ("image", fetched)),
                        unresolved)
     if workflow == "failed-actors":
@@ -235,7 +257,7 @@ def run(config, workflow, identities, reporter=None):
         transport = transport_from_config(config)
         provider = TMDBClient(config.tmdb_api_key, config.tmdb_bearer_token,
                               config.state_path("tmdb_api_cache.json"), transport)
-        return _finish(config, workflow, identities, recorder, _item_result(
+        return _finish(config, workflow, kind, identities, recorder, _item_result(
             identities, ("identity", scan(config, provider, reporter, refresh=True,
                                             retry_failed=True, targets=identities))))
     if workflow in {"lost-found", "unresolved-movies", "failed-movies"}:
@@ -258,7 +280,7 @@ def run(config, workflow, identities, reporter=None):
                 record.get("nfo_path") or record.get("local_target", "")).parent)[0]
             for record in records)
         if not should_prepare_nfo:
-            return _finish(config, workflow, identities, recorder,
+            return _finish(config, workflow, kind, identities, recorder,
                            _item_result(identities, ("identity", scanned)))
         from .movie_materialize import run as materialize
         written = materialize(config, reporter, overwrite_nfo=False, overwrite_poster=False,
@@ -266,7 +288,7 @@ def run(config, workflow, identities, reporter=None):
                               write_poster=False, committer=recorder,
                               replace_nfo_targets={record["local_target"]
                                                    for record in unusable})
-        return _finish(config, workflow, identities, recorder,
+        return _finish(config, workflow, kind, identities, recorder,
                        _item_result(identities, ("identity", scanned), ("nfo", written)))
     if workflow == "missing-posters":
         from .movie_materialize import run as materialize
@@ -284,7 +306,7 @@ def run(config, workflow, identities, reporter=None):
                    else "Finished")
         combined = _item_result(identities, ("poster", result), message=message)
         combined["ok"] = not unresolved
-        return _finish(config, workflow, identities, recorder, combined, unresolved)
+        return _finish(config, workflow, kind, identities, recorder, combined, unresolved)
     from .tv_scan import run as scan
     from ..providers.tvdb import TVDBClient
     from ..transport import transport_from_config
@@ -315,7 +337,7 @@ def run(config, workflow, identities, reporter=None):
                                write_actors=False, overwrite_nfo=False,
                                overwrite_poster=False, committer=recorder)
         results.append(("nfo" if write_nfo else "poster", prepared))
-    return _finish(config, workflow, identities, recorder,
+    return _finish(config, workflow, kind, identities, recorder,
                    _item_result(identities, *results))
 
 
@@ -329,14 +351,16 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
     if not isinstance(logical_count, int) or logical_count < 0:
         raise ValueError("invalid logical Bulk scope count")
     if items and not isinstance(items[0], dict):
-        items = [{"identities": list(items), "display_title": str(items[0]),
-                  "local_target": None}]
+        raise ValueError("scoped Bulk items must carry an authoritative kind")
     counts = Counter()
     preparations = []
     all_identities = []
     ok = True
     for row_index, item in enumerate(items):
         identities = item["identities"]
+        kind = item.get("kind")
+        if kind not in {"actor", "movie", "show"}:
+            raise ValueError("scoped Bulk item has no authoritative kind")
         all_identities.extend(identities)
         # Empty/invalid rows are still durable review outcomes rather than
         # silently disappearing from the acquisition result.
@@ -347,17 +371,17 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
                       "_display_title": item.get("display_title"),
                       "_local_target": item.get("local_target"),
                       "_logical_identity": item.get("local_target") or item.get("display_title")}
-            result = _finish(config, workflow, identities, recorder, result, 1)
+            result = _finish(config, workflow, kind, identities, recorder, result, 1)
         else:
             try:
-                result = run(config, workflow, identities, reporter)
+                result = run(config, workflow, kind, identities, reporter)
             except Exception as error:
                 recorder = RecordingCommitter()
                 result = {"processed": len(identities), "counts": {"producer_error": 1},
                           "ok": False, "message": str(error),
                           "_display_title": item.get("display_title"),
                           "_local_target": item.get("local_target")}
-                result = _finish(config, workflow, identities, recorder, result, 1)
+                result = _finish(config, workflow, kind, identities, recorder, result, 1)
         plan = result.get("preparation") or {}
         if plan.get("plan_id"):
             manifest_path = (config.app_dir / ".cache" / "bulk" / "inbox" /
@@ -369,9 +393,6 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
                                    "artifact_results": result.get("phase_results", {}),
                                    "message": result.get("message")}
             records = []
-            kind = "actor" if "actor" in workflow else "show" if workflow in {
-                "unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors", "missing-tv-nfo",
-                "missing-tv-posters"} else "movie"
             for identity in identities:
                 try:
                     records.append(get_record(config, kind, identity))
@@ -395,7 +416,7 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
                 else:
                     manifest["query"].pop("override", None)
             record_attention, record_reason = _scoped_record_outcome(
-                workflow, identities, records)
+                kind, identities, records)
             artifact_attention, artifact_reason = _scoped_artifact_outcome(workflow, result)
             if artifact_attention and manifest["state"] == "ready":
                 manifest["state"] = "needs_attention"

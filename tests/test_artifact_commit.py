@@ -144,6 +144,34 @@ class ArtifactCommitSeamTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["identities"], ["first.nfo", "second.nfo"])
 
+    def test_manifest_kind_is_provenance_not_workflow_name(self):
+        movie = self.movies / "Movie" / "movie.nfo"
+        show = self.tv / "Show"
+        movie.parent.mkdir(); show.mkdir()
+        save_json_atomic(self.config.state_path("movie_manifest_tmdb.json"),
+                         {"movies": {str(movie): {"local_target": str(movie)}}})
+        save_json_atomic(self.config.state_path("tv_show_urls_tvdb.json"),
+                         {"shows": {str(show): {"local_target": str(show)}}})
+        movie_plan = persist_preparation(self.config, "future-workflow", [str(movie)],
+                                         RecordingCommitter(), kind="movie",
+                                         local_target=str(movie))
+        show_plan = persist_preparation(self.config, "unexpected-spelling", [str(show)],
+                                        RecordingCommitter(), kind="show",
+                                        local_target=str(show))
+        self.assertEqual(get_inbox_item(self.config, movie_plan["plan_id"])["kind"], "movie")
+        self.assertEqual(get_inbox_item(self.config, show_plan["plan_id"])["kind"], "show")
+
+        manifest_path = (self.root / ".cache" / "bulk" / "inbox" /
+                         show_plan["plan_id"] / "manifest.json")
+        legacy = json.loads(manifest_path.read_text()); legacy.pop("kind")
+        manifest_path.write_text(json.dumps(legacy))
+        self.assertEqual(get_inbox_item(self.config, show_plan["plan_id"])["kind"], "show")
+        with self.assertRaisesRegex(ValueError, "authoritative provenance"):
+            persist_preparation(self.config, "anything", [str(show)], RecordingCommitter(),
+                                kind="movie", local_target=str(show))
+        with self.assertRaisesRegex(ValueError, "authoritative kind"):
+            persist_preparation(self.config, "anything", ["unknown"], RecordingCommitter())
+
     def test_apply_is_offline_and_discard_never_mutates_media(self):
         target = self.movies / "Movie" / "movie.nfo"
         target.parent.mkdir()
@@ -193,9 +221,9 @@ class ArtifactCommitSeamTests(unittest.TestCase):
     def test_apply_rejects_escape_and_tampered_blob(self):
         outside = self.root / "outside"
         recorder = RecordingCommitter(); recorder.write(outside, b"escape")
-        plan = persist_preparation(self.config, "lost-found", ["escape"], recorder)
-        with self.assertRaisesRegex(ValueError, "outside configured"):
-            apply_inbox_item(self.config, plan["plan_id"])
+        with self.assertRaisesRegex(ValueError, "authoritative provenance"):
+            persist_preparation(self.config, "lost-found", ["escape"], recorder,
+                                kind="movie")
         self.assertFalse(outside.exists())
 
         target = self.movies / "Movie" / "poster.jpg"; target.parent.mkdir(exist_ok=True)

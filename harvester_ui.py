@@ -183,7 +183,7 @@ def _item_refetch(data):
     workflow = {"actor": "missing-actor-images", "movie": "unresolved-movies",
                 "show": "tv-errors"}[data["kind"]]
     row = {"identifier": identity, "display_name": data["identifier"],
-           "local_target": record.get("local_target")}
+           "local_target": record.get("local_target"), "kind": data["kind"]}
     generation = hashlib.sha256(json.dumps(
         [row], ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
     ).encode("utf-8")).hexdigest()[:20]
@@ -213,9 +213,9 @@ def _inbox_retry(data):
     from harvester_core.config import load_config
     config = load_config(app_dir=PROJECT_DIR)
     item = get_inbox_item(config, data["item_id"])
-    kind = "actor" if "actor" in item["workflow"] else "show" if item["workflow"] in {
-        "unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors", "missing-tv-nfo",
-        "missing-tv-posters"} else "movie"
+    kind = item.get("kind")
+    if kind not in {"actor", "movie", "show"}:
+        raise BridgeError("Inbox item has no authoritative media kind")
     query = data["query"]
     valid_keys = (set(query) == {"name"} if kind == "actor" else
                   "title" in query and set(query) <= {"title", "year"})
@@ -260,7 +260,8 @@ def _prepare_inbox_rerun(config, item, kind, override):
     row = {"grouped": len(item["identities"]) > 1,
            "manifest_identities": item["identities"],
            "identifier": item["identities"][0] if item["identities"] else None,
-           "display_name": item["display_title"], "local_target": item.get("local_target")}
+           "display_name": item["display_title"], "local_target": item.get("local_target"),
+           "kind": kind}
     generation = hashlib.sha256(json.dumps(
         [row], ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
     ).encode("utf-8")).hexdigest()[:20]
@@ -283,19 +284,20 @@ def _inbox_candidate(data):
     from harvester_core.config import load_config
     config = load_config(app_dir=PROJECT_DIR)
     item = get_inbox_item(config, data["item_id"])
-    movie_workflows = {"lost-found", "unresolved-movies", "failed-movies"}
-    tv_workflows = {"unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors"}
-    if item["workflow"] not in movie_workflows | tv_workflows:
+    if item["workflow"] not in {"lost-found", "unresolved-movies", "failed-movies",
+                                "unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors"}:
         raise BridgeError("candidate selection is unavailable for this Inbox workflow")
     try:
         candidate = item["summary"]["provider_results"][0]["candidates"][data["candidate_index"]]
     except (KeyError, IndexError, TypeError) as error:
         raise BridgeError("candidate index is not present in the frozen Inbox item") from error
-    identity_key = "tmdb_id" if item["workflow"] in movie_workflows else "tvdb_id"
+    kind = item.get("kind")
+    if kind not in {"movie", "show"}:
+        raise BridgeError("candidate Inbox item has no authoritative movie/show kind")
+    identity_key = "tmdb_id" if kind == "movie" else "tvdb_id"
     provider_id = candidate.get("id" if identity_key == "tmdb_id" else "tvdb_id")
     if not isinstance(provider_id, int) or isinstance(provider_id, bool) or provider_id <= 0:
         raise BridgeError(f"frozen candidate has no usable {identity_key[:-3].upper()} identity")
-    kind = "movie" if identity_key == "tmdb_id" else "show"
     return _prepare_inbox_rerun(config, item, kind, {identity_key: provider_id})
 
 
@@ -469,6 +471,7 @@ def prepare_item_image(data):
     previous = next((item for item in list_inbox(config)
                      if item.get("workflow") == workflow and item.get("identities") == [identity]), None)
     plan = persist_preparation(config, workflow, [identity], RecordingCommitter(),
+                               kind=kind,
                                display_title=data["identifier"],
                                local_target=record.get("local_target"),
                                summary={"outcome": "ready", "message": "Manual image prepared"},
@@ -565,7 +568,7 @@ def _prepare_nfo_bytes(config, kind, identifier, record, detail, source, replace
     if previous:
         workflow = previous["workflow"]
     plan = persist_preparation(
-        config, workflow, [identity], RecordingCommitter(), display_title=identifier,
+        config, workflow, [identity], RecordingCommitter(), kind=kind, display_title=identifier,
         local_target=record.get("local_target"),
         summary={"outcome": "ready", "message": "NFO supplied manually"},
         requested_artifacts=["nfo"])
@@ -919,7 +922,7 @@ def run_inbox_action(action, data):
         if data:
             raise BridgeError("inbox.list does not accept arguments")
         return {"items": [{key: item.get(key) for key in
-                            ("item_id", "workflow", "identities", "display_title",
+                            ("item_id", "workflow", "kind", "identities", "display_title",
                              "state", "seen", "reason")}
                            for item in list_inbox(config)]}
     if action in ("inbox.apply_all", "inbox.discard_all"):
