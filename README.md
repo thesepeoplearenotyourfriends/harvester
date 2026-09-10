@@ -152,7 +152,25 @@ any missing collection file. A selected Search result is also the normal targete
 work surface: **Re-fetch this item** derives its allowlisted recipe from the durable
 record identity, while dropped movie/show posters and actor mugshots are normalized
 and stored as Inbox proposals. Both paths preserve existing library files until the
-user explicitly applies the resulting Inbox item.
+user explicitly applies the resulting Inbox item. Movie and show Search inspectors
+also enumerate bounded in-directory NFO candidates and accept chosen, dropped, or
+pasted UTF-8 XML. A valid existing movie NFO is adopted as the durable identity
+without copying or rewriting it; external movie NFOs and noncanonical TV NFOs remain
+exact-byte Inbox proposals until Apply, with replacement requiring explicit intent.
+**Copy NFO prompt** produces provider-free clipboard guidance from local facts and
+the tags emitted by Harvester's own movie or TV renderer.
+
+Movie filesystem classification deliberately matches Movies UI: sorted `.nfo`
+files are tried with `ElementTree.parse`, and the first parseable file is the usable
+consumer receipt regardless of root element or title. Every existing movie NFO still
+remains a distinct durable Harvester identity, so consumer selection never collapses
+ownership or assigns a shared poster ambiguously. Parse failures remain visible as Lost &
+Found attention and are never overwritten automatically. This consumer-compatibility
+classification is separate from manual intake, which continues to require safe UTF-8,
+the kind-specific root, and a title. Search candidate actions carry a content-bound
+token plus a candidate-set generation; directory changes require refreshing before
+selection can proceed. Symlinked NFOs participate in consumer classification, matching
+Movies UI, but Harvester refuses to adopt them as writable durable identities.
 
 ## Changelog
 

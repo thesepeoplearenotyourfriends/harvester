@@ -12,7 +12,7 @@ from harvester_core.jobs.movie_scan import run as scan
 from harvester_core.jobs.movie_scan import discover_movies
 from harvester_core.jobs.tv_materialize import run as materialize_tv
 from harvester_core.providers.profiles import profiles
-from harvester_core.rescan import rescan
+from harvester_core.rescan import rescan, rescan_movies
 from harvester_core.storage import load_json, save_json_atomic
 from harvester_core.api import inspect_item, list_artifacts
 import harvester_core.api as machine_api
@@ -477,7 +477,7 @@ class MachineApiMovieTests(unittest.TestCase):
         saved = load_json(self.state / "movie_manifest_tmdb.json")["movies"][str(nfo.resolve())]
         self.assertEqual(saved["tries"], 2)
 
-    def test_one_poster_is_not_assigned_to_multiple_nfos(self):
+    def test_movies_ui_selection_does_not_collapse_durable_nfo_ownership(self):
         folder = self.movies / "Anthology"
         folder.mkdir()
         first = folder / "first.nfo"
@@ -486,8 +486,54 @@ class MachineApiMovieTests(unittest.TestCase):
         second.write_text("<movie><title>Second</title></movie>")
         (folder / "poster.jpg").write_bytes(b"poster")
         records = discover_movies(self.movies)
-        self.assertIsNone(records[str(first.resolve())]["poster_path"])
-        self.assertIsNone(records[str(second.resolve())]["poster_path"])
+        records = {key: record for key, record in records.items()
+                   if Path(key).parent == folder.resolve()}
+        self.assertEqual(set(records), {str(first.resolve()), str(second.resolve())})
+        self.assertTrue(all(record["movies_ui_selected_nfo"] == first.name
+                            for record in records.values()))
+        self.assertTrue(all(record["movies_ui_nfo_usable"] for record in records.values()))
+        self.assertTrue(all(record["poster_path"] is None for record in records.values()))
+        previous = {key: {**record, "tmdb_id": number,
+                          "query_override": {"title": f"Saved {number}"},
+                          "materialize": {"nfo": {"status": "exists"}}}
+                    for number, (key, record) in enumerate(records.items(), 1)}
+        save_json_atomic(self.state / "movie_manifest_tmdb.json", {"movies": previous})
+        rescan_movies(self.config, records)
+        rescanned = load_json(self.state / "movie_manifest_tmdb.json")["movies"]
+        self.assertEqual(set(rescanned), set(previous))
+        for key in previous:
+            self.assertEqual(rescanned[key]["tmdb_id"], previous[key]["tmdb_id"])
+            self.assertEqual(rescanned[key]["query_override"], previous[key]["query_override"])
+            self.assertEqual(rescanned[key]["materialize"], previous[key]["materialize"])
+
+    def test_movie_nfo_classification_matches_movies_ui_parse_rule(self):
+        fixtures = (
+            ("valid", [("one.nfo", b"<movie><title>Valid</title></movie>")], "one.nfo", True),
+            ("malformed", [("one.nfo", b"<movie>")], "one.nfo", False),
+            ("skip-bad", [("a.nfo", b"<movie>"),
+                          ("b.nfo", b"<movie><title>Valid</title></movie>")], "b.nfo", True),
+            ("other-root", [("one.nfo", b"<something><value>ok</value></something>")],
+             "one.nfo", True),
+        )
+        for name, files, selected, usable in fixtures:
+            with self.subTest(name=name):
+                root = Path(self.temp.name) / ("parity-" + name)
+                folder = root / "Movie"; folder.mkdir(parents=True)
+                for filename, content in files:
+                    (folder / filename).write_bytes(content)
+                records = discover_movies(root)
+                self.assertIn(str((folder / selected).resolve()), records)
+                record = records[str((folder / selected).resolve())]
+                self.assertEqual(record["movies_ui_nfo_usable"], usable)
+                self.assertEqual(record["movies_ui_selected_nfo"], selected if usable else None)
+                malformed = next((item for item in record["nfo_candidates"]
+                                  if item["name"] == "a.nfo" or
+                                  (name == "malformed" and item["name"] == "one.nfo")), None)
+                if malformed:
+                    self.assertFalse(malformed["parseable"])
+                    self.assertIsNotNone(malformed["parse_error"])
+                    self.assertIsInstance(malformed["parse_line"], int)
+                    self.assertIsInstance(malformed["parse_column"], int)
 
     def test_tvdb_profile_advertises_person_images(self):
         tvdb = next(item for item in profiles(self.config) if item["key"] == "tvdb")

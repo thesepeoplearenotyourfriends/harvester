@@ -66,7 +66,7 @@ def _list(kind):
         suffix = ["list", kind + "s", "--brief"]
         if kind in ("movie", "show"):
             suffix.append("--artifacts")
-        if kind == "movie" and data.get("missing") == "poster":
+        if kind == "movie" and data.get("missing") in {"poster", "nfo"}:
             suffix.append("--group-directories")
         for option in ("status", "missing"):
             if data.get(option):
@@ -170,10 +170,13 @@ def _item_refetch(data):
             {"actor", "movie", "show"} or not isinstance(data.get("identifier"), str)):
         raise BridgeError("item.refetch requires kind and trusted durable identifier")
     _identifier(data["kind"])({"identifier": data["identifier"]})
-    from harvester_core.api import get_record
+    from harvester_core.api import get_record_by_identity
     from harvester_core.config import load_config
     config = load_config(app_dir=PROJECT_DIR)
-    record = get_record(config, data["kind"], data["identifier"])
+    try:
+        record = get_record_by_identity(config, data["kind"], data["identifier"])
+    except KeyError as error:
+        raise BridgeError("item.refetch requires a Search record identifier") from error
     identity = record.get("name") if data["kind"] == "actor" else (
         record.get("nfo_path") or record.get("local_target") if data["kind"] == "movie"
         else record.get("local_target"))
@@ -315,6 +318,7 @@ ACTION_REGISTRY = {
     "inbox.discard": None, "inbox.apply_all": None, "inbox.discard_all": None,
     "actor.install_image": None, "inbox.install_image": None,
     "item.install_image": None,
+    "item.install_nfo": None, "item.adopt_nfo": None, "item.nfo_prompt": None,
     "preview.artifact": None,
 }
 BRIDGE_ACTIONS = frozenset({"__ping__", *ACTION_REGISTRY})
@@ -439,7 +443,7 @@ def prepare_item_image(data):
     if (";base64" not in header or len(source) > 512_000 or
             not source.startswith(b"\xff\xd8\xff")):
         raise BridgeError("manual item image must be a canonical JPEG up to 512 KB")
-    from harvester_core.api import get_record, inspect_item
+    from harvester_core.api import get_record_by_identity, inspect_item
     from harvester_core.artifacts import (RecordingCommitter, get_inbox_item, list_inbox,
                                           persist_preparation)
     from harvester_core.config import load_config
@@ -447,7 +451,10 @@ def prepare_item_image(data):
     from harvester_core.storage import save_json_atomic, write_bytes_atomic
     config = load_config(app_dir=PROJECT_DIR)
     kind = data["kind"]
-    record = get_record(config, kind, data["identifier"])
+    try:
+        record = get_record_by_identity(config, kind, data["identifier"])
+    except KeyError as error:
+        raise BridgeError("item.install_image requires a Search record identifier") from error
     if kind == "actor":
         identity = record["name"]
         target = config.movie_root / ".actors" / safe_actor_filename(identity)
@@ -479,10 +486,206 @@ def prepare_item_image(data):
     item["actions"] = [existing for existing in item["actions"] if not (
         existing.get("action") == "write" and Path(existing.get("path", "")) == target)]
     item["actions"].append(action)
-    item.update({"state": "ready", "reason": None})
-    item.setdefault("summary", {})["outcome"] = "ready"
+    image_artifact = "actor_image" if kind == "actor" else "poster"
+    requested = list(dict.fromkeys([*(previous or {}).get("requested_artifacts", []),
+                                    image_artifact]))
+    item["requested_artifacts"] = requested
+    unrelated_attention = (previous and previous.get("state") == "needs_attention" and
+                           (not previous.get("requested_artifacts") or any(
+                               artifact != image_artifact
+                               for artifact in previous.get("requested_artifacts", []))))
+    if unrelated_attention:
+        item.update({"state": "needs_attention", "reason": previous.get("reason")})
+    else:
+        item.update({"state": "ready", "reason": None})
+        item.setdefault("summary", {})["outcome"] = "ready"
     save_json_atomic(root / "manifest.json", item)
     return {"item_id": item["item_id"], "prepared": 1, "bytes": len(source)}
+
+
+MAX_NFO_BYTES = 1_000_000
+
+
+def _validated_nfo(kind, source):
+    """Validate untrusted NFO bytes while retaining their exact representation."""
+    import xml.etree.ElementTree as ET
+    if not source or len(source) > MAX_NFO_BYTES:
+        raise BridgeError("NFO must be between 1 byte and 1 MB")
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise BridgeError("NFO must be valid UTF-8") from error
+    folded = text.casefold()
+    if "<!doctype" in folded or "<!entity" in folded:
+        raise BridgeError("NFO declarations and entities are not allowed")
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as error:
+        raise BridgeError("NFO must contain one valid XML document") from error
+    expected = "movie" if kind == "movie" else "tvshow"
+    if root.tag != expected:
+        raise BridgeError(f"{kind} NFO root must be <{expected}>")
+    if not (root.findtext("title") or "").strip():
+        raise BridgeError("NFO requires a nonempty <title>")
+    return source
+
+
+def _nfo_context(data):
+    from harvester_core.api import get_record_by_identity, inspect_item
+    from harvester_core.config import load_config
+    config = load_config(app_dir=PROJECT_DIR)
+    try:
+        record = get_record_by_identity(config, data["kind"], data["identifier"])
+        detail = inspect_item(config, data["kind"], data["identifier"])
+    except KeyError as error:
+        raise BridgeError("NFO operation requires a Search record identifier") from error
+    return config, record, detail
+
+
+def _prepare_nfo_bytes(config, kind, identifier, record, detail, source, replace):
+    """Create an Inbox write for exact caller bytes and a host-owned target."""
+    from harvester_core.artifacts import (RecordingCommitter, get_inbox_item, list_inbox,
+                                          persist_preparation, _precondition)
+    from harvester_core.storage import save_json_atomic, write_bytes_atomic
+    source = _validated_nfo(kind, source)
+    identity = detail["selected_manifest_identity"]
+    target = (Path(record.get("nfo_path") or identity) if kind == "movie"
+              else Path(detail["directory"]) / "show.nfo")
+    if target.exists() and not replace:
+        raise BridgeError("NFO already exists; choose Replace Existing NFO to continue")
+    workflow = "unresolved-movies" if kind == "movie" else "tv-errors"
+    same_identity = [item for item in list_inbox(config)
+                     if item.get("identities") == [identity]]
+    nfo_work = [item for item in same_identity
+                if "nfo" in item.get("requested_artifacts", [])]
+    if len(nfo_work) > 1:
+        raise BridgeError("multiple NFO Inbox proposals require explicit review")
+    previous = (nfo_work[0] if len(nfo_work) == 1 else
+                same_identity[0] if len(same_identity) == 1 else None)
+    if previous:
+        workflow = previous["workflow"]
+    plan = persist_preparation(
+        config, workflow, [identity], RecordingCommitter(), display_title=identifier,
+        local_target=record.get("local_target"),
+        summary={"outcome": "ready", "message": "NFO supplied manually"},
+        requested_artifacts=["nfo"])
+    item = get_inbox_item(config, plan["plan_id"])
+    if previous:
+        item["actions"] = previous.get("actions", [])
+        item["summary"] = previous.get("summary", item["summary"])
+    root = config.app_dir / ".cache" / "bulk" / "inbox" / item["item_id"]
+    digest = hashlib.sha256(source).hexdigest()
+    write_bytes_atomic(root / "blobs" / digest, source)
+    item["actions"] = [action for action in item["actions"] if not (
+        action.get("action") == "write" and Path(action.get("path", "")) == target)]
+    item["actions"].append({"action": "write", "path": str(target),
+                            "precondition": _precondition(target),
+                            "blob": f"blobs/{digest}", "size": len(source), "sha256": digest})
+    item["requested_artifacts"] = list(dict.fromkeys(
+        [*(previous or {}).get("requested_artifacts", []), "nfo"]))
+    reason = str((previous or {}).get("reason") or "")
+    nfo_attention = (previous and previous.get("state") == "needs_attention" and
+                     "nfo" in previous.get("requested_artifacts", []) and
+                     "nfo" in reason.casefold())
+    unrelated = previous and previous.get("state") == "needs_attention" and not nfo_attention
+    if unrelated:
+        item.update({"state": "needs_attention", "reason": previous.get("reason")})
+    else:
+        item.update({"state": "ready", "reason": None})
+        item.setdefault("summary", {})["outcome"] = "ready"
+    save_json_atomic(root / "manifest.json", item)
+    return {"item_id": item["item_id"], "prepared": 1, "bytes": len(source)}
+
+
+def prepare_item_nfo(data):
+    """Prepare pasted/chosen NFO content without accepting filesystem paths."""
+    if (set(data) != {"kind", "identifier", "content_base64", "replace"} or
+            data.get("kind") not in {"movie", "show"} or
+            not isinstance(data.get("identifier"), str) or
+            not isinstance(data.get("content_base64"), str) or
+            not isinstance(data.get("replace"), bool)):
+        raise BridgeError("item.install_nfo requires kind, identifier, NFO bytes, and replace intent")
+    try:
+        source = base64.b64decode(data["content_base64"], validate=True)
+    except (ValueError, TypeError) as error:
+        raise BridgeError("invalid NFO data") from error
+    config, record, detail = _nfo_context(data)
+    return _prepare_nfo_bytes(config, data["kind"], data["identifier"], record, detail,
+                              source, data["replace"])
+
+
+def adopt_item_nfo(data):
+    """Resolve a bounded inspection candidate entirely on the host side."""
+    if (set(data) != {"kind", "identifier", "candidate_token", "candidate_generation", "replace"} or
+            data.get("kind") not in {"movie", "show"} or
+            not isinstance(data.get("identifier"), str) or
+            not isinstance(data.get("candidate_token"), str) or
+            not isinstance(data.get("candidate_generation"), str) or
+            not isinstance(data.get("replace"), bool)):
+        raise BridgeError("item.adopt_nfo requires a Search identity and candidate token")
+    config, record, detail = _nfo_context(data)
+    if detail.get("nfo_candidates_generation") != data["candidate_generation"]:
+        raise BridgeError("NFO candidates changed; refresh the item")
+    candidate = next((item for item in detail["nfo_candidates"]
+                      if item.get("token") == data["candidate_token"]), None)
+    if candidate is None:
+        raise BridgeError("NFO candidates changed; refresh the item")
+    if not candidate.get("usable"):
+        raise BridgeError("selected NFO candidate is unusable")
+    if candidate.get("symlink"):
+        raise BridgeError("refusing to adopt a symlinked NFO")
+    path = Path(detail["directory"]) / candidate["name"]
+    try:
+        source = path.read_bytes()
+    except OSError as error:
+        raise BridgeError("selected NFO is no longer available") from error
+    if data["kind"] == "movie":
+        from harvester_core.storage import load_json, save_json_atomic
+        manifest_path = config.state_path("movie_manifest_tmdb.json")
+        manifest = load_json(manifest_path, {})
+        movies = manifest.get("movies", {})
+        old_key = detail["selected_manifest_identity"]
+        if path.is_file() and path.parent == Path(detail["directory"]) and old_key in movies:
+            new_key = str(path)
+            if new_key != old_key and new_key in movies:
+                raise BridgeError("selected NFO already belongs to another durable movie record")
+            migrated = movies.pop(old_key)
+            migrated.update({"local_target": new_key, "nfo_path": new_key})
+            movies[new_key] = migrated
+            save_json_atomic(manifest_path, manifest)
+            from harvester_core.artifacts import migrate_inbox_identity
+            migrate_inbox_identity(config, old_key, new_key)
+            return {"adopted": True, "identifier": new_key, "prepared": 0}
+        raise BridgeError("selected NFO is no longer available")
+    canonical = Path(detail["directory"]) / "show.nfo"
+    source = _validated_nfo("show", source)
+    if path == canonical:
+        return {"adopted": True, "identifier": data["identifier"], "prepared": 0}
+    return _prepare_nfo_bytes(config, "show", data["identifier"], record, detail,
+                              source, data["replace"])
+
+
+def item_nfo_prompt(data):
+    """Build a local, provider-free prompt matching Harvester's NFO vocabulary."""
+    if (set(data) != {"kind", "identifier"} or data.get("kind") not in {"movie", "show"} or
+            not isinstance(data.get("identifier"), str)):
+        raise BridgeError("item.nfo_prompt requires kind and Search identifier")
+    _config, record, detail = _nfo_context(data)
+    facts = {key: record.get(key) for key in (
+        "title", "query_title", "original_title", "year", "tmdb_id", "tvdb_id", "imdb_id",
+        "folder_name", "query_year", "nfo") if record.get(key) not in (None, "", [], {})}
+    facts["media_directory"] = Path(detail["directory"]).name
+    facts["media_files"] = [Path(value).name for value in detail.get("video_files", [])]
+    if data["kind"] == "movie":
+        form = "<movie><title/><originaltitle/><year/><premiered/><plot/><tagline/><runtime/><uniqueid type=\"tmdb\"/><genre/><country/><language/><studio/><director/><credits/><actor><name/><role/><order/></actor></movie>"
+    else:
+        form = "<tvshow><title/><originaltitle/><sorttitle/><rating/><year/><votes/><outline/><plot/><tagline/><runtime/><status/><type/><inproduction/><mpaa/><certification/><id/><tmdbId/><tvdbId/><premiered/><lastaired/><numberofseasons/><numberofepisodes/><abbreviation/><originalcountry/><originallanguage/><nextaired/><airstime/><defaultseasontype/><isorderrandomized/><ids><entry><key/><value/></entry></ids><alternativetitle/><country/><genre/><keyword/><studio/><network/><creator/><credits/><language/><airsday/><languages/><seasons><season><seasonnumber/><name/><premiered/><episodecount/><seasontype/><year/></season></seasons><actor><name/><role/><order/></actor></tvshow>"
+    prompt = (f"Create a {data['kind']} NFO from these local facts:\n" +
+              json.dumps(facts, ensure_ascii=False, indent=2, sort_keys=True) +
+              f"\n\nUse Harvester's supported form:\n{form}\n\n"
+              "Return only XML. Omit unknown facts rather than guessing. "
+              "Do not invent IDs, dates, cast, runtime, or other facts.")
+    return {"text": prompt}
 
 
 def publish_artifact_preview(data):
@@ -554,6 +757,12 @@ def run_action(action, data):
         return install_inbox_image(data)
     if action == "item.install_image":
         return prepare_item_image(data)
+    if action == "item.install_nfo":
+        return prepare_item_nfo(data)
+    if action == "item.adopt_nfo":
+        return adopt_item_nfo(data)
+    if action == "item.nfo_prompt":
+        return item_nfo_prompt(data)
     if action == "preview.artifact":
         return publish_artifact_preview(data)
     if action == "config.get":
