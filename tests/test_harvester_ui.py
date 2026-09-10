@@ -763,6 +763,22 @@ function selectInboxItem(index) {{ selected = index; }}
                        page.index('App.request("item.install_image_url"') + 180]
         self.assertNotIn("path", request)
 
+    def test_image_url_fetch_uses_configured_transport(self):
+        transport = object()
+        jpeg = b"\xff\xd8\xffsmall"
+        with mock.patch("harvester_core.config.load_config", return_value=object()), \
+                mock.patch("harvester_core.transport.transport_from_config",
+                           return_value=transport) as configured, \
+                mock.patch("harvester_core.downloads.download_image",
+                           return_value=(b"source", "image/png")) as download, \
+                mock.patch("harvester_core.images.normalize_ui_image",
+                           return_value=jpeg):
+            result = harvester_ui._image_url_data(
+                {"url": "https://example.test/poster.png"}, {"url"})
+        configured.assert_called_once()
+        self.assertIs(download.call_args.kwargs["transport"], transport)
+        self.assertTrue(result.startswith("data:image/jpeg;base64,"))
+
     def test_search_nfo_controls_submit_no_renderer_filesystem_paths(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
         self.assertIn("Copy NFO prompt", page)
@@ -962,6 +978,14 @@ class BulkRecipeTests(unittest.TestCase):
             self.assertEqual(results[0]["item_id"], again["item_id"])
             self.assertEqual(len(list_inbox(config)), 3)
             self.assertTrue(all(item["state"] == "ready" for item in list_inbox(config)))
+            with mock.patch("harvester_core.config.load_config", return_value=config), \
+                    mock.patch.object(harvester_ui, "PROJECT_DIR", root):
+                harvester_ui.run_action("inbox.install_image", {
+                    "item_id": results[1]["item_id"], "data_url": payload})
+            show_item = next(item for item in list_inbox(config)
+                             if item["item_id"] == results[1]["item_id"])
+            self.assertTrue(any(action.get("path") == str(show / "poster.jpg")
+                                for action in show_item["actions"]))
             self.assertEqual(movie_nfo.read_bytes(), b"existing nfo")
             self.assertEqual((movie / "poster.jpg").read_bytes(), b"existing movie poster")
             self.assertEqual((show / "show.nfo").read_bytes(), b"existing show nfo")
