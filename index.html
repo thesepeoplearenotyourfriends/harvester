@@ -578,7 +578,8 @@
           : `<label><span>Title</span><input id="query-title" value="${esc(query.title || "")}" maxlength="300"></label><label><span>Year</span><input id="query-year" value="${esc(query.year || "")}" inputmode="numeric" maxlength="4"></label>`;
         const candidates = ["movie", "show"].includes(kind) ? (item.summary?.provider_results?.[0]?.candidates || []) : [];
         const candidateCards = candidates.length ? `<section class="candidate-results"><h2>Candidate results</h2>${candidates.map((candidate, candidateIndex) => `<article class="candidate"><strong>${esc(candidate.title || candidate.name || "Untitled")}</strong>${candidate.original_title && candidate.original_title !== candidate.title ? `<span>Original title: ${esc(candidate.original_title)}</span>` : ""}<span>${kind === "show" ? "Year" : "Release"}: ${esc(candidate.release_date || candidate.year || "Unknown")}</span><span>Score: ${esc(candidate.score ?? "Unknown")}</span><button type="button" data-candidate-index="${candidateIndex}">Use this result</button></article>`).join("")}</section>` : "";
-        const manualImage = ["actor", "movie"].includes(kind) && (kind === "actor" || item.workflow === "missing-posters") ? `<div id="inbox-drop-zone" class="drop-zone" tabindex="0">Drop an image here<br><span>or</span><br><button id="choose-inbox-image" type="button">Choose Image…</button><input id="inbox-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></div>` : "";
+        const imageArtifact = kind === "actor" ? "actor_image" : "poster";
+        const manualImage = item.requested_artifacts?.includes(imageArtifact) ? `<div class="image-url"><label>Use image URL: <input id="inbox-image-url" type="url" placeholder="https://…"></label><button id="use-inbox-image-url" type="button">Use image</button></div>` : "";
         const applyReason = item.state === "ready" ? "Apply prepared filesystem changes" : (item.reason || "Resolve this item before applying");
         const describeAction = (action) => `${action.action} · ${action.path}${action.size === undefined ? "" : ` · ${action.size} bytes`} · destination was ${action.precondition?.exists ? `a ${action.precondition.kind || "path"}` : "absent"} when prepared`;
         document.querySelector("#workspace").innerHTML = `<article class="inspector"><h1>${esc(item.display_title)}</h1><p><strong>${item.state === "ready" ? "Ready for review" : "Needs attention"}</strong></p>${item.reason ? `<p class="error">${esc(item.reason)}</p>` : ""}${previewUrl ? `<img class="inbox-preview" src="${previewUrl}" alt="Prepared artwork preview">` : ""}${manualImage}${candidateCards}<h2>Exact filesystem changes</h2><ul>${item.actions.map((action) => `<li>${esc(describeAction(action))}</li>`).join("")}</ul><section class="provider-query"><h2>Provider query</h2>${queryFields}</section><div class="inbox-actions"><button id="apply-item" title="${esc(applyReason)}" ${item.state !== "ready" ? "disabled" : ""}>Apply</button><button id="discard-item">Discard</button><button id="retry-item">Retry Search…</button></div><h2>Proposal</h2><pre>${esc(JSON.stringify(item.summary, null, 2))}</pre></article>`;
@@ -600,26 +601,17 @@
         if (index >= 0) selectInboxItem(index);
       }
       function bindInboxImage(item) {
-        const input = document.querySelector("#inbox-image-file"), zone = document.querySelector("#inbox-drop-zone");
-        if (!input || !zone) return;
-        document.querySelector("#choose-inbox-image").onclick = (event) => { event.stopPropagation(); input.click(); };
-        const prepare = async (file) => {
+        const input = document.querySelector("#inbox-image-url"), button = document.querySelector("#use-inbox-image-url");
+        if (!input || !button) return;
+        button.onclick = async () => {
           const generation = state.generation, selectionGeneration = state.selectionGeneration;
           try {
-            const dataUrl = await normalizeActorImage(file);
-            await App.request("inbox.install_image", { item_id: item.item_id, data_url: dataUrl }, false, true);
+            await App.request("inbox.install_image_url", { item_id: item.item_id, url: input.value }, false, true);
             if (state.workflow !== "inbox" || generation !== state.generation || selectionGeneration !== state.selectionGeneration) return;
             const index = state.inbox.items.findIndex((candidate) => candidate.item_id === item.item_id);
             if (index >= 0) await selectInboxItem(index);
-          } catch (error) {
-            if (state.workflow === "inbox" && generation === state.generation && selectionGeneration === state.selectionGeneration)
-              showError(error.message || "Could not prepare image");
-          }
+          } catch (error) { showError(error.message || "Could not use image URL"); }
         };
-        input.onchange = () => input.files[0] && prepare(input.files[0]);
-        zone.ondragover = (event) => { event.preventDefault(); zone.classList.add("drag"); };
-        zone.ondragleave = () => zone.classList.remove("drag");
-        zone.ondrop = (event) => { event.preventDefault(); zone.classList.remove("drag"); if (event.dataTransfer.files[0]) prepare(event.dataTransfer.files[0]); };
       }
       async function retryInboxItem(item, kind) {
         const generation = state.generation, selectionGeneration = state.selectionGeneration;
@@ -690,14 +682,14 @@
       function searchArtworkInput(kind) {
         if (!(state.workflow === "search" || bulkWorkflows[state.workflow]) || !["actor", "movie", "show"].includes(kind)) return "";
         const noun = kind === "actor" ? "mugshot" : "poster";
-        return `<div id="search-drop-zone" class="drop-zone" tabindex="0">Drop ${noun} here<br><span>or</span><br><button id="choose-search-image" type="button">Choose Image…</button><input id="search-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></div><p id="search-prepared" class="prepared-note" hidden>🟢 Prepared — <button id="search-open-inbox" type="button">Open Inbox</button></p>`;
+        return `<div class="image-url"><label>Use ${noun} URL: <input id="search-image-url" type="url" placeholder="https://…"></label><button id="use-search-image-url" type="button">Use image</button></div><p id="search-prepared" class="prepared-note" hidden>🟢 Prepared — <button id="search-open-inbox" type="button">Open Inbox</button></p>`;
       }
       function searchNfoInput(detail) {
         if (!(state.workflow === "search" || bulkWorkflows[state.workflow]) || !["movie", "show"].includes(detail.kind)) return "";
         const candidates = detail.nfo_candidates || [], usable = candidates.filter((item) => item.usable);
         const existing = candidates.length ? `<h3>Existing NFOs on disk</h3><ul class="nfo-candidates">${candidates.map((item, index) =>
           `<li><strong>${esc(item.name)}</strong><br><span class="muted">${item.parseable ? `parseable · &lt;${esc(item.root)}&gt;${item.title ? ` · title: ${esc(item.title)}` : ""}` : `unusable · XML parse error: ${esc(item.parse_error || "unknown error")}`}</span>${item.usable ? `<br><button type="button" data-nfo-token="${esc(item.token)}" class="${usable.length === 1 ? "primary" : "compact-action"}">Use this NFO</button>` : ""}</li>`).join("")}</ul>` : '<p class="muted">No .nfo files found in this directory.</p>';
-        return `<section class="search-nfo"><h2>NFO</h2><p><strong>${detail.nfo?.present ? "Present" : "Missing"}</strong></p><button id="copy-nfo-prompt" type="button" class="compact-action">Copy NFO prompt</button>${existing}<h3>Use NFO:</h3><div id="search-nfo-drop-zone" class="drop-zone" tabindex="0">Drop .nfo here<br><span>or</span><br><button id="choose-search-nfo" type="button">Choose .nfo…</button><input id="search-nfo-file" type="file" accept=".nfo,text/xml,application/xml" hidden></div><label><input id="replace-search-nfo" type="checkbox"> Replace Existing NFO</label><textarea id="search-nfo-paste" rows="7" placeholder="Paste XML…"></textarea><button id="prepare-pasted-nfo" type="button">Use pasted XML</button></section>`;
+        return `<section class="search-nfo"><h2>NFO</h2><p><strong>${detail.nfo?.present ? "Present" : "Missing"}</strong></p><button id="copy-nfo-prompt" type="button" class="compact-action">Copy NFO prompt</button>${existing}<h3>Use NFO:</h3><label><input id="replace-search-nfo" type="checkbox"> Replace Existing NFO</label><textarea id="search-nfo-paste" rows="7" placeholder="Paste XML…"></textarea><button id="prepare-pasted-nfo" type="button">Use pasted XML</button></section>`;
       }
       function showSearchPrepared() {
         const note = document.querySelector("#search-prepared");
@@ -709,22 +701,14 @@
         showSearchPrepared();
       }
       function bindSearchArtwork(row) {
-        const input = document.querySelector("#search-image-file"), zone = document.querySelector("#search-drop-zone");
-        if (!input || !zone) return;
-        document.querySelector("#choose-search-image").onclick = (event) => { event.stopPropagation(); input.click(); };
-        const prepare = async (file) => {
-          if (file.size > 8000000) { showError("Image is larger than 8 MB"); return; }
+        const input = document.querySelector("#search-image-url"), button = document.querySelector("#use-search-image-url");
+        if (!input || !button) return;
+        button.onclick = async () => {
           try {
-            const dataUrl = await normalizeActorImage(file);
-            await App.request("item.install_image", { kind: row.kind, identifier: row.identifier, data_url: dataUrl }, false, true);
-            await refreshInboxSummary();
-            showSearchPrepared();
-          } catch (error) { showError(error.message || "Could not prepare image"); }
+            await App.request("item.install_image_url", { kind: row.kind, identifier: row.identifier, url: input.value }, false, true);
+            await refreshInboxSummary(); showSearchPrepared();
+          } catch (error) { showError(error.message || "Could not use image URL"); }
         };
-        input.onchange = () => input.files[0] && prepare(input.files[0]);
-        zone.ondragover = (event) => { event.preventDefault(); zone.classList.add("drag"); };
-        zone.ondragleave = () => zone.classList.remove("drag");
-        zone.ondrop = (event) => { event.preventDefault(); zone.classList.remove("drag"); event.dataTransfer.files[0] && prepare(event.dataTransfer.files[0]); };
       }
       function bytesBase64(bytes) {
         let binary = "";
@@ -733,8 +717,8 @@
         return btoa(binary);
       }
       function bindSearchNfo(detail) {
-        const zone = document.querySelector("#search-nfo-drop-zone"), input = document.querySelector("#search-nfo-file");
-        if (!zone || !input) return;
+        const paste = document.querySelector("#search-nfo-paste");
+        if (!paste) return;
         const replace = () => document.querySelector("#replace-search-nfo").checked;
         const prepareBytes = async (bytes) => {
           if (bytes.length > 1000000) { showError("NFO is larger than 1 MB"); return; }
@@ -743,14 +727,17 @@
             await refreshInboxSummary(); showSearchPrepared();
           } catch (error) { showError(error.message || "Could not prepare NFO"); }
         };
-        document.querySelector("#choose-search-nfo").onclick = (event) => { event.stopPropagation(); input.click(); };
-        input.onchange = async () => input.files[0] && prepareBytes(new Uint8Array(await input.files[0].arrayBuffer()));
-        zone.ondragover = (event) => { event.preventDefault(); zone.classList.add("drag"); };
-        zone.ondragleave = () => zone.classList.remove("drag");
-        zone.ondrop = async (event) => { event.preventDefault(); zone.classList.remove("drag"); const file = event.dataTransfer.files[0]; if (file) prepareBytes(new Uint8Array(await file.arrayBuffer())); };
         document.querySelector("#prepare-pasted-nfo").onclick = () => prepareBytes(new TextEncoder().encode(document.querySelector("#search-nfo-paste").value));
         document.querySelector("#copy-nfo-prompt").onclick = async () => {
-          try { const result = await App.request("item.nfo_prompt", { kind: detail.kind, identifier: detail.identifier }, true); await navigator.clipboard.writeText(result.text); }
+          try { const result = await App.request("item.nfo_prompt", { kind: detail.kind, identifier: detail.identifier }, true); const ta = document.createElement("textarea");
+            ta.value = result.text;
+            ta.style.position = "fixed";
+            ta.style.left = "-9999px";
+            document.body.appendChild(ta);
+            ta.select();
+            const copied = document.execCommand("copy");
+            ta.remove();
+            if (!copied) throw Error("Browser refused the copy command"); }
           catch (error) { showError(error.message || "Could not copy NFO prompt"); }
         };
         document.querySelectorAll("[data-nfo-token]").forEach((button) => button.onclick = async () => {
@@ -846,7 +833,6 @@
           e.preventDefault();
           zone.classList.add("drag");
         };
-        zone.ondragleave = () => zone.classList.remove("drag");
         zone.ondrop = (e) => {
           e.preventDefault();
           zone.classList.remove("drag");

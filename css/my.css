@@ -459,3 +459,9 @@ pre {
   background: #56594d;
   border-radius: 4px;
 }
+
+/* Proposals are read-only receipts, but must remain easy to copy by selection. */
+.inspector pre { user-select: text; cursor: text; }
+.image-url { display: flex; flex-wrap: wrap; align-items: end; gap: .45rem; margin: .75rem 0; }
+.image-url label { display: grid; gap: .2rem; width: min(40rem, 100%); }
+.image-url input { padding: .45rem; border: 1px solid var(--line); border-radius: 4px; background: var(--background); }

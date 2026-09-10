@@ -320,6 +320,7 @@ ACTION_REGISTRY = {
     "inbox.discard": None, "inbox.apply_all": None, "inbox.discard_all": None,
     "actor.install_image": None, "inbox.install_image": None,
     "item.install_image": None,
+    "inbox.install_image_url": None, "item.install_image_url": None,
     "item.install_nfo": None, "item.adopt_nfo": None, "item.nfo_prompt": None,
     "preview.artifact": None,
 }
@@ -394,7 +395,7 @@ def install_inbox_image(data):
     """Replace a prepared artwork blob; never write through to the library."""
     if set(data) != {"item_id", "data_url"} or not all(isinstance(v, str) for v in data.values()):
         raise BridgeError("inbox.install_image requires item_id and data_url")
-    from harvester_core.api import get_record
+    from harvester_core.api import get_record_by_identity, inspect_item
     from harvester_core.artifacts import get_inbox_item
     from harvester_core.config import load_config
     from harvester_core.images import safe_actor_filename
@@ -408,13 +409,23 @@ def install_inbox_image(data):
         raise BridgeError("invalid image data") from error
     if ";base64" not in header or len(source) > 512_000 or not source.startswith(b"\xff\xd8\xff"):
         raise BridgeError("manual Inbox image must be a canonical JPEG up to 512 KB")
-    if item["workflow"] in {"missing-actor-images", "failed-actors"} and len(item["identities"]) == 1:
+    kind = item["kind"]
+    if len(item["identities"]) != 1:
+        raise BridgeError("manual image requires one authoritative Inbox identity")
+    identity = item["identities"][0]
+    if kind == "actor":
         target = config.movie_root / ".actors" / safe_actor_filename(item["identities"][0])
-    elif item["workflow"] == "missing-posters" and len(item["identities"]) == 1:
-        record = get_record(config, "movie", item["identities"][0])
+    elif kind == "movie":
+        record = get_record_by_identity(config, kind, identity)
+        detail = inspect_item(config, kind, identity)
+        if detail.get("ownership", {}).get("status") == "ambiguous":
+            raise BridgeError("movie poster ownership is ambiguous")
         if not record.get("poster_path"):
             raise BridgeError("movie poster ownership is unresolved")
         target = Path(record["poster_path"]).with_suffix(".jpg")
+    elif kind == "show":
+        record = get_record_by_identity(config, kind, identity)
+        target = Path(record.get("local_target") or identity) / "poster.jpg"
     else:
         raise BridgeError("manual image is unavailable for this Inbox item")
     root = config.app_dir / ".cache" / "bulk" / "inbox" / item["item_id"]
@@ -504,6 +515,41 @@ def prepare_item_image(data):
         item.setdefault("summary", {})["outcome"] = "ready"
     save_json_atomic(root / "manifest.json", item)
     return {"item_id": item["item_id"], "prepared": 1, "bytes": len(source)}
+
+
+def _image_url_data(data, required):
+    """Fetch untrusted artwork at the host edge and return a small JPEG data URL."""
+    if set(data) != required or not isinstance(data.get("url"), str):
+        raise BridgeError("image URL operation requires the expected identity and URL")
+    url = data["url"].strip()
+    if len(url) > 2048 or not url.startswith(("http://", "https://")):
+        raise BridgeError("image URL must use HTTP or HTTPS")
+    try:
+        from harvester_core.downloads import download_image
+        from harvester_core.images import normalize_ui_image
+        from harvester_core.config import load_config
+        from harvester_core.transport import transport_from_config
+        config = load_config(app_dir=PROJECT_DIR)
+        source, _content_type = download_image(
+            url, user_agent="harvester-ui/1", request_attempts=2, request_timeout=20,
+            transport=transport_from_config(config))
+        if len(source) > 20 * 1024 * 1024:
+            raise ValueError("remote image is larger than 20 MB")
+        jpeg = normalize_ui_image(source)
+    except Exception as error:
+        raise BridgeError(f"Could not use image URL: {error}") from error
+    return "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
+
+
+def install_inbox_image_url(data):
+    converted = _image_url_data(data, {"item_id", "url"})
+    return install_inbox_image({"item_id": data["item_id"], "data_url": converted})
+
+
+def prepare_item_image_url(data):
+    converted = _image_url_data(data, {"kind", "identifier", "url"})
+    return prepare_item_image({"kind": data["kind"], "identifier": data["identifier"],
+                               "data_url": converted})
 
 
 MAX_NFO_BYTES = 1_000_000
@@ -760,6 +806,10 @@ def run_action(action, data):
         return install_inbox_image(data)
     if action == "item.install_image":
         return prepare_item_image(data)
+    if action == "inbox.install_image_url":
+        return install_inbox_image_url(data)
+    if action == "item.install_image_url":
+        return prepare_item_image_url(data)
     if action == "item.install_nfo":
         return prepare_item_nfo(data)
     if action == "item.adopt_nfo":
