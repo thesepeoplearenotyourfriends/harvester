@@ -599,7 +599,7 @@ async function runBulk() {{}}
 
     def test_image_install_completion_does_not_reselect_after_navigation(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
-        start = page.index("function bindInboxImage")
+        start = page.index("function bindServoPasteRepaint")
         end = page.index("\n      async function retryInboxItem", start)
         function = page[start:end]
         script = f"""
@@ -622,6 +622,15 @@ function showError() {{ shownError = true; }}
 }})().catch(() => process.exit(2));
 """
         subprocess.run(["node", "-e", script], check=True)
+
+    def test_servo_paste_repaint_is_bound_to_both_image_url_inputs(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        inbox = page[page.index("function bindInboxImage"):
+                     page.index("async function retryInboxItem")]
+        search = page[page.index("function bindSearchArtwork"):
+                      page.index("function bytesBase64")]
+        self.assertIn("bindServoPasteRepaint(input)", inbox)
+        self.assertIn("bindServoPasteRepaint(input)", search)
 
     def test_inbox_decision_and_batch_completions_do_not_reopen_after_navigation(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")

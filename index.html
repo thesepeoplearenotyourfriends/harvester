@@ -602,9 +602,7 @@
         const index = state.inbox.items.findIndex((candidate) => candidate.item_id === item.item_id);
         if (index >= 0) selectInboxItem(index);
       }
-      function bindInboxImage(item) {
-        const input = document.querySelector("#inbox-image-url"), button = document.querySelector("#use-inbox-image-url");
-        if (!input || !button) return;
+      function bindServoPasteRepaint(input) {
         input.addEventListener("paste", () => setTimeout(() => {
           // Servo updates the value on mouse paste but sometimes misses the
           // paint invalidation.  Replacing it with itself forces that repaint.
@@ -612,6 +610,11 @@
           input.value = "";
           input.value = pasted;
         }, 0));
+      }
+      function bindInboxImage(item) {
+        const input = document.querySelector("#inbox-image-url"), button = document.querySelector("#use-inbox-image-url");
+        if (!input || !button) return;
+        bindServoPasteRepaint(input);
         button.onclick = async () => {
           const generation = state.generation, selectionGeneration = state.selectionGeneration;
           try {
@@ -712,6 +715,7 @@
       function bindSearchArtwork(row) {
         const input = document.querySelector("#search-image-url"), button = document.querySelector("#use-search-image-url");
         if (!input || !button) return;
+        bindServoPasteRepaint(input);
         button.onclick = async () => {
           try {
             await App.request("item.install_image_url", { kind: row.kind, identifier: row.identifier, url: input.value }, false, true);
