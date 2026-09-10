@@ -604,22 +604,20 @@ async function runBulk() {{}}
         function = page[start:end]
         script = f"""
 let selected = false, shownError = false;
-const input = {{files: [{{name: 'poster.jpg'}}]}}, zone = {{classList: {{remove() {{}}}}}};
+const input = {{value: 'https://example.test/poster.png'}}, button = {{}};
 const document = {{querySelector(selector) {{
-  if (selector === '#inbox-image-file') return input;
-  if (selector === '#inbox-drop-zone') return zone;
-  if (selector === '#choose-inbox-image') return {{}};
+  if (selector === '#inbox-image-url') return input;
+  if (selector === '#use-inbox-image-url') return button;
 }}}};
 const state = {{workflow: 'inbox', generation: 3, selectionGeneration: 4,
                inbox: {{items: [{{item_id: 'stable'}}]}}}};
-async function normalizeActorImage() {{ return 'data:image/jpeg;base64,eA=='; }}
 const App = {{async request() {{ state.selectionGeneration++; }}}};
 async function selectInboxItem() {{ selected = true; }}
 function showError() {{ shownError = true; }}
 {function}
 (async () => {{
   bindInboxImage({{item_id: 'stable'}});
-  await input.onchange();
+  await button.onclick();
   if (selected || shownError || state.workflow !== 'inbox') process.exit(1);
 }})().catch(() => process.exit(2));
 """
@@ -758,18 +756,20 @@ function selectInboxItem(index) {{ selected = index; }}
     def test_search_inspector_uses_semantic_refetch_and_manual_image_requests(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
         self.assertIn('runBulk("item.refetch", { kind: row.kind, identifier: row.identifier }', page)
-        self.assertIn('App.request("item.install_image", { kind: row.kind, identifier: row.identifier, data_url: dataUrl }', page)
-        self.assertIn('Drop ${noun} here', page)
+        self.assertIn('App.request("item.install_image_url", { kind: row.kind, identifier: row.identifier, url: input.value }', page)
+        self.assertIn('Use ${noun} URL:', page)
         self.assertIn('🟢 Prepared — <button id="search-open-inbox"', page)
-        request = page[page.index('App.request("item.install_image"'):
-                       page.index('App.request("item.install_image"') + 180]
+        request = page[page.index('App.request("item.install_image_url"'):
+                       page.index('App.request("item.install_image_url"') + 180]
         self.assertNotIn("path", request)
 
     def test_search_nfo_controls_submit_no_renderer_filesystem_paths(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
         self.assertIn("Copy NFO prompt", page)
         self.assertIn("Existing NFOs on disk", page)
-        self.assertIn("Drop .nfo here", page)
+        self.assertNotIn("Drop .nfo here", page)
+        self.assertIn("Paste XML…", page)
+        self.assertIn('document.execCommand("copy")', page)
         self.assertIn('App.request("item.install_nfo", { kind: detail.kind, identifier: detail.identifier, content_base64:', page)
         self.assertIn('App.request("item.adopt_nfo", { kind: detail.kind, identifier: detail.identifier, candidate_token:', page)
         install = page[page.index('App.request("item.install_nfo"'):

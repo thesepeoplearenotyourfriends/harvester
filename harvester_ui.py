@@ -320,6 +320,7 @@ ACTION_REGISTRY = {
     "inbox.discard": None, "inbox.apply_all": None, "inbox.discard_all": None,
     "actor.install_image": None, "inbox.install_image": None,
     "item.install_image": None,
+    "inbox.install_image_url": None, "item.install_image_url": None,
     "item.install_nfo": None, "item.adopt_nfo": None, "item.nfo_prompt": None,
     "preview.artifact": None,
 }
@@ -504,6 +505,37 @@ def prepare_item_image(data):
         item.setdefault("summary", {})["outcome"] = "ready"
     save_json_atomic(root / "manifest.json", item)
     return {"item_id": item["item_id"], "prepared": 1, "bytes": len(source)}
+
+
+def _image_url_data(data, required):
+    """Fetch untrusted artwork at the host edge and return a small JPEG data URL."""
+    if set(data) != required or not isinstance(data.get("url"), str):
+        raise BridgeError("image URL operation requires the expected identity and URL")
+    url = data["url"].strip()
+    if len(url) > 2048 or not url.startswith(("http://", "https://")):
+        raise BridgeError("image URL must use HTTP or HTTPS")
+    try:
+        from harvester_core.downloads import download_image
+        from harvester_core.images import normalize_ui_image
+        source, _content_type = download_image(
+            url, user_agent="harvester-ui/1", request_attempts=2, request_timeout=20)
+        if len(source) > 20 * 1024 * 1024:
+            raise ValueError("remote image is larger than 20 MB")
+        jpeg = normalize_ui_image(source)
+    except Exception as error:
+        raise BridgeError(f"Could not use image URL: {error}") from error
+    return "data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii")
+
+
+def install_inbox_image_url(data):
+    converted = _image_url_data(data, {"item_id", "url"})
+    return install_inbox_image({"item_id": data["item_id"], "data_url": converted})
+
+
+def prepare_item_image_url(data):
+    converted = _image_url_data(data, {"kind", "identifier", "url"})
+    return prepare_item_image({"kind": data["kind"], "identifier": data["identifier"],
+                               "data_url": converted})
 
 
 MAX_NFO_BYTES = 1_000_000
@@ -760,6 +792,10 @@ def run_action(action, data):
         return install_inbox_image(data)
     if action == "item.install_image":
         return prepare_item_image(data)
+    if action == "inbox.install_image_url":
+        return install_inbox_image_url(data)
+    if action == "item.install_image_url":
+        return prepare_item_image_url(data)
     if action == "item.install_nfo":
         return prepare_item_nfo(data)
     if action == "item.adopt_nfo":

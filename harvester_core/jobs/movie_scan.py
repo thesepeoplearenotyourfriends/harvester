@@ -204,13 +204,18 @@ def run(config, provider, reporter=None, limit=None, rebuild=False, refresh=Fals
                     "year": override.get("year") if "year" in override else record.get("year"),
                     "imdb_id": None if override else record.get("imdb_id"),
                     "tmdb_id": (override.get("tmdb_id") if override else
-                                record.get("local_tmdb_id")),
+                                record.get("local_tmdb_id") or record.get("tmdb_id")),
                 })
                 record["match"] = identity.get("method")
                 record["candidates"] = identity.get("top") or []
                 if not identity.get("ok"):
-                    record["status"] = "unresolved"
-                    record["last_error"] = identity.get("reason")
+                    # A prior provider identity is durable evidence. Never erase
+                    # or downgrade it merely because a later lookup failed.
+                    if record.get("tmdb_id"):
+                        record["status"] = "ok"
+                    else:
+                        record["status"] = "unresolved"
+                        record["last_error"] = identity.get("reason")
                 else:
                     movie_id = identity["movie_id"]
                     details = provider.get(f"/movie/{movie_id}", {})
