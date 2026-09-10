@@ -696,7 +696,7 @@ class BulkRecipeTests(unittest.TestCase):
             save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"movies": {
                 str(movie_nfo): {"status": "ok", "local_target": str(movie_nfo),
                                  "nfo_path": str(movie_nfo), "poster_path": None,
-                                 "nfo": {"title": "Movie"}}}})
+                                 "tmdb_id": 42, "nfo": {"title": "Movie"}}}})
             save_json_atomic(config.state_path("tv_show_urls_tvdb.json"), {"shows": {
                 str(show): {"status": "matched", "local_target": str(show),
                             "folder_name": "Show", "tvdb_id": 7, "nfo": {"title": "Show"}}}})
@@ -708,6 +708,10 @@ class BulkRecipeTests(unittest.TestCase):
                     "item.refetch", {"kind": "movie", "identifier": str(movie_nfo)})
                 show_argv = harvester_ui.action_argv(
                     "item.refetch", {"kind": "show", "identifier": str(show)})
+                for kind, provider_id in (("movie", "42"), ("show", "7")):
+                    with self.assertRaises(harvester_ui.BridgeError):
+                        harvester_ui.action_argv(
+                            "item.refetch", {"kind": kind, "identifier": provider_id})
                 for bad in ({"kind": "movie", "identifier": str(movie_nfo),
                              "workflow": "missing-posters"},
                             {"kind": "show", "identifier": str(show), "path": "/tmp/x"}):
@@ -768,9 +772,11 @@ class BulkRecipeTests(unittest.TestCase):
                                   "tv_root": tv}, environ={}, app_dir=root)
             save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"movies": {
                 str(movie_nfo): {"status": "ok", "local_target": str(movie_nfo),
-                                 "nfo_path": str(movie_nfo), "poster_path": None}}})
+                                 "nfo_path": str(movie_nfo), "poster_path": None,
+                                 "tmdb_id": 42}}})
             save_json_atomic(config.state_path("tv_show_urls_tvdb.json"), {"shows": {
-                str(show): {"status": "matched", "local_target": str(show)}}})
+                str(show): {"status": "matched", "local_target": str(show),
+                            "tvdb_id": 7}}})
             save_json_atomic(config.state_path("movie_actor_queue.json"), {"actors": {
                 "Actor": {"status": "ok"}}})
             jpeg = b"\xff\xd8\xffprepared"
@@ -783,17 +789,56 @@ class BulkRecipeTests(unittest.TestCase):
                                            ("show", str(show)), ("actor", "Actor"))]
                 again = harvester_ui.run_action("item.install_image", {
                     "kind": "movie", "identifier": str(movie_nfo), "data_url": payload})
+                for kind, provider_id in (("movie", "42"), ("show", "7")):
+                    with self.assertRaises(harvester_ui.BridgeError):
+                        harvester_ui.run_action("item.install_image", {
+                            "kind": kind, "identifier": provider_id, "data_url": payload})
                 with self.assertRaises(harvester_ui.BridgeError):
                     harvester_ui.run_action("item.install_image", {
                         "kind": "movie", "identifier": str(movie_nfo),
                         "data_url": payload, "path": "/tmp/chosen-by-js"})
             self.assertEqual(results[0]["item_id"], again["item_id"])
             self.assertEqual(len(list_inbox(config)), 3)
+            self.assertTrue(all(item["state"] == "ready" for item in list_inbox(config)))
             self.assertEqual(movie_nfo.read_bytes(), b"existing nfo")
             self.assertEqual((movie / "poster.jpg").read_bytes(), b"existing movie poster")
             self.assertEqual((show / "show.nfo").read_bytes(), b"existing show nfo")
             self.assertEqual((show / "poster.jpg").read_bytes(), b"existing show poster")
             self.assertFalse((movies / ".actors" / "Actor.jpg").exists())
+
+    def test_search_manual_poster_preserves_unrelated_tv_attention(self):
+        from harvester_core.artifacts import RecordingCommitter, list_inbox, persist_preparation
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); show = tv / "Unresolved"; show.mkdir()
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            save_json_atomic(config.state_path("tv_show_urls_tvdb.json"), {"shows": {
+                str(show): {"status": "ambiguous", "local_target": str(show),
+                            "tvdb_id": 77, "nfo": None}}})
+            persist_preparation(
+                config, "tv-errors", [str(show)], RecordingCommitter(),
+                state="needs_attention", reason="TV identity requires selection",
+                summary={"outcome": "ambiguous", "message": "Choose the correct show"},
+                requested_artifacts=["nfo"])
+            jpeg = b"\xff\xd8\xffprepared"
+            payload = "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()
+            with mock.patch("harvester_core.config.load_config", return_value=config), \
+                    mock.patch.object(harvester_ui, "PROJECT_DIR", root):
+                result = harvester_ui.run_action("item.install_image", {
+                    "kind": "show", "identifier": str(show), "data_url": payload})
+                with self.assertRaises(harvester_ui.BridgeError):
+                    harvester_ui.run_action("item.install_image", {
+                        "kind": "show", "identifier": "77", "data_url": payload})
+            item = next(value for value in list_inbox(config)
+                        if value["item_id"] == result["item_id"])
+            self.assertEqual(item["state"], "needs_attention")
+            self.assertEqual(item["reason"], "TV identity requires selection")
+            self.assertEqual(item["summary"], {"outcome": "ambiguous",
+                                                "message": "Choose the correct show"})
+            self.assertEqual(item["requested_artifacts"], ["nfo", "poster"])
+            self.assertEqual(len(item["actions"]), 1)
+            self.assertEqual(Path(item["actions"][0]["path"]), show / "poster.jpg")
 
     def test_tv_repairs_prepare_apply_and_inspect_missing_artifacts(self):
         from harvester_core.api import inspect_item

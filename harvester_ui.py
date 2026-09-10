@@ -170,10 +170,13 @@ def _item_refetch(data):
             {"actor", "movie", "show"} or not isinstance(data.get("identifier"), str)):
         raise BridgeError("item.refetch requires kind and trusted durable identifier")
     _identifier(data["kind"])({"identifier": data["identifier"]})
-    from harvester_core.api import get_record
+    from harvester_core.api import get_record_by_identity
     from harvester_core.config import load_config
     config = load_config(app_dir=PROJECT_DIR)
-    record = get_record(config, data["kind"], data["identifier"])
+    try:
+        record = get_record_by_identity(config, data["kind"], data["identifier"])
+    except KeyError as error:
+        raise BridgeError("item.refetch requires a Search record identifier") from error
     identity = record.get("name") if data["kind"] == "actor" else (
         record.get("nfo_path") or record.get("local_target") if data["kind"] == "movie"
         else record.get("local_target"))
@@ -439,7 +442,7 @@ def prepare_item_image(data):
     if (";base64" not in header or len(source) > 512_000 or
             not source.startswith(b"\xff\xd8\xff")):
         raise BridgeError("manual item image must be a canonical JPEG up to 512 KB")
-    from harvester_core.api import get_record, inspect_item
+    from harvester_core.api import get_record_by_identity, inspect_item
     from harvester_core.artifacts import (RecordingCommitter, get_inbox_item, list_inbox,
                                           persist_preparation)
     from harvester_core.config import load_config
@@ -447,7 +450,10 @@ def prepare_item_image(data):
     from harvester_core.storage import save_json_atomic, write_bytes_atomic
     config = load_config(app_dir=PROJECT_DIR)
     kind = data["kind"]
-    record = get_record(config, kind, data["identifier"])
+    try:
+        record = get_record_by_identity(config, kind, data["identifier"])
+    except KeyError as error:
+        raise BridgeError("item.install_image requires a Search record identifier") from error
     if kind == "actor":
         identity = record["name"]
         target = config.movie_root / ".actors" / safe_actor_filename(identity)
@@ -479,8 +485,19 @@ def prepare_item_image(data):
     item["actions"] = [existing for existing in item["actions"] if not (
         existing.get("action") == "write" and Path(existing.get("path", "")) == target)]
     item["actions"].append(action)
-    item.update({"state": "ready", "reason": None})
-    item.setdefault("summary", {})["outcome"] = "ready"
+    image_artifact = "actor_image" if kind == "actor" else "poster"
+    requested = list(dict.fromkeys([*(previous or {}).get("requested_artifacts", []),
+                                    image_artifact]))
+    item["requested_artifacts"] = requested
+    unrelated_attention = (previous and previous.get("state") == "needs_attention" and
+                           (not previous.get("requested_artifacts") or any(
+                               artifact != image_artifact
+                               for artifact in previous.get("requested_artifacts", []))))
+    if unrelated_attention:
+        item.update({"state": "needs_attention", "reason": previous.get("reason")})
+    else:
+        item.update({"state": "ready", "reason": None})
+        item.setdefault("summary", {})["outcome"] = "ready"
     save_json_atomic(root / "manifest.json", item)
     return {"item_id": item["item_id"], "prepared": 1, "bytes": len(source)}
 

@@ -41,6 +41,19 @@ def get_record(config, kind, identifier):
     raise KeyError(f"{kind} not found: {identifier}")
 
 
+def get_record_by_identity(config, kind, identifier):
+    """Return a record only when *identifier* is its durable mapping key.
+
+    Search emits these keys for follow-up mutations.  Provider identifiers are
+    deliberately not accepted here: they are mutable adapter data and can be
+    shared or otherwise become ambiguous over the lifetime of durable state.
+    """
+    items = records(config, kind)
+    if identifier not in items:
+        raise KeyError(f"{kind} not found: {identifier}")
+    return decorate(config, kind, identifier, items[identifier])
+
+
 def _nfo_fields(path):
     """Read the small, useful subset of local NFO data without trusting state."""
     if not path.is_file():
