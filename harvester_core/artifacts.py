@@ -108,7 +108,7 @@ def _precondition(path):
 
 def persist_preparation(config, workflow, identities, committer, *, state="ready",
                         display_title=None, local_target=None, summary=None,
-                        reason=None, requested_artifacts=None, logical_identity=None):
+                        reason=None, requested_artifacts=None, logical_identity=None, kind=None):
     """Persist one durable, independently reviewable logical Inbox item."""
     plan_id = preparation_id(workflow, identities, logical_identity)
     root = _safe_root(config, "inbox", plan_id)
@@ -131,7 +131,13 @@ def persist_preparation(config, workflow, identities, committer, *, state="ready
             item.update({"blob": f"blobs/{digest}", "size": len(data),
                          "sha256": digest})
         manifest_actions.append(item)
-    manifest = {"version": 2, "item_id": plan_id, "workflow": workflow,
+    if kind is None:
+        kind = _recover_manifest_kind(config, {"identities": list(identities),
+                                                "local_target": local_target,
+                                                "actions": manifest_actions})
+    if kind not in {"actor", "movie", "show"}:
+        raise ValueError("prepared Inbox item requires an authoritative kind")
+    manifest = {"version": 2, "item_id": plan_id, "workflow": workflow, "kind": kind,
                 "identities": list(identities), "display_title": display_title or
                 (str(identities[0]) if identities else workflow),
                 "local_target": local_target, "state": state, "seen": False,
@@ -144,6 +150,7 @@ def persist_preparation(config, workflow, identities, committer, *, state="ready
                     "query": previous.get("query", {})}] if previous else [])][-10:],
                 "requested_artifacts": list(requested_artifacts or ()),
                 "actions": manifest_actions}
+    _validate_manifest_provenance(config, manifest)
     save_json_atomic(root / "manifest.json", manifest)
     return {"plan_id": plan_id,
             "manifest": f"asset://com.harvester.app/.cache/bulk/inbox/{plan_id}/manifest.json",
@@ -226,6 +233,12 @@ def list_inbox(config):
                 continue
             value = json.loads(path.read_text(encoding="utf-8"))
             if value.get("version") == 2 and value.get("state") in ("ready", "needs_attention"):
+                try:
+                    value = get_inbox_item(config, path.parent.name)
+                except (KeyError, ValueError) as error:
+                    value.update({"state": "needs_attention", "kind": None,
+                                  "reason": str(error)})
+                    save_json_atomic(path, value)
                 items.append(value)
         except (OSError, ValueError):
             continue
@@ -241,10 +254,48 @@ def get_inbox_item(config, item_id, *, mark_seen=False):
     value = json.loads(path.read_text(encoding="utf-8"))
     if value.get("version") != 2 or value.get("item_id") != item_id:
         raise ValueError("invalid Bulk Inbox manifest")
+    kind = value.get("kind")
+    if kind not in {"actor", "movie", "show"}:
+        kind = _recover_manifest_kind(config, value)
+        if kind is None:
+            raise ValueError("Bulk Inbox item has no authoritative media kind")
+        value["kind"] = kind
+        save_json_atomic(path, value)
+    _validate_manifest_provenance(config, value)
     if mark_seen and not value.get("seen"):
         value["seen"] = True
         save_json_atomic(path, value)
     return value
+
+
+def _recover_manifest_kind(config, manifest):
+    """Migrate old manifests only when one durable authority proves their kind."""
+    from .api import records
+    identities = manifest.get("identities") or []
+    matches = [kind for kind in ("actor", "movie", "show")
+               if identities and all(identity in records(config, kind) for identity in identities)]
+    paths = [manifest.get("local_target"),
+             *(action.get("path") for action in manifest.get("actions", [])
+               if isinstance(action, dict))]
+    for candidate in paths:
+        if not candidate:
+            continue
+        resolved = Path(candidate).resolve()
+        if resolved == config.tv_root.resolve() or config.tv_root.resolve() in resolved.parents:
+            matches.append("show")
+        elif resolved == config.movie_root.resolve() or config.movie_root.resolve() in resolved.parents:
+            matches.append("actor" if ".actors" in resolved.parts else "movie")
+    matches = list(dict.fromkeys(matches))
+    return matches[0] if len(matches) == 1 else None
+
+
+def _validate_manifest_provenance(config, manifest):
+    from .api import records
+    kind = manifest["kind"]
+    identities = manifest.get("identities") or []
+    proven = _recover_manifest_kind(config, manifest)
+    if proven != kind:
+        raise ValueError(f'Bulk Inbox {kind} item conflicts with authoritative provenance')
 
 
 def _inside_library(config, path):
@@ -268,12 +319,25 @@ def apply_inbox_item(config, item_id):
         if not _inside_library(config, path):
             raise ValueError("prepared destination is outside configured media roots")
         observed = _precondition(path)
+        already_written = (action["action"] == "write" and
+                           observed.get("exists") is True and
+                           observed.get("kind") == "file" and
+                           observed.get("size") == action.get("size") and
+                           observed.get("sha256") == action.get("sha256"))
         harmless_created_directory = (action["action"] == "mkdir" and
                                       action.get("precondition") == {"exists": False} and
                                       observed == {"exists": True, "kind": "directory"})
-        if observed != action.get("precondition") and not harmless_created_directory:
+        if (observed != action.get("precondition") and not harmless_created_directory
+                and not already_written):
+            expected = action.get("precondition") or {}
+            expected_description = ("no existing path" if not expected.get("exists") else
+                                    f"the unchanged {expected.get('kind', 'path')} recorded during preparation")
+            observed_description = ("no path" if not observed.get("exists") else
+                                    f"a {observed.get('kind', 'path')}")
             manifest.update({"state": "needs_attention",
-                             "reason": "filesystem changed since preparation"})
+                             "reason": (f"Cannot {action['action']} {path}: expected "
+                                        f"{expected_description}, but found {observed_description}. "
+                                        "The destination was not changed.")})
             save_json_atomic(root / "manifest.json", manifest)
             raise ValueError(manifest["reason"])
         if action["action"] == "write":
@@ -285,7 +349,8 @@ def apply_inbox_item(config, item_id):
             data = blob.read_bytes()
             if len(data) != action["size"] or hashlib.sha256(data).hexdigest() != action["sha256"]:
                 raise ValueError("prepared blob failed size/hash validation")
-            prepared.append((action, data))
+            if not already_written:
+                prepared.append((action, data))
         else:
             prepared.append((action, None))
     committer = FilesystemCommitter()

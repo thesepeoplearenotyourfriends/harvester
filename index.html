@@ -21,11 +21,10 @@
         <div class="menu-items">
           <button data-work="missing-actor-images">Missing Actor Images</button
           ><button data-work="failed-actors">Failed Actors</button
-          ><button data-work="lost-found">Lost &amp; Found</button
+          ><button data-work="lost-found">Missing Movie NFO</button
           ><button data-work="missing-posters">Missing Movie Posters</button
           ><button data-work="unresolved-movies">Unresolved Movies</button
-          ><button data-work="ambiguous-tv">Ambiguous TV</button
-          ><button data-work="not-found-tv">TV Not Found</button>
+          ><button data-work="unresolved-tv">Unresolved TV</button>
           <button data-work="inbox">Bulk Inbox</button>
           <button data-work="bulk">Bulk</button>
         </div>
@@ -97,7 +96,7 @@
           kind: "actor",
         },
         "lost-found": {
-          title: "Lost & Found",
+          title: "Missing Movie NFO",
           action: "list.movies",
           data: { missing: "nfo" },
           get: "get.movie",
@@ -135,6 +134,10 @@
           get: "get.show",
           inspect: "inspect.show",
           kind: "show",
+        },
+        "unresolved-tv": {
+          title: "Unresolved TV", action: "list.shows", data: { status: "unresolved" },
+          get: "get.show", inspect: "inspect.show", kind: "show",
         },
         "not-found-tv": {
           title: "TV Not Found",
@@ -193,6 +196,7 @@
         "unresolved-movies": { kind: "movie", aspect: "identity" },
         "failed-movies": { kind: "movie", aspect: "identity" },
         "ambiguous-tv": { kind: "show", aspect: "identity" },
+        "unresolved-tv": { kind: "show", aspect: "identity" },
         "not-found-tv": { kind: "show", aspect: "identity" },
         "tv-errors": { kind: "show", aspect: "identity" },
         "missing-tv-nfo": { kind: "show", aspect: "nfo" },
@@ -302,7 +306,7 @@
           { h: "Movies" },
           { n: "All", w: "all-movies", c: count("movies", "total") },
           {
-            n: "Lost & Found",
+            n: "Missing NFO",
             w: "lost-found",
             c: count("movies", "missing_nfo"),
           },
@@ -325,9 +329,8 @@
           },
           { n: "Missing NFO", w: "missing-tv-nfo", c: count("tv", "missing_nfo") },
           { n: "Missing poster", w: "missing-tv-posters", c: count("tv", "missing_poster") },
-          { n: "Ambiguous", w: "ambiguous-tv", c: count("tv", "ambiguous") },
-          { n: "Not found", w: "not-found-tv", c: count("tv", "not_found") },
-          { n: "Errors", w: "tv-errors", c: count("tv", "error") },
+          { n: "Unresolved", w: "unresolved-tv", c: count("tv", "ambiguous") + count("tv", "not_found") },
+          { n: "Failed", w: "tv-errors", c: count("tv", "error") },
           { h: "Providers" },
           { n: "Provider status", w: "providers" },
         ];
@@ -348,7 +351,7 @@
         let groups = {
           Actors: tocRows().slice(1, 4),
           Movies: tocRows().slice(5, 10),
-          TV: tocRows().slice(11, 15),
+          TV: tocRows().slice(11, 16),
         };
         document.querySelector("#workspace").innerHTML =
           '<div class="overview"><h1>Overview</h1><p class="muted">Saved work and local receipts</p>' +
@@ -456,7 +459,6 @@
           status: rows.length ? "running" : "complete",
           message: rows.length ? "Working…" : "Nothing to process",
         };
-        state.bulk.drawerOpen = true;
         setWriterControls();
         renderBulkPresentations();
         if (!rows.length) return;
@@ -473,11 +475,6 @@
         }
         setWriterControls();
         renderBulkPresentations();
-        if (selectedIndex !== null && state.workflow === workflow) {
-          await refreshInventory();
-          await openWorkflow(workflow);
-          if (state.rows.length) selectRow(Math.min(selectedIndex, state.rows.length - 1));
-        }
       }
       function updateBulkEvent(event) {
         const job = state.bulk.job;
@@ -552,7 +549,9 @@
         state.generation++;
         state.selectionGeneration++;
         state.workflow = "inbox";
+        const generation = state.generation, selectionGeneration = state.selectionGeneration;
         await refreshInboxSummary();
+        if (state.workflow !== "inbox" || generation !== state.generation || selectionGeneration !== state.selectionGeneration) return false;
         const items = state.inbox.items;
         const outcomeMarker = (item) => ({ ready: "🟢", partial: "🟡", failure: "⚠" })[item.summary?.outcome || (item.state === "ready" ? "ready" : "failure")];
         document.querySelector("#context-pane").innerHTML = `<div class="context-nav"><button id="back-overview">⮪ Overview</button></div><div class="context-scroll"><div class="workflow-heading"><h1>Bulk Inbox</h1></div><div class="queue">${items.map((item, index) => `<button data-inbox-row="${index}" class="${item.seen ? "" : "unseen"}"><span>${outcomeMarker(item)} ${esc(item.display_title)}</span></button>`).join("")}</div><div class="inbox-actions"><button id="apply-ready">Apply All Ready</button><button id="discard-all">Discard All Pending</button></div></div>`;
@@ -561,24 +560,28 @@
         document.querySelectorAll("[data-inbox-row]").forEach((button) => button.onclick = () => selectInboxItem(+button.dataset.inboxRow));
         document.querySelector("#apply-ready").onclick = () => inboxBatch("inbox.apply_all");
         document.querySelector("#discard-all").onclick = () => inboxBatch("inbox.discard_all");
+        return true;
       }
       async function selectInboxItem(index) {
+        state.selectionGeneration++;
         const summary = state.inbox.items[index];
         const item = await App.request("inbox.get", { item_id: summary.item_id }, true);
         summary.seen = true;
         const writes = item.actions.filter((action) => action.action === "write");
         const preview = writes.find((action) => /\.(jpe?g|png|webp)$/i.test(action.path));
         const previewUrl = preview ? `asset://${PACKAGE_ID}/.cache/bulk/inbox/${item.item_id}/${preview.blob}` : null;
-        const kind = item.workflow.includes("actor") ? "actor" : ["ambiguous-tv", "not-found-tv", "tv-errors", "missing-tv-nfo", "missing-tv-posters"].includes(item.workflow) ? "show" : "movie";
+        const kind = item.kind;
+        if (!["actor", "movie", "show"].includes(kind)) throw Error("Inbox item has no authoritative media kind");
         const query = { ...(item.query?.inferred || {}), ...(item.query?.override || {}) };
         const queryFields = kind === "actor"
-          ? `<label>Name <input id="query-name" value="${esc(query.name || "")}" maxlength="300"></label>`
-          : `<label>Title <input id="query-title" value="${esc(query.title || "")}" maxlength="300"></label><label>Year <input id="query-year" value="${esc(query.year || "")}" inputmode="numeric" maxlength="4"></label>`;
+          ? `<label><span>Name</span><input id="query-name" value="${esc(query.name || "")}" maxlength="300"></label>`
+          : `<label><span>Title</span><input id="query-title" value="${esc(query.title || "")}" maxlength="300"></label><label><span>Year</span><input id="query-year" value="${esc(query.year || "")}" inputmode="numeric" maxlength="4"></label>`;
         const candidates = ["movie", "show"].includes(kind) ? (item.summary?.provider_results?.[0]?.candidates || []) : [];
         const candidateCards = candidates.length ? `<section class="candidate-results"><h2>Candidate results</h2>${candidates.map((candidate, candidateIndex) => `<article class="candidate"><strong>${esc(candidate.title || candidate.name || "Untitled")}</strong>${candidate.original_title && candidate.original_title !== candidate.title ? `<span>Original title: ${esc(candidate.original_title)}</span>` : ""}<span>${kind === "show" ? "Year" : "Release"}: ${esc(candidate.release_date || candidate.year || "Unknown")}</span><span>Score: ${esc(candidate.score ?? "Unknown")}</span><button type="button" data-candidate-index="${candidateIndex}">Use this result</button></article>`).join("")}</section>` : "";
         const manualImage = ["actor", "movie"].includes(kind) && (kind === "actor" || item.workflow === "missing-posters") ? `<div id="inbox-drop-zone" class="drop-zone" tabindex="0">Drop an image here<br><span>or</span><br><button id="choose-inbox-image" type="button">Choose Image…</button><input id="inbox-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></div>` : "";
         const applyReason = item.state === "ready" ? "Apply prepared filesystem changes" : (item.reason || "Resolve this item before applying");
-        document.querySelector("#workspace").innerHTML = `<article class="inspector"><h1>${esc(item.display_title)}</h1><p><strong>${item.state === "ready" ? "Ready for review" : "Needs attention"}</strong></p>${item.reason ? `<p class="error">${esc(item.reason)}</p>` : ""}${previewUrl ? `<img class="inbox-preview" src="${previewUrl}" alt="Prepared artwork preview">` : ""}${manualImage}<h2>Proposal</h2><pre>${esc(JSON.stringify(item.summary, null, 2))}</pre>${candidateCards}<h2>Exact filesystem changes</h2><ul>${item.actions.map((action) => `<li>${esc(action.action)} · ${esc(action.path)}${action.size === undefined ? "" : ` · ${action.size} bytes`} · expected ${action.precondition?.exists ? esc(action.precondition.kind || "present") : "absent"}</li>`).join("")}</ul><section class="provider-query"><h2>Provider query</h2>${queryFields}</section><div class="inbox-actions"><button id="apply-item" title="${esc(applyReason)}" ${item.state !== "ready" ? "disabled" : ""}>Apply</button><button id="discard-item">Discard</button><button id="retry-item">Retry Search…</button></div></article>`;
+        const describeAction = (action) => `${action.action} · ${action.path}${action.size === undefined ? "" : ` · ${action.size} bytes`} · destination was ${action.precondition?.exists ? `a ${action.precondition.kind || "path"}` : "absent"} when prepared`;
+        document.querySelector("#workspace").innerHTML = `<article class="inspector"><h1>${esc(item.display_title)}</h1><p><strong>${item.state === "ready" ? "Ready for review" : "Needs attention"}</strong></p>${item.reason ? `<p class="error">${esc(item.reason)}</p>` : ""}${previewUrl ? `<img class="inbox-preview" src="${previewUrl}" alt="Prepared artwork preview">` : ""}${manualImage}${candidateCards}<h2>Exact filesystem changes</h2><ul>${item.actions.map((action) => `<li>${esc(describeAction(action))}</li>`).join("")}</ul><section class="provider-query"><h2>Provider query</h2>${queryFields}</section><div class="inbox-actions"><button id="apply-item" title="${esc(applyReason)}" ${item.state !== "ready" ? "disabled" : ""}>Apply</button><button id="discard-item">Discard</button><button id="retry-item">Retry Search…</button></div><h2>Proposal</h2><pre>${esc(JSON.stringify(item.summary, null, 2))}</pre></article>`;
         document.querySelector("#apply-item").onclick = () => inboxDecision("inbox.apply", item.item_id);
         document.querySelector("#discard-item").onclick = () => inboxDecision("inbox.discard", item.item_id);
         document.querySelector("#retry-item").onclick = () => retryInboxItem(item, kind);
@@ -587,10 +590,12 @@
         await refreshInboxSummary();
       }
       async function selectCandidate(item, candidateIndex) {
+        const generation = state.generation, selectionGeneration = state.selectionGeneration;
         const rows = [{ grouped: item.identities.length > 1,
           manifest_identities: item.identities, identifier: item.identities[0] }];
         await runBulk("inbox.select_candidate", { item_id: item.item_id, candidate_index: candidateIndex }, `${item.display_title}: selected result`, null, rows);
-        await openInbox();
+        if (state.workflow !== "inbox" || generation !== state.generation || selectionGeneration !== state.selectionGeneration) return;
+        if (!await openInbox()) return;
         const index = state.inbox.items.findIndex((candidate) => candidate.item_id === item.item_id);
         if (index >= 0) selectInboxItem(index);
       }
@@ -599,12 +604,17 @@
         if (!input || !zone) return;
         document.querySelector("#choose-inbox-image").onclick = (event) => { event.stopPropagation(); input.click(); };
         const prepare = async (file) => {
+          const generation = state.generation, selectionGeneration = state.selectionGeneration;
           try {
             const dataUrl = await normalizeActorImage(file);
             await App.request("inbox.install_image", { item_id: item.item_id, data_url: dataUrl }, false, true);
+            if (state.workflow !== "inbox" || generation !== state.generation || selectionGeneration !== state.selectionGeneration) return;
             const index = state.inbox.items.findIndex((candidate) => candidate.item_id === item.item_id);
             if (index >= 0) await selectInboxItem(index);
-          } catch (error) { showError(error.message || "Could not prepare image"); }
+          } catch (error) {
+            if (state.workflow === "inbox" && generation === state.generation && selectionGeneration === state.selectionGeneration)
+              showError(error.message || "Could not prepare image");
+          }
         };
         input.onchange = () => input.files[0] && prepare(input.files[0]);
         zone.ondragover = (event) => { event.preventDefault(); zone.classList.add("drag"); };
@@ -612,6 +622,7 @@
         zone.ondrop = (event) => { event.preventDefault(); zone.classList.remove("drag"); if (event.dataTransfer.files[0]) prepare(event.dataTransfer.files[0]); };
       }
       async function retryInboxItem(item, kind) {
+        const generation = state.generation, selectionGeneration = state.selectionGeneration;
         const query = kind === "actor"
           ? { name: document.querySelector("#query-name").value }
           : { title: document.querySelector("#query-title").value,
@@ -623,23 +634,36 @@
           [{ grouped: item.identities.length > 1,
              manifest_identities: item.identities,
              identifier: item.identities[0] }]);
-        await openInbox();
+        if (state.workflow !== "inbox" || generation !== state.generation || selectionGeneration !== state.selectionGeneration) return;
+        if (!await openInbox()) return;
         const index = state.inbox.items.findIndex((candidate) => candidate.item_id === item.item_id);
         if (index >= 0) selectInboxItem(index);
       }
       async function inboxDecision(action, itemId) {
+        const generation = state.generation, selectionGeneration = state.selectionGeneration;
         try {
           await App.request(action, { item_id: itemId }, false, true);
           if (action === "inbox.apply") state.inbox.applied++;
+          if (state.workflow !== "inbox" || generation !== state.generation || selectionGeneration !== state.selectionGeneration) return;
           await openInbox();
-        } catch (error) { showError(error.message); await refreshInboxSummary(); }
+        } catch (error) {
+          await refreshInboxSummary();
+          if (state.workflow === "inbox" && generation === state.generation && selectionGeneration === state.selectionGeneration)
+            showError(error.message);
+        }
       }
       async function inboxBatch(action) {
+        const generation = state.generation, selectionGeneration = state.selectionGeneration;
         try {
           const result = await App.request(action, {}, false, true);
           if (action === "inbox.apply_all") state.inbox.applied += result.applied || 0;
+          if (state.workflow !== "inbox" || generation !== state.generation || selectionGeneration !== state.selectionGeneration) return;
           await openInbox();
-        } catch (error) { showError(error.message); await refreshInboxSummary(); }
+        } catch (error) {
+          await refreshInboxSummary();
+          if (state.workflow === "inbox" && generation === state.generation && selectionGeneration === state.selectionGeneration)
+            showError(error.message);
+        }
       }
       function detailPairs(detail) {
         return Object.entries(detail)
@@ -664,12 +688,12 @@
           : "";
       }
       function searchArtworkInput(kind) {
-        if (state.workflow !== "search" || !["actor", "movie", "show"].includes(kind)) return "";
+        if (!(state.workflow === "search" || bulkWorkflows[state.workflow]) || !["actor", "movie", "show"].includes(kind)) return "";
         const noun = kind === "actor" ? "mugshot" : "poster";
         return `<div id="search-drop-zone" class="drop-zone" tabindex="0">Drop ${noun} here<br><span>or</span><br><button id="choose-search-image" type="button">Choose Image…</button><input id="search-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></div><p id="search-prepared" class="prepared-note" hidden>🟢 Prepared — <button id="search-open-inbox" type="button">Open Inbox</button></p>`;
       }
       function searchNfoInput(detail) {
-        if (state.workflow !== "search" || !["movie", "show"].includes(detail.kind)) return "";
+        if (!(state.workflow === "search" || bulkWorkflows[state.workflow]) || !["movie", "show"].includes(detail.kind)) return "";
         const candidates = detail.nfo_candidates || [], usable = candidates.filter((item) => item.usable);
         const existing = candidates.length ? `<h3>Existing NFOs on disk</h3><ul class="nfo-candidates">${candidates.map((item, index) =>
           `<li><strong>${esc(item.name)}</strong><br><span class="muted">${item.parseable ? `parseable · &lt;${esc(item.root)}&gt;${item.title ? ` · title: ${esc(item.title)}` : ""}` : `unusable · XML parse error: ${esc(item.parse_error || "unknown error")}`}</span>${item.usable ? `<br><button type="button" data-nfo-token="${esc(item.token)}" class="${usable.length === 1 ? "primary" : "compact-action"}">Use this NFO</button>` : ""}</li>`).join("")}</ul>` : '<p class="muted">No .nfo files found in this directory.</p>';
@@ -762,7 +786,7 @@
         const identityNote = detail.ownership?.status === "ambiguous"
           ? `<p class="error"><strong>Ambiguous poster ownership.</strong> ${esc(detail.ownership.reason)}</p>` : "";
         document.querySelector("#workspace").innerHTML =
-          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}${identityNote}${previewSlot()}${searchArtworkInput(detail.kind)}${searchNfoInput(detail)}<dl><dt>Directory</dt><dd>${esc(detail.directory)}</dd>${artifactLine("NFO", detail.nfo)}${artifactLine("Poster", detail.poster)}<dt>Video files</dt><dd>${esc(detail.video_count)}</dd>${Object.entries(fields).map(([key, value]) => `<dt>${esc(key.replaceAll("_", " "))}</dt><dd>${esc(typeof value === "object" ? JSON.stringify(value) : value)}</dd>`).join("")}</dl>${raw ? `<details><summary>Raw state</summary><pre>${esc(JSON.stringify(raw, null, 2))}</pre></details>` : ""}</article>`;
+          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}${identityNote}${previewSlot()}${searchArtworkInput(detail.kind)}<dl><dt>Directory</dt><dd>${esc(detail.directory)}</dd>${artifactLine("NFO", detail.nfo)}${artifactLine("Poster", detail.poster)}<dt>Video files</dt><dd>${esc(detail.video_count)}</dd>${Object.entries(fields).map(([key, value]) => `<dt>${esc(key.replaceAll("_", " "))}</dt><dd>${esc(typeof value === "object" ? JSON.stringify(value) : value)}</dd>`).join("")}</dl>${searchNfoInput(detail)}${raw ? `<details><summary>Raw state</summary><pre>${esc(JSON.stringify(raw, null, 2))}</pre></details>` : ""}</article>`;
         bindRefetch({ kind: detail.kind, identifier: detail.identifier, label: rowLabel(detail) });
         bindSearchNfo(detail);
         if (detail.poster?.present) loadArtifactPreview(detail.kind, detail.identifier);
@@ -1127,11 +1151,14 @@
         closeMenus();
       };
       const configFields = [
-        ["tmdb_api_key", "TMDB API key"], ["tmdb_bearer_token", "TMDB bearer token"],
-        ["tvdb_api_key", "TVDB API key"], ["tvdb_pin", "TVDB PIN"],
-        ["socks5", "SOCKS5 proxy"], ["socks5_username", "SOCKS5 username"],
-        ["socks5_password", "SOCKS5 password"],
+        ["tmdb_api_key", "API key", "tmdb"], ["tmdb_bearer_token", "Bearer token", "tmdb"],
+        ["tvdb_api_key", "API key", "tvdb"], ["tvdb_pin", "PIN", "tvdb"],
+        ["socks5", "Proxy", "socks"], ["socks5_username", "Username", "socks"],
+        ["socks5_password", "Password", "socks"],
       ];
+      function configurationMarkup(config) {
+        return ["tmdb", "tvdb", "socks"].map((group) => `<section class="config-provider"><h2>${group === "socks" ? "SOCKS" : group.toUpperCase()}</h2><div class="config-row">${configFields.filter((field) => field[2] === group).map(([name, label]) => `<label><span>${esc(label)}${config.environment_overrides[name] ? ' <small>overridden by environment</small>' : ""}</span><input name="${name}" type="${name === "socks5_password" ? "password" : "text"}" value="${esc(config.values[name])}" autocomplete="off"></label>`).join("")}</div></section>`).join("");
+      }
       document.querySelector("#open-configuration").onclick = async () => {
         closeMenus();
         const dialog = document.querySelector("#configuration"), fields = document.querySelector("#configuration-fields");
@@ -1141,7 +1168,7 @@
         dialog.showModal();
         try {
           const config = await App.request("config.get");
-          fields.innerHTML = configFields.map(([name, label]) => `<label><span>${esc(label)}${config.environment_overrides[name] ? ' <small>overridden by environment</small>' : ""}</span><input name="${name}" type="password" value="${esc(config.values[name])}" autocomplete="off"></label>`).join("");
+          fields.innerHTML = configurationMarkup(config);
         } catch (error) { const node = document.querySelector("#configuration-error"); node.textContent = error.message; node.hidden = false; }
       };
       document.querySelector("#save-configuration").onclick = async (event) => {
@@ -1151,7 +1178,7 @@
         const values = Object.fromEntries(inputs.map((input) => [input.name, input.value]));
         try {
           const config = await App.request("config.save", { values });
-          document.querySelector("#configuration-fields").innerHTML = configFields.map(([name, label]) => `<label><span>${esc(label)}${config.environment_overrides[name] ? ' <small>overridden by environment</small>' : ""}</span><input name="${name}" type="password" value="${esc(config.values[name])}" autocomplete="off"></label>`).join("");
+          document.querySelector("#configuration-fields").innerHTML = configurationMarkup(config);
           document.querySelector("#configuration").close();
         } catch (error) { const node = document.querySelector("#configuration-error"); node.textContent = error.message; node.hidden = false; }
       };

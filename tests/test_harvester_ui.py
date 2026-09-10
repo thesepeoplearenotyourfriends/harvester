@@ -524,6 +524,10 @@ if (identityless.liveProcessed !== 1 || identityless.activity !== 'Broken row') 
         self.assertNotIn('#apply-item, #discard-item', page.split('querySelectorAll("#scan-all', 1)[1].split(')', 1)[0])
         self.assertIn('runBulk("bulk.item", { workflow, scope, index }', page)
         self.assertIn("job.seenOwners.has(owner)", page)
+        self.assertNotIn("state.bulk.drawerOpen = true", page)
+        self.assertNotIn("await openWorkflow(workflow)", page)
+        self.assertIn('#query-title { width: min(40ch, 100%); }',
+                      (harvester_ui.PROJECT_DIR / "css" / "my.css").read_text(encoding="utf-8"))
 
     def test_candidate_click_supplies_frozen_row_and_issues_semantic_request(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
@@ -533,8 +537,9 @@ if (identityless.liveProcessed !== 1 || identityless.activity !== 'Broken row') 
         script = f"""
 let captured;
 async function runBulk(...args) {{ captured = args; }}
-async function openInbox() {{}}
-const state = {{inbox: {{items: []}}}};
+async function openInbox() {{ return true; }}
+const state = {{workflow: 'inbox', generation: 3, selectionGeneration: 4,
+               inbox: {{items: []}}}};
 function selectInboxItem() {{}}
 {function}
 (async () => {{
@@ -543,6 +548,109 @@ function selectInboxItem() {{}}
   if (captured[0] !== 'inbox.select_candidate') process.exit(1);
   if (captured[1].candidate_index !== 2 || captured[4][0].identifier !== 'movie.nfo') process.exit(2);
   if (state.inbox.items.length !== 0) process.exit(3);
+}})().catch(() => process.exit(3));
+"""
+        subprocess.run(["node", "-e", script], check=True)
+
+    def test_candidate_completion_does_not_steal_focus_after_navigation(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        start = page.index("async function selectCandidate")
+        end = page.index("\n      function bindInboxImage", start)
+        function = page[start:end]
+        script = f"""
+let reopened = false;
+const state = {{workflow: 'inbox', generation: 3, selectionGeneration: 4,
+               inbox: {{items: []}}}};
+async function runBulk() {{ state.workflow = 'search'; state.generation++; }}
+async function openInbox() {{ reopened = true; }}
+function selectInboxItem() {{}}
+{function}
+(async () => {{
+  await selectCandidate({{item_id:'stable', display_title:'Movie', identities:['movie.nfo']}}, 0);
+  if (reopened || state.workflow !== 'search') process.exit(1);
+}})().catch(() => process.exit(2));
+"""
+        subprocess.run(["node", "-e", script], check=True)
+
+    def test_open_inbox_refresh_race_does_not_render_or_reselect(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        start = page.index("async function openInbox")
+        end = page.index("\n      function bindInboxImage", start)
+        functions = page[start:end]
+        script = f"""
+let rendered = 0, selectedRequests = 0;
+const state = {{workflow: 'inbox', generation: 3, selectionGeneration: 4,
+               inbox: {{items: [{{item_id: 'stable'}}]}}}};
+async function refreshInboxSummary() {{
+  await Promise.resolve();
+  state.selectionGeneration++;
+}}
+const document = {{querySelector() {{ rendered++; throw Error('stale Inbox rendered'); }},
+                  querySelectorAll() {{ rendered++; return []; }}}};
+const App = {{async request() {{ selectedRequests++; return {{actions: [], workflow: 'movie'}}; }} }};
+async function runBulk() {{}}
+{functions}
+(async () => {{
+  await selectCandidate({{item_id: 'stable', display_title: 'Movie', identities: ['movie.nfo']}}, 0);
+  if (rendered || selectedRequests || state.workflow !== 'inbox') process.exit(1);
+}})().catch(() => process.exit(2));
+"""
+        subprocess.run(["node", "-e", script], check=True)
+
+    def test_image_install_completion_does_not_reselect_after_navigation(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        start = page.index("function bindInboxImage")
+        end = page.index("\n      async function retryInboxItem", start)
+        function = page[start:end]
+        script = f"""
+let selected = false, shownError = false;
+const input = {{files: [{{name: 'poster.jpg'}}]}}, zone = {{classList: {{remove() {{}}}}}};
+const document = {{querySelector(selector) {{
+  if (selector === '#inbox-image-file') return input;
+  if (selector === '#inbox-drop-zone') return zone;
+  if (selector === '#choose-inbox-image') return {{}};
+}}}};
+const state = {{workflow: 'inbox', generation: 3, selectionGeneration: 4,
+               inbox: {{items: [{{item_id: 'stable'}}]}}}};
+async function normalizeActorImage() {{ return 'data:image/jpeg;base64,eA=='; }}
+const App = {{async request() {{ state.selectionGeneration++; }}}};
+async function selectInboxItem() {{ selected = true; }}
+function showError() {{ shownError = true; }}
+{function}
+(async () => {{
+  bindInboxImage({{item_id: 'stable'}});
+  await input.onchange();
+  if (selected || shownError || state.workflow !== 'inbox') process.exit(1);
+}})().catch(() => process.exit(2));
+"""
+        subprocess.run(["node", "-e", script], check=True)
+
+    def test_inbox_decision_and_batch_completions_do_not_reopen_after_navigation(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        start = page.index("async function inboxDecision")
+        end = page.index("\n      function detailPairs", start)
+        functions = page[start:end]
+        script = f"""
+let reopened = 0, errors = 0, refreshed = 0;
+const state = {{workflow: 'inbox', generation: 3, selectionGeneration: 4,
+               inbox: {{applied: 0}}}};
+let requestNumber = 0;
+const App = {{async request(action) {{
+  requestNumber++;
+  if (requestNumber === 1) state.workflow = 'search';
+  else state.generation++;
+  return action === 'inbox.apply_all' ? {{applied: 2}} : {{}};
+}}}};
+async function openInbox() {{ reopened++; }}
+async function refreshInboxSummary() {{ refreshed++; }}
+function showError() {{ errors++; }}
+{functions}
+(async () => {{
+  await inboxDecision('inbox.apply', 'stable');
+  if (reopened || errors || state.inbox.applied !== 1) process.exit(1);
+  state.workflow = 'inbox'; state.generation = 8; state.selectionGeneration = 9;
+  await inboxBatch('inbox.apply_all');
+  if (reopened || errors || state.inbox.applied !== 3) process.exit(2);
 }})().catch(() => process.exit(3));
 """
         subprocess.run(["node", "-e", script], check=True)
@@ -558,7 +666,24 @@ function selectInboxItem() {{}}
             self.assertIn(f'{outcome}: "{marker}"', page)
         self.assertIn("item.summary?.outcome", page)
 
-    def test_tv_candidate_is_derived_host_side_and_prepared_without_research(self):
+    def test_inbox_renderer_consumes_persisted_kind(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        self.assertIn("const kind = item.kind;", page)
+        self.assertIn('if (!["actor", "movie", "show"].includes(kind))', page)
+        self.assertNotIn("function inboxItemKind", page)
+        menu = page[page.index('<div class="menu-items">'):page.index('</div>', page.index('<div class="menu-items">'))]
+        self.assertIn('data-work="unresolved-tv">Unresolved TV', menu)
+        self.assertNotIn("Ambiguous TV", menu)
+        self.assertNotIn("TV Not Found", menu)
+
+    def test_bulk_outcome_consumes_carried_kind_not_workflow_names(self):
+        self.assertEqual(bulk._scoped_record_outcome(
+            "show", ["id"], [{"status": "matched"}]), (False, None))
+        self.assertEqual(bulk._scoped_record_outcome(
+            "movie", ["id"], [{"status": "ok"}]), (False, None))
+        self.assertTrue(bulk._scoped_record_outcome(None, ["id"], [])[0])
+
+    def test_unresolved_tv_query_and_candidate_use_show_semantics(self):
         from harvester_core.artifacts import RecordingCommitter, get_inbox_item, persist_preparation
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); movies = root / "movies"; tv = root / "tv"
@@ -571,7 +696,7 @@ function selectInboxItem() {{}}
                 str(show): {"status": "ambiguous", "folder_name": show.name,
                             "query_title": "The Office", "query_year": None,
                             "local_target": str(show), "candidates": candidates}}})
-            plan = persist_preparation(config, "ambiguous-tv", [str(show)], RecordingCommitter(),
+            plan = persist_preparation(config, "unresolved-tv", [str(show)], RecordingCommitter(), kind="show",
                                        state="needs_attention", summary={
                                            "provider_results": [{"candidates": candidates}]})
             cache = root / ".cache" / "ui"
@@ -593,9 +718,9 @@ function selectInboxItem() {{}}
             with mock.patch("harvester_core.providers.tvdb.TVDBClient", return_value=provider), \
                     mock.patch("harvester_core.transport.transport_from_config",
                                return_value=object()):
-                bulk.run_scoped(config, "ambiguous-tv", [{
+                bulk.run_scoped(config, "unresolved-tv", [{
                     "identities": [str(show)], "display_title": "The Office",
-                    "local_target": str(show)}], 1)
+                    "local_target": str(show), "kind": "show"}], 1)
             item = get_inbox_item(config, plan["plan_id"])
             record = json.loads(config.state_path("tv_show_urls_tvdb.json").read_text())["shows"][str(show)]
             self.assertEqual(record["status"], "matched")
@@ -614,8 +739,9 @@ function selectInboxItem() {{}}
         script = f"""
 let selected = -1;
 async function runBulk() {{}}
-const state = {{inbox: {{items: []}}}};
-async function openInbox() {{ state.inbox.items = [{{item_id:'stable'}}]; }}
+const state = {{workflow: 'inbox', generation: 3, selectionGeneration: 4,
+               inbox: {{items: []}}}};
+async function openInbox() {{ state.inbox.items = [{{item_id:'stable'}}]; return true; }}
 function selectInboxItem(index) {{ selected = index; }}
 {function}
 (async () => {{
@@ -674,6 +800,27 @@ cancel.onclick();
 if (!closed || saved) process.exit(1);
 """
         subprocess.run(["node", "-e", script], check=True)
+
+    def test_configuration_and_inspector_layouts_are_task_oriented(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        css = (harvester_ui.PROJECT_DIR / "css" / "my.css").read_text(encoding="utf-8")
+        self.assertIn('class="config-provider"', page)
+        self.assertIn('name === "socks5_password" ? "password" : "text"', page)
+        self.assertIn(".config-row", css)
+        self.assertIn("<label><span>Title</span><input", page)
+        self.assertIn("<label><span>Year</span><input", page)
+        inspector = page[page.index("function renderInspector"):page.index("function renderRecordInspector")]
+        self.assertLess(inspector.index("refetchButton()"), inspector.index("previewSlot()"))
+        self.assertLess(inspector.index("previewSlot()"), inspector.index("searchArtworkInput"))
+        self.assertLess(inspector.index("searchArtworkInput"), inspector.index("<dl>"))
+        self.assertLess(inspector.index("</dl>"), inspector.index("searchNfoInput"))
+        inbox = page[page.index("const describeAction"):page.index('document.querySelector("#apply-item")')]
+        self.assertLess(inbox.index('id="apply-item"'), inbox.index("<h2>Proposal</h2>"))
+        self.assertIn("destination was ${action.precondition", page)
+        for label in ('n: "All"', 'n: "Missing NFO"', 'n: "Missing poster"',
+                      'n: "Unresolved"', 'n: "Failed"'):
+            self.assertGreaterEqual(page.count(label), 2)
+        self.assertIn('state.workflow === "search" || bulkWorkflows[state.workflow]', page)
 
 
 class BulkRecipeTests(unittest.TestCase):
@@ -1163,7 +1310,7 @@ class BulkRecipeTests(unittest.TestCase):
             with patches[0], patches[1], patches[2], patches[3]:
                 bulk.run_scoped(config, "ambiguous-tv", [{
                     "identities": [str(ambiguous)], "display_title": "Ambiguous",
-                    "local_target": str(ambiguous)}], 1)
+                    "local_target": str(ambiguous), "kind": "show"}], 1)
                 nfo_item = list_inbox(config)[0]
                 self.assertEqual(nfo_item["state"], "ready")
                 self.assertEqual([Path(action["path"]).name for action in nfo_item["actions"]
@@ -1173,7 +1320,7 @@ class BulkRecipeTests(unittest.TestCase):
 
                 bulk.run_scoped(config, "missing-tv-posters", [{
                     "identities": [str(poster_show)], "display_title": "Poster",
-                    "local_target": str(poster_show)}], 1)
+                    "local_target": str(poster_show), "kind": "show"}], 1)
                 poster_item = list_inbox(config)[0]
                 self.assertEqual(poster_item["state"], "ready")
                 apply_inbox_item(config, poster_item["item_id"])
@@ -1291,9 +1438,11 @@ class BulkRecipeTests(unittest.TestCase):
                     def prepared(*_args):
                         recorder = RecordingCommitter()
                         if succeeds:
-                            recorder.write(config.movie_root / "prepared" / f"{phase}.jpg",
+                            directory = config.movie_root / (".actors" if kind == "actor" else "prepared")
+                            recorder.write(directory / f"{phase}.jpg",
                                            b"artifact")
-                        plan = bulk.persist_preparation(config, workflow, [identity], recorder)
+                        plan = bulk.persist_preparation(config, workflow, [identity], recorder,
+                                                        kind=kind)
                         status = "planned" if succeeds else failure
                         details = {"status": status}
                         if not succeeds:
@@ -1303,7 +1452,7 @@ class BulkRecipeTests(unittest.TestCase):
                                 "preparation": plan, "message": "Finished"}
 
                     item = {"identities": [identity], "display_title": str(identity),
-                            "local_target": str(identity)}
+                            "local_target": str(identity), "kind": kind}
                     with mock.patch.object(bulk, "run", side_effect=prepared):
                         bulk.run_scoped(config, workflow, [item], 1)
                     inbox = list_inbox(config)[0]
@@ -1341,7 +1490,7 @@ class BulkRecipeTests(unittest.TestCase):
                                return_value=object()), \
                     mock.patch("harvester_core.jobs.movie_scan.run",
                                return_value={"processed": 1, "counts": {"ok": 1}}):
-                result = bulk.run(config, "lost-found", [str(nfo)])
+                result = bulk.run(config, "lost-found", "movie", [str(nfo)])
             item = get_inbox_item(config, result["preparation"]["plan_id"])
             self.assertEqual(item["state"], "ready")
             self.assertIsNone(item["reason"])
@@ -1372,7 +1521,7 @@ class BulkRecipeTests(unittest.TestCase):
                 def prepared(*_args):
                     recorder = RecordingCommitter()
                     recorder.write(Path(scoped), b"nfo")
-                    plan = bulk.persist_preparation(config, "lost-found", [scoped], recorder)
+                    plan = bulk.persist_preparation(config, "lost-found", [scoped], recorder, kind="movie")
                     # Deliberately aggregate both records to reproduce the scanner
                     # summary that must not classify this scoped Inbox item.
                     return {"processed": 2, "counts": {"identity_ok": 1,
@@ -1380,7 +1529,7 @@ class BulkRecipeTests(unittest.TestCase):
                             "preparation": plan,
                             "message": "Finished"}
                 item = {"identities": [scoped], "display_title": "Scoped",
-                        "local_target": scoped}
+                        "local_target": scoped, "kind": "movie"}
                 with mock.patch.object(bulk, "run", side_effect=prepared):
                     bulk.run_scoped(config, "lost-found", [item], 1)
                 inbox = list_inbox(config)
@@ -1395,17 +1544,17 @@ class BulkRecipeTests(unittest.TestCase):
                                   "tv_root": root / "tv"}, environ={}, app_dir=root)
             config.movie_root.mkdir(); config.tv_root.mkdir()
             calls = []
-            def prepare(_config, workflow, identities, reporter):
+            def prepare(_config, workflow, kind, identities, reporter):
                 if calls:
                     self.assertEqual(len(__import__("harvester_core.artifacts", fromlist=["list_inbox"]).list_inbox(config)), 1)
                 recorder = __import__("harvester_core.artifacts", fromlist=["RecordingCommitter"]).RecordingCommitter()
                 recorder.write(config.movie_root / identities[0] / "movie.nfo", b"prepared")
-                plan = bulk.persist_preparation(config, workflow, identities, recorder)
+                plan = bulk.persist_preparation(config, workflow, identities, recorder, kind=kind)
                 calls.append(identities[0])
                 return {"processed": 1, "counts": {}, "preparation": plan,
                         "message": "prepared"}
-            items = [{"identities": ["one"], "display_title": "One", "local_target": None},
-                     {"identities": ["two"], "display_title": "Two", "local_target": None}]
+            items = [{"identities": ["one"], "display_title": "One", "local_target": None, "kind": "movie"},
+                     {"identities": ["two"], "display_title": "Two", "local_target": None, "kind": "movie"}]
             with mock.patch.object(bulk, "run", side_effect=prepare):
                 result = bulk.run_scoped(config, "lost-found", items, 2)
             self.assertEqual(result["processed"], 2)
@@ -1418,8 +1567,11 @@ class BulkRecipeTests(unittest.TestCase):
             config = load_config({"state_dir": root / "state", "movie_root": root / "movies",
                                   "tv_root": root / "tv"}, environ={}, app_dir=root)
             config.movie_root.mkdir(); config.tv_root.mkdir()
-            item = {"identities": ["unresolved"], "display_title": "Unresolved",
-                    "local_target": None}
+            identity = str(config.movie_root / "Unresolved" / "movie.nfo")
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"movies": {
+                identity: {"status": "unresolved", "local_target": identity}}})
+            item = {"identities": [identity], "display_title": "Unresolved",
+                    "local_target": identity, "kind": "movie"}
             with mock.patch.object(bulk, "run", side_effect=RuntimeError("provider unavailable")):
                 result = bulk.run_scoped(config, "lost-found", [item], 1)
             self.assertFalse(result["ok"])
@@ -1432,7 +1584,8 @@ class BulkRecipeTests(unittest.TestCase):
                       "message": "Finished"}
         with mock.patch.object(bulk, "run", return_value=underlying):
             result = bulk.run_scoped(mock.Mock(), "missing-posters",
-                                     ["group-a", "group-b"], 1)
+                                     [{"identities": ["group-a", "group-b"], "display_title": "Group",
+                                       "local_target": None, "kind": "movie"}], 1)
         self.assertEqual(result["processed"], 1)
         self.assertEqual(result["counts"]["scoped_identities"], 2)
         self.assertEqual(result["counts"]["identity_ok"], 2)
@@ -1453,7 +1606,7 @@ class BulkRecipeTests(unittest.TestCase):
                            {"processed": 1, "counts": {"ok": 1}}), \
                 mock.patch.object(bulk, "persist_preparation",
                                   return_value={"prepared": 1}):
-            result = bulk.run(config, "lost-found", ["movie"], None)
+            result = bulk.run(config, "lost-found", "movie", ["movie"], None)
         self.assertEqual(calls, ["scan", "materialize"])
         self.assertEqual(result["processed"], 1)
         self.assertFalse(committers[0].committing)
@@ -1464,6 +1617,8 @@ class BulkRecipeTests(unittest.TestCase):
             config = load_config({"state_dir": root / "state", "movie_root": root / "movies",
                                   "tv_root": root / "tv"}, environ={}, app_dir=root)
             config.movie_root.mkdir()
+            save_json_atomic(config.state_path("movie_actor_queue.json"), {"actors": {
+                "Has URL": {"status": "pending"}, "No URL": {"status": "pending"}}})
             class Response:
                 headers = {"Content-Type": "image/jpeg"}
                 def __enter__(self): return self
@@ -1485,7 +1640,7 @@ class BulkRecipeTests(unittest.TestCase):
                                return_value=object()), \
                     mock.patch("harvester_core.jobs.movie_actor_scan.run",
                                side_effect=scan_with_one_source):
-                result = bulk.run(config, "missing-actor-images",
+                result = bulk.run(config, "missing-actor-images", "actor",
                                   ["Has URL", "No URL"], None)
             self.assertEqual(transport.user_agent, "local-tmdb-actor-photo-gulper/1.0")
             self.assertEqual(result["processed"], 2)
@@ -1502,7 +1657,7 @@ class BulkRecipeTests(unittest.TestCase):
                     "processed": 1, "counts": {"poster_unresolved_target": 1}}), \
                 mock.patch.object(bulk, "persist_preparation",
                                   return_value={"prepared": 0}):
-            result = bulk.run(config, "missing-posters", ["movie"], None)
+            result = bulk.run(config, "missing-posters", "movie", ["movie"], None)
         self.assertFalse(result["ok"])
         self.assertIn("no safe poster target", result["message"])
         self.assertEqual(result["counts"]["poster_unresolved_target"], 1)
@@ -1522,6 +1677,51 @@ class BulkRecipeTests(unittest.TestCase):
             config = mock.Mock(app_dir=root)
             with self.assertRaisesRegex(ValueError, "identity scope"):
                 bulk.load_scope(config, "missing-actor-images", path, generation, 1)
+
+    def test_frozen_kind_must_match_authoritative_collection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); cache = root / ".cache" / "ui"; cache.mkdir(parents=True)
+            identity = str(movies / "Movie" / "movie.nfo")
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"movies": {
+                identity: {"status": "ok", "local_target": identity}}})
+            items = [{"kind": "show", "identifier": identity,
+                      "local_target": str(Path(identity).parent)}]
+            generation = __import__("hashlib").sha256(json.dumps(
+                items, sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest()[:20]
+            path = cache / "collection-v1-conflict.json"
+            path.write_text(json.dumps({"version": 1, "generation": generation,
+                                        "items": items}))
+            with self.assertRaisesRegex(ValueError, "show row conflicts"):
+                bulk.load_scope_items(config, "unresolved-tv", path, generation, 1)
+
+    def test_workflow_kind_mismatches_fail_before_provider_or_job_dispatch(self):
+        cases = (("show", "unresolved-movies"),
+                 ("show", "missing-actor-images"),
+                 ("movie", "missing-tv-nfo"),
+                 ("actor", "missing-posters"))
+        provider_paths = ("harvester_core.providers.tmdb.TMDBClient",
+                          "harvester_core.providers.tvdb.TVDBClient")
+        job_paths = ("harvester_core.jobs.movie_actor_scan.run",
+                     "harvester_core.jobs.movie_actor_fetch.run",
+                     "harvester_core.jobs.movie_scan.run",
+                     "harvester_core.jobs.movie_materialize.run",
+                     "harvester_core.jobs.tv_scan.run",
+                     "harvester_core.jobs.tv_materialize.run")
+        for kind, workflow in cases:
+            with self.subTest(kind=kind, workflow=workflow):
+                patches = [mock.patch(path) for path in (*provider_paths, *job_paths)]
+                mocks = [patch.start() for patch in patches]
+                try:
+                    with self.assertRaisesRegex(ValueError, "not valid for authoritative kind"):
+                        bulk.run(mock.Mock(), workflow, kind, ["identity"])
+                    self.assertTrue(all(not operation.called for operation in mocks))
+                finally:
+                    for patch in reversed(patches):
+                        patch.stop()
 
     def test_movie_and_tv_renderers_use_artifact_inspection(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")

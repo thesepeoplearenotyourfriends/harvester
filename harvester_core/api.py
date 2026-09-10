@@ -208,7 +208,9 @@ def list_artifacts(config, kind, status=None, missing=None, group_directories=Fa
     selected = []
     for key, record in source.items():
         if status:
-            statuses = ("failed", "error") if kind == "movie" and status == "failed" else (status,)
+            statuses = (("failed", "error") if kind == "movie" and status == "failed" else
+                        ("ambiguous", "not_found") if kind == "show" and status == "unresolved"
+                        else (status,))
             if record.get("status") not in statuses:
                 continue
         selected.append((key, record))
@@ -260,7 +262,9 @@ def list_records(config, kind, status=None, limit=None, missing=None, brief=Fals
     values = [(key, record, decorate(config, kind, key, record))
               for key, record in source.items()]
     if status:
-        statuses = ("failed", "error") if kind == "movie" and status == "failed" else (status,)
+        statuses = (("failed", "error") if kind == "movie" and status == "failed" else
+                    ("ambiguous", "not_found") if kind == "show" and status == "unresolved"
+                    else (status,))
         values = [item for item in values if item[2].get("status") in statuses]
     if missing:
         if kind == "actor":

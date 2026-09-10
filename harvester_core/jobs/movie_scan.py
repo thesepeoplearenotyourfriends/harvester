@@ -2,6 +2,7 @@
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 import xml.etree.ElementTree as ET
 
 from ..events import emit
@@ -10,18 +11,22 @@ from ..storage import load_json, save_json_atomic
 from .movie_actor_scan import clean_year, last_year, resolve_movie_tmdb_id
 
 
-def filename_query_title(stem, year):
-    """Return the human search title preceding the chosen filename year token."""
-    title = stem
-    if year:
-        import re
-        match = None
-        for candidate in re.finditer(r"(?<!\d)(?:19|20)\d{2}(?!\d)", stem):
-            if int(candidate.group()) == year:
-                match = candidate
-        if match and stem[:match.start()].strip(" ._-()[]"):
-            title = stem[:match.start()]
-    return " ".join(title.replace(".", " ").replace("_", " ").strip(" -._()[]").split())
+def parse_movie_filename(filename):
+    """Extract a conservative provider title and the first plausible movie year."""
+    value = re.sub(r"\.[^.]+$", "", str(filename))
+    value = re.sub(r"[._-]+", " ", value)
+    value = re.sub(r"[\[\]{}]", " ", value)
+    value = re.sub(r"\(\s*\)", " ", value)
+    value = " ".join(value.split())
+
+    year_match = re.search(r"(?<!\d)(?:18|19|20)\d{2}(?!\d)", value)
+    if year_match:
+        title = re.sub(r"[\s(\[{]+$", "", value[:year_match.start()])
+        title = re.sub(r"^[\s)\]}]+", "", title)
+        return " ".join(title.split()), int(year_match.group())
+
+    title = re.sub(r"[()[\]{}]+", " ", value)
+    return " ".join(title.split()), None
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -66,8 +71,13 @@ def discover_movies(root):
         for nfo_path in targets:
             title = nfo_path.stem
             original_title = None
-            year = last_year(base.name) or last_year(title)
-            query_title = filename_query_title(title, year) if not nfo_path.exists() else None
+            if not nfo_path.exists():
+                query_title, filename_year = parse_movie_filename(videos[0].name)
+                title = query_title
+            else:
+                query_title, filename_year = None, None
+            year = (filename_year or last_year(base.name) if not nfo_path.exists()
+                    else last_year(base.name) or last_year(title))
             imdb_id = tmdb_id = None
             if nfo_path.exists():
                 try:
