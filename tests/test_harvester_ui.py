@@ -666,7 +666,25 @@ function showError() {{ errors++; }}
             self.assertIn(f'{outcome}: "{marker}"', page)
         self.assertIn("item.summary?.outcome", page)
 
-    def test_tv_candidate_is_derived_host_side_and_prepared_without_research(self):
+    def test_unresolved_tv_inbox_uses_show_query_and_candidate_semantics(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        start = page.index("function inboxItemKind")
+        end = page.index("\n      async function selectCandidate", start)
+        function = page[start:end]
+        script = function + """
+const kind = inboxItemKind('unresolved-tv');
+const query = kind === 'actor' ? {name: 'wrong'} : {title: 'The Office', year: '2005'};
+const releaseLabel = kind === 'show' ? 'Year' : 'Release';
+if (kind !== 'show' || query.title !== 'The Office' || query.year !== '2005' || releaseLabel !== 'Year')
+  process.exit(1);
+"""
+        subprocess.run(["node", "-e", script], check=True)
+        menu = page[page.index('<div class="menu-items">'):page.index('</div>', page.index('<div class="menu-items">'))]
+        self.assertIn('data-work="unresolved-tv">Unresolved TV', menu)
+        self.assertNotIn("Ambiguous TV", menu)
+        self.assertNotIn("TV Not Found", menu)
+
+    def test_unresolved_tv_query_and_candidate_use_show_semantics(self):
         from harvester_core.artifacts import RecordingCommitter, get_inbox_item, persist_preparation
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); movies = root / "movies"; tv = root / "tv"
@@ -679,7 +697,7 @@ function showError() {{ errors++; }}
                 str(show): {"status": "ambiguous", "folder_name": show.name,
                             "query_title": "The Office", "query_year": None,
                             "local_target": str(show), "candidates": candidates}}})
-            plan = persist_preparation(config, "ambiguous-tv", [str(show)], RecordingCommitter(),
+            plan = persist_preparation(config, "unresolved-tv", [str(show)], RecordingCommitter(),
                                        state="needs_attention", summary={
                                            "provider_results": [{"candidates": candidates}]})
             cache = root / ".cache" / "ui"
@@ -701,7 +719,7 @@ function showError() {{ errors++; }}
             with mock.patch("harvester_core.providers.tvdb.TVDBClient", return_value=provider), \
                     mock.patch("harvester_core.transport.transport_from_config",
                                return_value=object()):
-                bulk.run_scoped(config, "ambiguous-tv", [{
+                bulk.run_scoped(config, "unresolved-tv", [{
                     "identities": [str(show)], "display_title": "The Office",
                     "local_target": str(show)}], 1)
             item = get_inbox_item(config, plan["plan_id"])

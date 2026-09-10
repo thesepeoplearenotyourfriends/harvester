@@ -103,7 +103,7 @@ def _rescan(data):
 
 BULK_WORKFLOWS = frozenset({
     "missing-actor-images", "failed-actors", "lost-found", "missing-posters",
-    "unresolved-movies", "failed-movies", "ambiguous-tv", "not-found-tv", "tv-errors",
+    "unresolved-movies", "failed-movies", "unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors",
     "missing-tv-nfo", "missing-tv-posters",
 })
 
@@ -214,7 +214,7 @@ def _inbox_retry(data):
     config = load_config(app_dir=PROJECT_DIR)
     item = get_inbox_item(config, data["item_id"])
     kind = "actor" if "actor" in item["workflow"] else "show" if item["workflow"] in {
-        "ambiguous-tv", "not-found-tv", "tv-errors", "missing-tv-nfo",
+        "unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors", "missing-tv-nfo",
         "missing-tv-posters"} else "movie"
     query = data["query"]
     valid_keys = (set(query) == {"name"} if kind == "actor" else
@@ -284,7 +284,7 @@ def _inbox_candidate(data):
     config = load_config(app_dir=PROJECT_DIR)
     item = get_inbox_item(config, data["item_id"])
     movie_workflows = {"lost-found", "unresolved-movies", "failed-movies"}
-    tv_workflows = {"ambiguous-tv", "not-found-tv", "tv-errors"}
+    tv_workflows = {"unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors"}
     if item["workflow"] not in movie_workflows | tv_workflows:
         raise BridgeError("candidate selection is unavailable for this Inbox workflow")
     try:

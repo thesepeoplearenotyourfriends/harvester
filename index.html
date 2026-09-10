@@ -24,8 +24,7 @@
           ><button data-work="lost-found">Missing Movie NFO</button
           ><button data-work="missing-posters">Missing Movie Posters</button
           ><button data-work="unresolved-movies">Unresolved Movies</button
-          ><button data-work="ambiguous-tv">Ambiguous TV</button
-          ><button data-work="not-found-tv">TV Not Found</button>
+          ><button data-work="unresolved-tv">Unresolved TV</button>
           <button data-work="inbox">Bulk Inbox</button>
           <button data-work="bulk">Bulk</button>
         </div>
@@ -571,7 +570,7 @@
         const writes = item.actions.filter((action) => action.action === "write");
         const preview = writes.find((action) => /\.(jpe?g|png|webp)$/i.test(action.path));
         const previewUrl = preview ? `asset://${PACKAGE_ID}/.cache/bulk/inbox/${item.item_id}/${preview.blob}` : null;
-        const kind = item.workflow.includes("actor") ? "actor" : ["ambiguous-tv", "not-found-tv", "tv-errors", "missing-tv-nfo", "missing-tv-posters"].includes(item.workflow) ? "show" : "movie";
+        const kind = inboxItemKind(item.workflow);
         const query = { ...(item.query?.inferred || {}), ...(item.query?.override || {}) };
         const queryFields = kind === "actor"
           ? `<label><span>Name</span><input id="query-name" value="${esc(query.name || "")}" maxlength="300"></label>`
@@ -588,6 +587,11 @@
         document.querySelectorAll("[data-candidate-index]").forEach((button) => button.onclick = () => selectCandidate(item, +button.dataset.candidateIndex));
         bindInboxImage(item);
         await refreshInboxSummary();
+      }
+      function inboxItemKind(workflow) {
+        if (workflow.includes("actor")) return "actor";
+        return ["unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors",
+          "missing-tv-nfo", "missing-tv-posters"].includes(workflow) ? "show" : "movie";
       }
       async function selectCandidate(item, candidateIndex) {
         const generation = state.generation, selectionGeneration = state.selectionGeneration;
