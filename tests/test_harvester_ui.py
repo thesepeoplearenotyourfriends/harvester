@@ -537,7 +537,7 @@ if (identityless.liveProcessed !== 1 || identityless.activity !== 'Broken row') 
         script = f"""
 let captured;
 async function runBulk(...args) {{ captured = args; }}
-async function openInbox() {{}}
+async function openInbox() {{ return true; }}
 const state = {{workflow: 'inbox', generation: 3, selectionGeneration: 4,
                inbox: {{items: []}}}};
 function selectInboxItem() {{}}
@@ -568,6 +568,31 @@ function selectInboxItem() {{}}
 (async () => {{
   await selectCandidate({{item_id:'stable', display_title:'Movie', identities:['movie.nfo']}}, 0);
   if (reopened || state.workflow !== 'search') process.exit(1);
+}})().catch(() => process.exit(2));
+"""
+        subprocess.run(["node", "-e", script], check=True)
+
+    def test_open_inbox_refresh_race_does_not_render_or_reselect(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        start = page.index("async function openInbox")
+        end = page.index("\n      function bindInboxImage", start)
+        functions = page[start:end]
+        script = f"""
+let rendered = 0, selectedRequests = 0;
+const state = {{workflow: 'inbox', generation: 3, selectionGeneration: 4,
+               inbox: {{items: [{{item_id: 'stable'}}]}}}};
+async function refreshInboxSummary() {{
+  await Promise.resolve();
+  state.selectionGeneration++;
+}}
+const document = {{querySelector() {{ rendered++; throw Error('stale Inbox rendered'); }},
+                  querySelectorAll() {{ rendered++; return []; }}}};
+const App = {{async request() {{ selectedRequests++; return {{actions: [], workflow: 'movie'}}; }} }};
+async function runBulk() {{}}
+{functions}
+(async () => {{
+  await selectCandidate({{item_id: 'stable', display_title: 'Movie', identities: ['movie.nfo']}}, 0);
+  if (rendered || selectedRequests || state.workflow !== 'inbox') process.exit(1);
 }})().catch(() => process.exit(2));
 """
         subprocess.run(["node", "-e", script], check=True)
@@ -699,7 +724,7 @@ let selected = -1;
 async function runBulk() {{}}
 const state = {{workflow: 'inbox', generation: 3, selectionGeneration: 4,
                inbox: {{items: []}}}};
-async function openInbox() {{ state.inbox.items = [{{item_id:'stable'}}]; }}
+async function openInbox() {{ state.inbox.items = [{{item_id:'stable'}}]; return true; }}
 function selectInboxItem(index) {{ selected = index; }}
 {function}
 (async () => {{

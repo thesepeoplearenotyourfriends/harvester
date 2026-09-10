@@ -546,7 +546,9 @@
         state.generation++;
         state.selectionGeneration++;
         state.workflow = "inbox";
+        const generation = state.generation, selectionGeneration = state.selectionGeneration;
         await refreshInboxSummary();
+        if (state.workflow !== "inbox" || generation !== state.generation || selectionGeneration !== state.selectionGeneration) return false;
         const items = state.inbox.items;
         const outcomeMarker = (item) => ({ ready: "🟢", partial: "🟡", failure: "⚠" })[item.summary?.outcome || (item.state === "ready" ? "ready" : "failure")];
         document.querySelector("#context-pane").innerHTML = `<div class="context-nav"><button id="back-overview">⮪ Overview</button></div><div class="context-scroll"><div class="workflow-heading"><h1>Bulk Inbox</h1></div><div class="queue">${items.map((item, index) => `<button data-inbox-row="${index}" class="${item.seen ? "" : "unseen"}"><span>${outcomeMarker(item)} ${esc(item.display_title)}</span></button>`).join("")}</div><div class="inbox-actions"><button id="apply-ready">Apply All Ready</button><button id="discard-all">Discard All Pending</button></div></div>`;
@@ -555,6 +557,7 @@
         document.querySelectorAll("[data-inbox-row]").forEach((button) => button.onclick = () => selectInboxItem(+button.dataset.inboxRow));
         document.querySelector("#apply-ready").onclick = () => inboxBatch("inbox.apply_all");
         document.querySelector("#discard-all").onclick = () => inboxBatch("inbox.discard_all");
+        return true;
       }
       async function selectInboxItem(index) {
         state.selectionGeneration++;
@@ -587,7 +590,7 @@
           manifest_identities: item.identities, identifier: item.identities[0] }];
         await runBulk("inbox.select_candidate", { item_id: item.item_id, candidate_index: candidateIndex }, `${item.display_title}: selected result`, null, rows);
         if (state.workflow !== "inbox" || generation !== state.generation || selectionGeneration !== state.selectionGeneration) return;
-        await openInbox();
+        if (!await openInbox()) return;
         const index = state.inbox.items.findIndex((candidate) => candidate.item_id === item.item_id);
         if (index >= 0) selectInboxItem(index);
       }
@@ -627,7 +630,7 @@
              manifest_identities: item.identities,
              identifier: item.identities[0] }]);
         if (state.workflow !== "inbox" || generation !== state.generation || selectionGeneration !== state.selectionGeneration) return;
-        await openInbox();
+        if (!await openInbox()) return;
         const index = state.inbox.items.findIndex((candidate) => candidate.item_id === item.item_id);
         if (index >= 0) selectInboxItem(index);
       }
