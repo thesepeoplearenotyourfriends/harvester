@@ -252,17 +252,6 @@ def run(config, workflow, identities, reporter=None):
                     if Path(record.get("nfo_path") or record.get("local_target", "")).is_file() and
                     not first_indexable_nfo(Path(
                         record.get("nfo_path") or record.get("local_target", "")).parent)[0]]
-        if unusable:
-            detail = next((candidate.get("parse_error") for record in unusable
-                           for candidate in record.get("nfo_candidates", [])
-                           if candidate.get("parse_error")), "XML parse error")
-            result = _item_result(identities, ("identity", scanned), ("nfo", {
-                "processed": len(unusable), "counts": {"nfo_unusable": len(unusable)},
-                "planned_statuses": {record["local_target"]: {
-                    "status": "unusable", "error": detail} for record in unusable}}),
-                message=f"NFO unusable: {detail}")
-            result["ok"] = False
-            return _finish(config, workflow, identities, recorder, result, len(unusable))
         should_prepare_nfo = workflow == "lost-found" or any(
             record.get("status") == "ok" and
             not first_indexable_nfo(Path(
@@ -274,7 +263,9 @@ def run(config, workflow, identities, reporter=None):
         from .movie_materialize import run as materialize
         written = materialize(config, reporter, overwrite_nfo=False, overwrite_poster=False,
                               targets=targets, transport=transport, write_nfo=True,
-                              write_poster=False, committer=recorder)
+                              write_poster=False, committer=recorder,
+                              replace_nfo_targets={record["local_target"]
+                                                   for record in unusable})
         return _finish(config, workflow, identities, recorder,
                        _item_result(identities, ("identity", scanned), ("nfo", written)))
     if workflow == "missing-posters":
