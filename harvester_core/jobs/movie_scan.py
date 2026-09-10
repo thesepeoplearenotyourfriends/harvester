@@ -73,6 +73,7 @@ def discover_movies(root):
             original_title = None
             if not nfo_path.exists():
                 query_title, filename_year = parse_movie_filename(videos[0].name)
+                title = query_title
             else:
                 query_title, filename_year = None, None
             year = (filename_year or last_year(base.name) if not nfo_path.exists()

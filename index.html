@@ -596,12 +596,17 @@
         if (!input || !zone) return;
         document.querySelector("#choose-inbox-image").onclick = (event) => { event.stopPropagation(); input.click(); };
         const prepare = async (file) => {
+          const generation = state.generation, selectionGeneration = state.selectionGeneration;
           try {
             const dataUrl = await normalizeActorImage(file);
             await App.request("inbox.install_image", { item_id: item.item_id, data_url: dataUrl }, false, true);
+            if (state.workflow !== "inbox" || generation !== state.generation || selectionGeneration !== state.selectionGeneration) return;
             const index = state.inbox.items.findIndex((candidate) => candidate.item_id === item.item_id);
             if (index >= 0) await selectInboxItem(index);
-          } catch (error) { showError(error.message || "Could not prepare image"); }
+          } catch (error) {
+            if (state.workflow === "inbox" && generation === state.generation && selectionGeneration === state.selectionGeneration)
+              showError(error.message || "Could not prepare image");
+          }
         };
         input.onchange = () => input.files[0] && prepare(input.files[0]);
         zone.ondragover = (event) => { event.preventDefault(); zone.classList.add("drag"); };
@@ -627,18 +632,30 @@
         if (index >= 0) selectInboxItem(index);
       }
       async function inboxDecision(action, itemId) {
+        const generation = state.generation, selectionGeneration = state.selectionGeneration;
         try {
           await App.request(action, { item_id: itemId }, false, true);
           if (action === "inbox.apply") state.inbox.applied++;
+          if (state.workflow !== "inbox" || generation !== state.generation || selectionGeneration !== state.selectionGeneration) return;
           await openInbox();
-        } catch (error) { showError(error.message); await refreshInboxSummary(); }
+        } catch (error) {
+          await refreshInboxSummary();
+          if (state.workflow === "inbox" && generation === state.generation && selectionGeneration === state.selectionGeneration)
+            showError(error.message);
+        }
       }
       async function inboxBatch(action) {
+        const generation = state.generation, selectionGeneration = state.selectionGeneration;
         try {
           const result = await App.request(action, {}, false, true);
           if (action === "inbox.apply_all") state.inbox.applied += result.applied || 0;
+          if (state.workflow !== "inbox" || generation !== state.generation || selectionGeneration !== state.selectionGeneration) return;
           await openInbox();
-        } catch (error) { showError(error.message); await refreshInboxSummary(); }
+        } catch (error) {
+          await refreshInboxSummary();
+          if (state.workflow === "inbox" && generation === state.generation && selectionGeneration === state.selectionGeneration)
+            showError(error.message);
+        }
       }
       function detailPairs(detail) {
         return Object.entries(detail)

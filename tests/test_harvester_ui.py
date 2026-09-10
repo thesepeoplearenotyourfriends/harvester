@@ -572,6 +572,64 @@ function selectInboxItem() {{}}
 """
         subprocess.run(["node", "-e", script], check=True)
 
+    def test_image_install_completion_does_not_reselect_after_navigation(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        start = page.index("function bindInboxImage")
+        end = page.index("\n      async function retryInboxItem", start)
+        function = page[start:end]
+        script = f"""
+let selected = false, shownError = false;
+const input = {{files: [{{name: 'poster.jpg'}}]}}, zone = {{classList: {{remove() {{}}}}}};
+const document = {{querySelector(selector) {{
+  if (selector === '#inbox-image-file') return input;
+  if (selector === '#inbox-drop-zone') return zone;
+  if (selector === '#choose-inbox-image') return {{}};
+}}}};
+const state = {{workflow: 'inbox', generation: 3, selectionGeneration: 4,
+               inbox: {{items: [{{item_id: 'stable'}}]}}}};
+async function normalizeActorImage() {{ return 'data:image/jpeg;base64,eA=='; }}
+const App = {{async request() {{ state.selectionGeneration++; }}}};
+async function selectInboxItem() {{ selected = true; }}
+function showError() {{ shownError = true; }}
+{function}
+(async () => {{
+  bindInboxImage({{item_id: 'stable'}});
+  await input.onchange();
+  if (selected || shownError || state.workflow !== 'inbox') process.exit(1);
+}})().catch(() => process.exit(2));
+"""
+        subprocess.run(["node", "-e", script], check=True)
+
+    def test_inbox_decision_and_batch_completions_do_not_reopen_after_navigation(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        start = page.index("async function inboxDecision")
+        end = page.index("\n      function detailPairs", start)
+        functions = page[start:end]
+        script = f"""
+let reopened = 0, errors = 0, refreshed = 0;
+const state = {{workflow: 'inbox', generation: 3, selectionGeneration: 4,
+               inbox: {{applied: 0}}}};
+let requestNumber = 0;
+const App = {{async request(action) {{
+  requestNumber++;
+  if (requestNumber === 1) state.workflow = 'search';
+  else state.generation++;
+  return action === 'inbox.apply_all' ? {{applied: 2}} : {{}};
+}}}};
+async function openInbox() {{ reopened++; }}
+async function refreshInboxSummary() {{ refreshed++; }}
+function showError() {{ errors++; }}
+{functions}
+(async () => {{
+  await inboxDecision('inbox.apply', 'stable');
+  if (reopened || errors || state.inbox.applied !== 1) process.exit(1);
+  state.workflow = 'inbox'; state.generation = 8; state.selectionGeneration = 9;
+  await inboxBatch('inbox.apply_all');
+  if (reopened || errors || state.inbox.applied !== 3) process.exit(2);
+}})().catch(() => process.exit(3));
+"""
+        subprocess.run(["node", "-e", script], check=True)
+
     def test_bulk_buttons_and_all_durable_inbox_outcomes_are_themed(self):
         css = (harvester_ui.PROJECT_DIR / "css" / "my.css").read_text(encoding="utf-8")
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")

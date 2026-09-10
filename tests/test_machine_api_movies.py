@@ -430,12 +430,13 @@ class MachineApiMovieTests(unittest.TestCase):
         record = discover_movies(self.movies)[str(nfo.resolve())]
         self.assertEqual(record["year"], 2017)
 
-    def test_lone_video_filename_has_clean_provider_query_but_preserves_raw_title(self):
+    def test_lone_video_filename_supplies_inferred_title_and_provider_query(self):
         for filename, expected_title, expected_year in (
                 ("Don't.Worry.Darling.2022.1080p.mkv", "Don't Worry Darling", 2022),
                 ("Megalopolis.2024.10bit.mkv", "Megalopolis", 2024),
                 ("1922 - 2017.720p.mkv", "", 1922),
                 ("Drive_().avi", "Drive", None),
+                ("Full_Metal_Jacket_(1987).avi", "Full Metal Jacket", 1987),
                 ("Willy-Wonka_&_The.Chocolate.Factory.[1971].mkv",
                  "Willy Wonka & The Chocolate Factory", 1971)):
             with self.subTest(filename=filename):
@@ -443,7 +444,7 @@ class MachineApiMovieTests(unittest.TestCase):
                 folder = root / "Movie"
                 folder.mkdir(parents=True); (folder / filename).write_bytes(b"video")
                 record = next(iter(discover_movies(root).values()))
-                self.assertEqual(record["title"], Path(filename).stem)
+                self.assertEqual(record["title"], expected_title)
                 self.assertEqual(record["query_title"], expected_title)
                 self.assertEqual(record["year"], expected_year)
 
