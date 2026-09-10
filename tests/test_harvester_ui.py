@@ -1698,6 +1698,31 @@ class BulkRecipeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "show row conflicts"):
                 bulk.load_scope_items(config, "unresolved-tv", path, generation, 1)
 
+    def test_workflow_kind_mismatches_fail_before_provider_or_job_dispatch(self):
+        cases = (("show", "unresolved-movies"),
+                 ("show", "missing-actor-images"),
+                 ("movie", "missing-tv-nfo"),
+                 ("actor", "missing-posters"))
+        provider_paths = ("harvester_core.providers.tmdb.TMDBClient",
+                          "harvester_core.providers.tvdb.TVDBClient")
+        job_paths = ("harvester_core.jobs.movie_actor_scan.run",
+                     "harvester_core.jobs.movie_actor_fetch.run",
+                     "harvester_core.jobs.movie_scan.run",
+                     "harvester_core.jobs.movie_materialize.run",
+                     "harvester_core.jobs.tv_scan.run",
+                     "harvester_core.jobs.tv_materialize.run")
+        for kind, workflow in cases:
+            with self.subTest(kind=kind, workflow=workflow):
+                patches = [mock.patch(path) for path in (*provider_paths, *job_paths)]
+                mocks = [patch.start() for patch in patches]
+                try:
+                    with self.assertRaisesRegex(ValueError, "not valid for authoritative kind"):
+                        bulk.run(mock.Mock(), workflow, kind, ["identity"])
+                    self.assertTrue(all(not operation.called for operation in mocks))
+                finally:
+                    for patch in reversed(patches):
+                        patch.stop()
+
     def test_movie_and_tv_renderers_use_artifact_inspection(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
         css = (harvester_ui.PROJECT_DIR / "css" / "my.css").read_text(encoding="utf-8")

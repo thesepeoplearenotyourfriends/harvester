@@ -18,11 +18,25 @@ from ..storage import save_json_atomic
 from ..events import emit
 
 
-WORKFLOWS = frozenset({
-    "missing-actor-images", "failed-actors", "lost-found", "missing-posters",
-    "unresolved-movies", "failed-movies", "unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors",
-    "missing-tv-nfo", "missing-tv-posters",
-})
+WORKFLOW_KINDS = {
+    "missing-actor-images": "actor", "failed-actors": "actor",
+    "lost-found": "movie", "missing-posters": "movie",
+    "unresolved-movies": "movie", "failed-movies": "movie",
+    "unresolved-tv": "show", "ambiguous-tv": "show", "not-found-tv": "show",
+    "tv-errors": "show", "missing-tv-nfo": "show", "missing-tv-posters": "show",
+}
+WORKFLOWS = frozenset(WORKFLOW_KINDS)
+
+
+def _validate_workflow_kind(workflow, kind):
+    """Validate an operation against provenance without deriving provenance from it."""
+    if workflow not in WORKFLOW_KINDS:
+        raise ValueError("unknown Bulk workflow")
+    if kind not in {"actor", "movie", "show"}:
+        raise ValueError("Bulk operation requires an authoritative kind")
+    if WORKFLOW_KINDS[workflow] != kind:
+        raise ValueError(
+            f"Bulk workflow {workflow!r} is not valid for authoritative kind {kind!r}")
 
 
 def load_scope(config, workflow, scope_file, generation, count):
@@ -72,8 +86,7 @@ def load_scope_items(config, workflow, scope_file, generation, count):
         identities = list(dict.fromkeys(value for value in candidates
                                         if isinstance(value, str) and value))
         kind = row.get("kind")
-        if kind not in {"actor", "movie", "show"}:
-            raise ValueError("frozen Bulk row has no authoritative kind")
+        _validate_workflow_kind(workflow, kind)
         authoritative = []
         for identity in identities:
             try:
@@ -216,10 +229,7 @@ def _scoped_artifact_outcome(workflow, result):
 
 def run(config, workflow, kind, identities, reporter=None):
     """Run the allowlisted recipe while preserving pre-existing artifacts."""
-    if workflow not in WORKFLOWS:
-        raise ValueError("unknown Bulk workflow")
-    if kind not in {"actor", "movie", "show"}:
-        raise ValueError("Bulk recipe requires an authoritative kind")
+    _validate_workflow_kind(workflow, kind)
     for identity in identities:
         try:
             get_record(config, kind, identity)
@@ -307,6 +317,10 @@ def run(config, workflow, kind, identities, reporter=None):
         combined = _item_result(identities, ("poster", result), message=message)
         combined["ok"] = not unresolved
         return _finish(config, workflow, kind, identities, recorder, combined, unresolved)
+    # Reaching the TV implementation is an explicit authoritative-kind dispatch,
+    # not a default for workflow names that missed the branches above.
+    if kind != "show":
+        raise ValueError(f"Bulk workflow {workflow!r} has no {kind!r} implementation")
     from .tv_scan import run as scan
     from ..providers.tvdb import TVDBClient
     from ..transport import transport_from_config
@@ -359,8 +373,7 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
     for row_index, item in enumerate(items):
         identities = item["identities"]
         kind = item.get("kind")
-        if kind not in {"actor", "movie", "show"}:
-            raise ValueError("scoped Bulk item has no authoritative kind")
+        _validate_workflow_kind(workflow, kind)
         all_identities.extend(identities)
         # Empty/invalid rows are still durable review outcomes rather than
         # silently disappearing from the acquisition result.
