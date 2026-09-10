@@ -77,6 +77,31 @@ def _nfo_fields(path):
     return fields, None
 
 
+def _nfo_candidate(path):
+    """Describe an on-disk NFO without exposing its path as a write capability."""
+    try:
+        if path.stat().st_size > 1_000_000:
+            raise ValueError("NFO exceeds inspection limit")
+        raw = path.read_bytes()
+        text = raw.decode("utf-8")
+        if "<!doctype" in text.casefold() or "<!entity" in text.casefold():
+            raise ValueError("unsafe XML declaration")
+    except (OSError, UnicodeDecodeError, ValueError):
+        return {"name": path.name, "present": True, "parseable": False,
+                "root": None, "title": None, "usable": False}
+    fields, error = _nfo_fields(path)
+    root_name = None
+    if error is None:
+        try:
+            root_name = ET.parse(path).getroot().tag
+        except (OSError, ET.ParseError) as parse_error:
+            error = str(parse_error)
+    return {"name": path.name, "present": True, "parseable": error is None,
+            "root": root_name, "title": fields.get("title"),
+            "usable": error is None and root_name in ("movie", "tvshow") and
+            bool(fields.get("title"))}
+
+
 def _poster_candidates(directory, preferred=None):
     """Return actual local images following Harvester's poster-name convention."""
     candidates = []
@@ -144,6 +169,19 @@ def inspect_item(config, kind, identifier):
                      **({"parse_error": parse_error} if parse_error else {})})
     preferred = matches[0][1].get("poster_path") if kind == "movie" else None
     posters = _poster_candidates(directory, preferred)
+    try:
+        candidate_paths = sorted((path for path in directory.iterdir()
+                                  if path.is_file() and not path.is_symlink()
+                                  and path.suffix.casefold() == ".nfo"),
+                                 key=lambda path: path.name.casefold())
+    except OSError:
+        candidate_paths = []
+    expected_root = "movie" if kind == "movie" else "tvshow"
+    nfo_candidates = [_nfo_candidate(path) for path in candidate_paths]
+    for candidate in nfo_candidates:
+        candidate["usable"] = candidate["usable"] and candidate["root"] == expected_root
+    usable_candidates = [candidate for candidate in nfo_candidates
+                         if candidate["usable"]]
     videos = sorted(str(path) for path in directory.iterdir()
                     if path.is_file() and path.suffix.casefold() in
                     {".mkv", ".mp4", ".avi", ".mov", ".m4v"}) if directory.is_dir() else []
@@ -156,8 +194,10 @@ def inspect_item(config, kind, identifier):
             "manifest_identities": identities,
             "ownership": {"status": "ambiguous" if ambiguous else "unambiguous",
                           "reason": "multiple movie NFO records share this directory" if ambiguous else None},
-            "nfo": nfos[0] if len(nfos) == 1 else {"present": any(x["present"] for x in nfos),
-                                                    "count": len(nfos)},
+            "nfo": {**(nfos[0] if len(nfos) == 1 else {
+                "present": any(x["present"] for x in nfos), "count": len(nfos)}),
+                "present": any(x["present"] for x in nfos) or bool(usable_candidates)},
+            "nfo_candidates": nfo_candidates,
             "nfos": nfos, "poster": {"present": bool(posters),
                                        "path": str(posters[0]) if posters else None,
                                        "candidates": [str(path) for path in posters]},

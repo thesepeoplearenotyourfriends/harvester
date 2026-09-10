@@ -663,6 +663,13 @@
         const noun = kind === "actor" ? "mugshot" : "poster";
         return `<div id="search-drop-zone" class="drop-zone" tabindex="0">Drop ${noun} here<br><span>or</span><br><button id="choose-search-image" type="button">Choose Image…</button><input id="search-image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></div><p id="search-prepared" class="prepared-note" hidden>🟢 Prepared — <button id="search-open-inbox" type="button">Open Inbox</button></p>`;
       }
+      function searchNfoInput(detail) {
+        if (state.workflow !== "search" || !["movie", "show"].includes(detail.kind)) return "";
+        const candidates = detail.nfo_candidates || [], usable = candidates.filter((item) => item.usable);
+        const existing = candidates.length ? `<h3>Existing NFOs on disk</h3><ul class="nfo-candidates">${candidates.map((item, index) =>
+          `<li><strong>${esc(item.name)}</strong><br><span class="muted">${item.parseable ? `parseable · &lt;${esc(item.root)}&gt;${item.title ? ` · title: ${esc(item.title)}` : ""}` : "unusable · malformed XML"}</span>${item.usable ? `<br><button type="button" data-nfo-candidate="${index}" class="${usable.length === 1 ? "primary" : "compact-action"}">Use this NFO</button>` : ""}</li>`).join("")}</ul>` : '<p class="muted">No .nfo files found in this directory.</p>';
+        return `<section class="search-nfo"><h2>NFO</h2><p><strong>${detail.nfo?.present ? "Present" : "Missing"}</strong></p><button id="copy-nfo-prompt" type="button" class="compact-action">Copy NFO prompt</button>${existing}<h3>Use NFO:</h3><div id="search-nfo-drop-zone" class="drop-zone" tabindex="0">Drop .nfo here<br><span>or</span><br><button id="choose-search-nfo" type="button">Choose .nfo…</button><input id="search-nfo-file" type="file" accept=".nfo,text/xml,application/xml" hidden></div><label><input id="replace-search-nfo" type="checkbox"> Replace Existing NFO</label><textarea id="search-nfo-paste" rows="7" placeholder="Paste XML…"></textarea><button id="prepare-pasted-nfo" type="button">Use pasted XML</button></section>`;
+      }
       function showSearchPrepared() {
         const note = document.querySelector("#search-prepared");
         if (note) { note.hidden = false; document.querySelector("#search-open-inbox").onclick = openInbox; }
@@ -690,6 +697,44 @@
         zone.ondragleave = () => zone.classList.remove("drag");
         zone.ondrop = (event) => { event.preventDefault(); zone.classList.remove("drag"); event.dataTransfer.files[0] && prepare(event.dataTransfer.files[0]); };
       }
+      function bytesBase64(bytes) {
+        let binary = "";
+        for (let start = 0; start < bytes.length; start += 32768)
+          binary += String.fromCharCode(...bytes.subarray(start, start + 32768));
+        return btoa(binary);
+      }
+      function bindSearchNfo(detail) {
+        const zone = document.querySelector("#search-nfo-drop-zone"), input = document.querySelector("#search-nfo-file");
+        if (!zone || !input) return;
+        const replace = () => document.querySelector("#replace-search-nfo").checked;
+        const prepareBytes = async (bytes) => {
+          if (bytes.length > 1000000) { showError("NFO is larger than 1 MB"); return; }
+          try {
+            await App.request("item.install_nfo", { kind: detail.kind, identifier: detail.identifier, content_base64: bytesBase64(bytes), replace: replace() }, false, true);
+            await refreshInboxSummary(); showSearchPrepared();
+          } catch (error) { showError(error.message || "Could not prepare NFO"); }
+        };
+        document.querySelector("#choose-search-nfo").onclick = (event) => { event.stopPropagation(); input.click(); };
+        input.onchange = async () => input.files[0] && prepareBytes(new Uint8Array(await input.files[0].arrayBuffer()));
+        zone.ondragover = (event) => { event.preventDefault(); zone.classList.add("drag"); };
+        zone.ondragleave = () => zone.classList.remove("drag");
+        zone.ondrop = async (event) => { event.preventDefault(); zone.classList.remove("drag"); const file = event.dataTransfer.files[0]; if (file) prepareBytes(new Uint8Array(await file.arrayBuffer())); };
+        document.querySelector("#prepare-pasted-nfo").onclick = () => prepareBytes(new TextEncoder().encode(document.querySelector("#search-nfo-paste").value));
+        document.querySelector("#copy-nfo-prompt").onclick = async () => {
+          try { const result = await App.request("item.nfo_prompt", { kind: detail.kind, identifier: detail.identifier }, true); await navigator.clipboard.writeText(result.text); }
+          catch (error) { showError(error.message || "Could not copy NFO prompt"); }
+        };
+        document.querySelectorAll("[data-nfo-candidate]").forEach((button) => button.onclick = async () => {
+          try {
+            const result = await App.request("item.adopt_nfo", { kind: detail.kind, identifier: detail.identifier, candidate_index: +button.dataset.nfoCandidate, replace: replace() }, false, true);
+            if (result.prepared) { await refreshInboxSummary(); showSearchPrepared(); }
+            else {
+              const index = state.rows.findIndex((row) => row.identifier === detail.identifier);
+              if (index >= 0) { state.rows[index].identifier = result.identifier; await selectSearch(index); }
+            }
+          } catch (error) { showError(error.message || "Could not use NFO"); }
+        });
+      }
       function bindRefetch(row = null) {
         const button = document.querySelector("#refetch-item");
         if (button) button.onclick = state.workflow === "search" ? () => refetchSearchItem(row) : startSelectedBulk;
@@ -712,8 +757,9 @@
         const identityNote = detail.ownership?.status === "ambiguous"
           ? `<p class="error"><strong>Ambiguous poster ownership.</strong> ${esc(detail.ownership.reason)}</p>` : "";
         document.querySelector("#workspace").innerHTML =
-          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}${identityNote}${previewSlot()}${searchArtworkInput(detail.kind)}<dl><dt>Directory</dt><dd>${esc(detail.directory)}</dd>${artifactLine("NFO", detail.nfo)}${artifactLine("Poster", detail.poster)}<dt>Video files</dt><dd>${esc(detail.video_count)}</dd>${Object.entries(fields).map(([key, value]) => `<dt>${esc(key.replaceAll("_", " "))}</dt><dd>${esc(typeof value === "object" ? JSON.stringify(value) : value)}</dd>`).join("")}</dl>${raw ? `<details><summary>Raw state</summary><pre>${esc(JSON.stringify(raw, null, 2))}</pre></details>` : ""}</article>`;
+          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}${identityNote}${previewSlot()}${searchArtworkInput(detail.kind)}${searchNfoInput(detail)}<dl><dt>Directory</dt><dd>${esc(detail.directory)}</dd>${artifactLine("NFO", detail.nfo)}${artifactLine("Poster", detail.poster)}<dt>Video files</dt><dd>${esc(detail.video_count)}</dd>${Object.entries(fields).map(([key, value]) => `<dt>${esc(key.replaceAll("_", " "))}</dt><dd>${esc(typeof value === "object" ? JSON.stringify(value) : value)}</dd>`).join("")}</dl>${raw ? `<details><summary>Raw state</summary><pre>${esc(JSON.stringify(raw, null, 2))}</pre></details>` : ""}</article>`;
         bindRefetch({ kind: detail.kind, identifier: detail.identifier, label: rowLabel(detail) });
+        bindSearchNfo(detail);
         if (detail.poster?.present) loadArtifactPreview(detail.kind, detail.identifier);
       }
       function renderRecordInspector(detail) {

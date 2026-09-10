@@ -152,7 +152,13 @@ any missing collection file. A selected Search result is also the normal targete
 work surface: **Re-fetch this item** derives its allowlisted recipe from the durable
 record identity, while dropped movie/show posters and actor mugshots are normalized
 and stored as Inbox proposals. Both paths preserve existing library files until the
-user explicitly applies the resulting Inbox item.
+user explicitly applies the resulting Inbox item. Movie and show Search inspectors
+also enumerate bounded in-directory NFO candidates and accept chosen, dropped, or
+pasted UTF-8 XML. A valid existing movie NFO is adopted as the durable identity
+without copying or rewriting it; external movie NFOs and noncanonical TV NFOs remain
+exact-byte Inbox proposals until Apply, with replacement requiring explicit intent.
+**Copy NFO prompt** produces provider-free clipboard guidance from local facts and
+the tags emitted by Harvester's own movie or TV renderer.
 
 ## Changelog
 

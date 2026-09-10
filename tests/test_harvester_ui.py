@@ -639,6 +639,21 @@ function selectInboxItem(index) {{ selected = index; }}
                        page.index('App.request("item.install_image"') + 180]
         self.assertNotIn("path", request)
 
+    def test_search_nfo_controls_submit_no_renderer_filesystem_paths(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        self.assertIn("Copy NFO prompt", page)
+        self.assertIn("Existing NFOs on disk", page)
+        self.assertIn("Drop .nfo here", page)
+        self.assertIn('App.request("item.install_nfo", { kind: detail.kind, identifier: detail.identifier, content_base64:', page)
+        self.assertIn('App.request("item.adopt_nfo", { kind: detail.kind, identifier: detail.identifier, candidate_index:', page)
+        install = page[page.index('App.request("item.install_nfo"'):
+                       page.index('App.request("item.install_nfo"') + 260]
+        adopt = page[page.index('App.request("item.adopt_nfo"'):
+                     page.index('App.request("item.adopt_nfo"') + 260]
+        for request in (install, adopt):
+            self.assertNotIn("path:", request)
+            self.assertNotIn("source:", request)
+
     def test_configuration_cancel_explicitly_closes_without_saving(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
         self.assertIn('id="cancel-configuration" type="button"', page)
@@ -839,6 +854,130 @@ class BulkRecipeTests(unittest.TestCase):
             self.assertEqual(item["requested_artifacts"], ["nfo", "poster"])
             self.assertEqual(len(item["actions"]), 1)
             self.assertEqual(Path(item["actions"][0]["path"]), show / "poster.jpg")
+
+    def test_search_existing_movie_nfos_are_inspected_and_adopted_by_index(self):
+        from harvester_core.api import inspect_item
+        from harvester_core.storage import load_json
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); folder = movies / "Burnt"; folder.mkdir()
+            inferred = folder / "Burnt.missing.nfo"
+            chosen = folder / "Burnt.2015.720p.nfo"
+            chosen.write_bytes(b"<movie><title>Burnt</title><custom>keep</custom></movie>")
+            alternate = folder / "alternate.nfo"
+            alternate.write_bytes(b"<movie><title>Another cut</title></movie>")
+            malformed = folder / "broken.nfo"; malformed.write_text("<movie>")
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            preserved = {"status": "ok", "local_target": str(inferred),
+                         "nfo_path": str(inferred), "tmdb_id": 42,
+                         "query_override": {"title": "Burnt", "year": 2015},
+                         "nfo": {"title": "Burnt", "extra": "frozen"},
+                         "materialize": {"poster": {"status": "exists"}},
+                         "poster_path": str(folder / "poster")}
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"),
+                             {"movies": {str(inferred): preserved}})
+            detail = inspect_item(config, "movie", str(inferred))
+            self.assertTrue(detail["nfo"]["present"])
+            self.assertEqual([item["name"] for item in detail["nfo_candidates"]],
+                             [alternate.name, malformed.name, chosen.name])
+            self.assertEqual(sum(item["usable"] for item in detail["nfo_candidates"]), 2)
+            self.assertEqual(detail["nfo_candidates"][2], {
+                "name": chosen.name, "present": True, "parseable": True,
+                "root": "movie", "title": "Burnt", "usable": True})
+            self.assertFalse(detail["nfo_candidates"][1]["usable"])
+            with mock.patch("harvester_core.config.load_config", return_value=config), \
+                    mock.patch.object(harvester_ui, "PROJECT_DIR", root):
+                result = harvester_ui.run_action("item.adopt_nfo", {
+                    "kind": "movie", "identifier": str(inferred),
+                    "candidate_index": 2, "replace": False})
+                with self.assertRaises(harvester_ui.BridgeError):
+                    harvester_ui.run_action("item.adopt_nfo", {
+                        "kind": "movie", "identifier": result["identifier"],
+                        "candidate_index": 99, "replace": False})
+            state = load_json(config.state_path("movie_manifest_tmdb.json"))["movies"]
+            self.assertNotIn(str(inferred), state)
+            self.assertEqual(state[str(chosen)]["nfo_path"], str(chosen))
+            for key in ("tmdb_id", "query_override", "nfo", "materialize", "poster_path"):
+                self.assertEqual(state[str(chosen)][key], preserved[key])
+            self.assertEqual(chosen.read_bytes(),
+                             b"<movie><title>Burnt</title><custom>keep</custom></movie>")
+            self.assertFalse(inferred.exists())
+
+    def test_search_nfo_intake_preserves_exact_xml_and_requires_replace_intent(self):
+        from harvester_core.artifacts import get_inbox_item
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); movie = movies / "Movie"; show = tv / "Show"
+            movie.mkdir(); show.mkdir(); movie_target = movie / "movie.nfo"
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"movies": {
+                str(movie_target): {"status": "unresolved", "local_target": str(movie_target),
+                                    "nfo_path": str(movie_target), "tmdb_id": 12}}})
+            save_json_atomic(config.state_path("tv_show_urls_tvdb.json"), {"shows": {
+                str(show): {"status": "matched", "local_target": str(show), "tvdb_id": 34}}})
+            movie_xml = b'<?xml version="1.0"?>\n<movie><title>Movie</title><unknown x="1">retain</unknown></movie>\n'
+            tv_xml = b"<tvshow><title>Show</title><extra>retain</extra></tvshow>"
+            with mock.patch("harvester_core.config.load_config", return_value=config), \
+                    mock.patch.object(harvester_ui, "PROJECT_DIR", root):
+                movie_result = harvester_ui.run_action("item.install_nfo", {
+                    "kind": "movie", "identifier": str(movie_target),
+                    "content_base64": base64.b64encode(movie_xml).decode(), "replace": False})
+                tv_result = harvester_ui.run_action("item.install_nfo", {
+                    "kind": "show", "identifier": str(show),
+                    "content_base64": base64.b64encode(tv_xml).decode(), "replace": False})
+                (show / "show.nfo").write_bytes(b"existing")
+                with self.assertRaises(harvester_ui.BridgeError):
+                    harvester_ui.run_action("item.install_nfo", {
+                        "kind": "show", "identifier": str(show),
+                        "content_base64": base64.b64encode(tv_xml).decode(), "replace": False})
+                for invalid in (b"<movie>", b"<tvshow><title>Wrong root</title></tvshow>",
+                                b'<!DOCTYPE movie [<!ENTITY x "bad">]><movie><title>&x;</title></movie>'):
+                    with self.assertRaises(harvester_ui.BridgeError):
+                        harvester_ui.run_action("item.install_nfo", {
+                            "kind": "movie", "identifier": str(movie_target),
+                            "content_base64": base64.b64encode(invalid).decode(), "replace": False})
+                with self.assertRaises(harvester_ui.BridgeError):
+                    harvester_ui.run_action("item.install_nfo", {
+                        "kind": "movie", "identifier": str(movie_target),
+                        "content_base64": base64.b64encode(movie_xml).decode(),
+                        "replace": False, "path": "/tmp/escape.nfo"})
+            for result, expected in ((movie_result, movie_xml), (tv_result, tv_xml)):
+                item = get_inbox_item(config, result["item_id"])
+                blob = root / ".cache" / "bulk" / "inbox" / item["item_id"] / item["actions"][-1]["blob"]
+                self.assertEqual(blob.read_bytes(), expected)
+            self.assertFalse(movie_target.exists())
+            self.assertEqual((show / "show.nfo").read_bytes(), b"existing")
+
+    def test_search_nfo_prompt_uses_local_facts_without_providers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); movie = movies / "Burnt (2015)"; show = tv / "Show"
+            movie.mkdir(); show.mkdir(); (movie / "Burnt.mkv").write_bytes(b"")
+            movie_id = movie / "Burnt.nfo"
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"movies": {
+                str(movie_id): {"status": "ok", "local_target": str(movie_id),
+                                "nfo_path": str(movie_id), "title": "Burnt", "year": 2015}}})
+            save_json_atomic(config.state_path("tv_show_urls_tvdb.json"), {"shows": {
+                str(show): {"status": "matched", "local_target": str(show),
+                            "folder_name": "Show", "query_year": 2020}}})
+            with mock.patch("harvester_core.config.load_config", return_value=config), \
+                    mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                    mock.patch("harvester_core.providers.tmdb.TMDBClient") as tmdb, \
+                    mock.patch("harvester_core.providers.tvdb.TVDBClient") as tvdb:
+                movie_prompt = harvester_ui.run_action("item.nfo_prompt", {
+                    "kind": "movie", "identifier": str(movie_id)})["text"]
+                tv_prompt = harvester_ui.run_action("item.nfo_prompt", {
+                    "kind": "show", "identifier": str(show)})["text"]
+            self.assertIn("Burnt.mkv", movie_prompt)
+            self.assertIn('"year": 2015', movie_prompt)
+            self.assertIn("<movie>", movie_prompt)
+            self.assertIn("<tvshow>", tv_prompt)
+            self.assertIn("Omit unknown facts rather than guessing", tv_prompt)
+            tmdb.assert_not_called(); tvdb.assert_not_called()
 
     def test_tv_repairs_prepare_apply_and_inspect_missing_artifacts(self):
         from harvester_core.api import inspect_item
