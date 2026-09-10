@@ -66,7 +66,7 @@ def _list(kind):
         suffix = ["list", kind + "s", "--brief"]
         if kind in ("movie", "show"):
             suffix.append("--artifacts")
-        if kind == "movie" and data.get("missing") == "poster":
+        if kind == "movie" and data.get("missing") in {"poster", "nfo"}:
             suffix.append("--group-directories")
         for option in ("status", "missing"):
             if data.get(option):
@@ -554,8 +554,16 @@ def _prepare_nfo_bytes(config, kind, identifier, record, detail, source, replace
     if target.exists() and not replace:
         raise BridgeError("NFO already exists; choose Replace Existing NFO to continue")
     workflow = "unresolved-movies" if kind == "movie" else "tv-errors"
-    previous = next((item for item in list_inbox(config)
-                     if item.get("workflow") == workflow and item.get("identities") == [identity]), None)
+    same_identity = [item for item in list_inbox(config)
+                     if item.get("identities") == [identity]]
+    nfo_work = [item for item in same_identity
+                if "nfo" in item.get("requested_artifacts", [])]
+    if len(nfo_work) > 1:
+        raise BridgeError("multiple NFO Inbox proposals require explicit review")
+    previous = (nfo_work[0] if len(nfo_work) == 1 else
+                same_identity[0] if len(same_identity) == 1 else None)
+    if previous:
+        workflow = previous["workflow"]
     plan = persist_preparation(
         config, workflow, [identity], RecordingCommitter(), display_title=identifier,
         local_target=record.get("local_target"),
@@ -575,9 +583,11 @@ def _prepare_nfo_bytes(config, kind, identifier, record, detail, source, replace
                             "blob": f"blobs/{digest}", "size": len(source), "sha256": digest})
     item["requested_artifacts"] = list(dict.fromkeys(
         [*(previous or {}).get("requested_artifacts", []), "nfo"]))
-    unrelated = (previous and previous.get("state") == "needs_attention" and
-                 (not previous.get("requested_artifacts") or any(
-                     artifact != "nfo" for artifact in previous.get("requested_artifacts", []))))
+    reason = str((previous or {}).get("reason") or "")
+    nfo_attention = (previous and previous.get("state") == "needs_attention" and
+                     "nfo" in previous.get("requested_artifacts", []) and
+                     "nfo" in reason.casefold())
+    unrelated = previous and previous.get("state") == "needs_attention" and not nfo_attention
     if unrelated:
         item.update({"state": "needs_attention", "reason": previous.get("reason")})
     else:
@@ -622,6 +632,8 @@ def adopt_item_nfo(data):
         raise BridgeError("NFO candidates changed; refresh the item")
     if not candidate.get("usable"):
         raise BridgeError("selected NFO candidate is unusable")
+    if candidate.get("symlink"):
+        raise BridgeError("refusing to adopt a symlinked NFO")
     path = Path(detail["directory"]) / candidate["name"]
     try:
         source = path.read_bytes()

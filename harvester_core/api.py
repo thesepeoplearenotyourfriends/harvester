@@ -306,7 +306,7 @@ def inventory(config):
     movie_directories = {_movie_directory(key, record) for key, record in movies.items()}
     return {
         "actors": {"total": len(actors), "local": local, "pending_unresolved": actor_counts["pending"], "ok": actor_counts["ok"], "failed": actor_counts["failed"], "error": actor_counts["error"]},
-        "movies": {"total": len(movies), "missing_nfo": sum(not first_indexable_nfo(_movie_directory(key, value))[0] for key, value in movies.items()), "missing_poster": sum(not _poster_candidates(directory) for directory in movie_directories), "unresolved": sum(x.get("status") == "unresolved" for x in movies.values()), "failed": sum(x.get("status") in ("failed", "error") for x in movies.values())},
+        "movies": {"total": len(movies), "missing_nfo": sum(not first_indexable_nfo(directory)[0] for directory in movie_directories), "missing_poster": sum(not _poster_candidates(directory) for directory in movie_directories), "unresolved": sum(x.get("status") == "unresolved" for x in movies.values()), "failed": sum(x.get("status") in ("failed", "error") for x in movies.values())},
         "tv": {"total": len(shows),
                "missing_nfo": sum(not (Path(key) / "show.nfo").is_file()
                                   for key in shows),

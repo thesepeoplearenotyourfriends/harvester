@@ -204,6 +204,13 @@ def _migrate_inbox_item(inbox, old, old_identity, new_identity):
     manifest.update({"item_id": new_id, "identities": [new_identity]})
     if manifest.get("local_target") == old_identity:
         manifest["local_target"] = new_identity
+    reason = str(manifest.get("reason") or "")
+    nfo_attention = (manifest.get("state") == "needs_attention" and
+                     "nfo" in manifest.get("requested_artifacts", []) and
+                     "nfo" in reason.casefold())
+    if nfo_attention:
+        manifest.update({"state": "ready", "reason": None})
+        manifest.setdefault("summary", {})["outcome"] = "ready"
     save_json_atomic(new_root / "manifest.json", manifest)
     return new_id
 

@@ -975,8 +975,8 @@ class BulkRecipeTests(unittest.TestCase):
             recorder.write(poster, b"poster bytes")
             persist_preparation(
                 config, "unresolved-movies", [str(inferred)], recorder,
-                state="needs_attention", reason="Keep attention",
-                summary={"message": "Keep summary"}, requested_artifacts=["poster"])
+                state="needs_attention", reason="NFO unusable",
+                summary={"message": "Keep summary"}, requested_artifacts=["nfo", "poster"])
             from harvester_core.api import inspect_item
             detail = inspect_item(config, "movie", str(inferred))
             with mock.patch("harvester_core.config.load_config", return_value=config), \
@@ -989,14 +989,67 @@ class BulkRecipeTests(unittest.TestCase):
             inbox = list_inbox(config)
             self.assertEqual(len(inbox), 1)
             self.assertEqual(inbox[0]["identities"], [str(actual)])
-            self.assertEqual(inbox[0]["state"], "needs_attention")
-            self.assertEqual(inbox[0]["reason"], "Keep attention")
-            self.assertEqual(inbox[0]["summary"], {"message": "Keep summary"})
-            self.assertEqual(inbox[0]["requested_artifacts"], ["poster"])
+            self.assertEqual(inbox[0]["state"], "ready")
+            self.assertIsNone(inbox[0]["reason"])
+            self.assertEqual(inbox[0]["summary"], {"message": "Keep summary", "outcome": "ready"})
+            self.assertEqual(inbox[0]["requested_artifacts"], ["nfo", "poster"])
             self.assertEqual(inbox[0]["actions"][0]["path"], str(poster))
             blob = root / ".cache" / "bulk" / "inbox" / inbox[0]["item_id"] / inbox[0]["actions"][0]["blob"]
             self.assertEqual(blob.read_bytes(), b"poster bytes")
             self.assertFalse(poster.exists())
+
+    def test_valid_nfo_resolves_only_nfo_specific_inbox_attention(self):
+        from harvester_core.artifacts import RecordingCommitter, list_inbox, persist_preparation
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); folder = movies / "Repair"; folder.mkdir()
+            malformed = folder / "movie.nfo"; malformed.write_text("<movie>")
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"movies": {
+                str(malformed): {"status": "ok", "local_target": str(malformed),
+                                 "nfo_path": str(malformed)}}})
+            recorder = RecordingCommitter(); poster = folder / "poster.jpg"
+            recorder.write(poster, b"poster")
+            original = persist_preparation(
+                config, "lost-found", [str(malformed)], recorder,
+                state="needs_attention", reason="NFO unusable: XML parse error",
+                summary={"message": "NFO unusable"}, requested_artifacts=["nfo", "poster"])
+            xml = b"<movie><title>Repaired</title></movie>"
+            with mock.patch("harvester_core.config.load_config", return_value=config), \
+                    mock.patch.object(harvester_ui, "PROJECT_DIR", root):
+                result = harvester_ui.run_action("item.install_nfo", {
+                    "kind": "movie", "identifier": str(malformed),
+                    "content_base64": base64.b64encode(xml).decode(), "replace": True})
+            inbox = list_inbox(config)
+            self.assertEqual(len(inbox), 1)
+            self.assertEqual(result["item_id"], original["plan_id"])
+            self.assertEqual(inbox[0]["workflow"], "lost-found")
+            self.assertEqual(inbox[0]["state"], "ready")
+            self.assertIsNone(inbox[0]["reason"])
+            self.assertEqual(inbox[0]["requested_artifacts"], ["nfo", "poster"])
+            self.assertEqual({Path(action["path"]).name for action in inbox[0]["actions"]},
+                             {"movie.nfo", "poster.jpg"})
+
+            # A provider/identity complaint is unrelated to the supplied NFO.
+            other = folder / "other.nfo"
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"movies": {
+                str(other): {"status": "failed", "local_target": str(other),
+                             "nfo_path": str(other)}}})
+            persist_preparation(
+                config, "failed-movies", [str(other)], RecordingCommitter(),
+                state="needs_attention", reason="Provider identity unresolved",
+                requested_artifacts=["identity"])
+            with mock.patch("harvester_core.config.load_config", return_value=config), \
+                    mock.patch.object(harvester_ui, "PROJECT_DIR", root):
+                harvester_ui.run_action("item.install_nfo", {
+                    "kind": "movie", "identifier": str(other),
+                    "content_base64": base64.b64encode(xml).decode(), "replace": False})
+            provider_item = next(item for item in list_inbox(config)
+                                 if item["identities"] == [str(other)])
+            self.assertEqual(provider_item["workflow"], "failed-movies")
+            self.assertEqual(provider_item["state"], "needs_attention")
+            self.assertEqual(provider_item["reason"], "Provider identity unresolved")
 
     def test_search_nfo_intake_preserves_exact_xml_and_requires_replace_intent(self):
         from harvester_core.artifacts import get_inbox_item

@@ -42,7 +42,7 @@ def inspect_nfo_candidate(path):
                 bool((manual_root.findtext("title") or "").strip()))
         except (UnicodeDecodeError, ET.ParseError):
             pass
-    return {"name": path.name, "present": path.is_file(),
+    return {"name": path.name, "present": path.is_file(), "symlink": path.is_symlink(),
             "parseable": root is not None, "indexable_by_movies_ui": root is not None,
             "valid_for_manual_intake": valid_for_manual_intake,
             "parse_error": parse_error, "parse_line": line, "parse_column": column,
@@ -55,7 +55,7 @@ def inspect_nfo_directory(directory):
     directory = Path(directory)
     try:
         paths = sorted((path for path in directory.iterdir()
-                        if path.is_file() and not path.is_symlink()
+                        if path.is_file()
                         and path.suffix.casefold() == ".nfo"),
                        key=lambda path: (path.name.casefold(), path.name))
     except OSError:

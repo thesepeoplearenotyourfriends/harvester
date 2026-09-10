@@ -60,9 +60,9 @@ def discover_movies(root):
         # A lone video supplies an unambiguous sibling NFO target. Multiple
         # videos without an NFO remain untouched because no title owns the path.
         selected_nfo, nfo_diagnostics, _ = first_indexable_nfo(base)
-        targets = ([base / selected_nfo["name"]] if selected_nfo else
-                   [nfos[0]] if nfos else
-                   [videos[0].with_suffix(".nfo")] if len(videos) == 1 else [])
+        # Every existing NFO remains an authoritative Harvester identity.  The
+        # Movies UI selection is directory-level consumer information only.
+        targets = nfos or ([videos[0].with_suffix(".nfo")] if len(videos) == 1 else [])
         for nfo_path in targets:
             title = nfo_path.stem
             original_title = None
@@ -107,7 +107,8 @@ def discover_movies(root):
                 "status": "pending", "tries": 0, "tmdb_id": None, "match": None,
                 "candidates": [], "nfo": None, "poster_url": None,
                 "last_error": None, "materialize": {}, "updated": None,
-                "nfo_consumer_usable": bool(selected_nfo),
+                "movies_ui_selected_nfo": selected_nfo.get("name") if selected_nfo else None,
+                "movies_ui_nfo_usable": bool(selected_nfo),
                 "nfo_candidates": nfo_diagnostics,
             }
     return found
@@ -138,9 +139,12 @@ def run(config, provider, reporter=None, limit=None, rebuild=False, refresh=Fals
     if not isinstance(manifest, dict) or not isinstance(manifest.get("movies"), dict):
         manifest = {"_meta": {"version": 1, "created": now_iso(), "source": "TMDB"}, "movies": {}}
     discovered = discover_movies(config.movie_root)
+    discovered_directory_counts = Counter(
+        Path(record["nfo_path"]).parent for record in discovered.values())
     for key, record in discovered.items():
         existing = manifest["movies"].get(key)
-        if existing is None:
+        if (existing is None and
+                discovered_directory_counts[Path(record["nfo_path"]).parent] == 1):
             same_directory = [old_key for old_key, old_record in manifest["movies"].items()
                               if Path(old_record.get("nfo_path") or old_key).parent ==
                               Path(record["nfo_path"]).parent]
@@ -157,7 +161,7 @@ def run(config, provider, reporter=None, limit=None, rebuild=False, refresh=Fals
             "local_target", "nfo_path", "title", "query_title", "original_title", "year",
             "imdb_id", "local_tmdb_id", "poster_path",
             "poster_target_status",
-            "nfo_consumer_usable", "nfo_candidates",
+            "movies_ui_selected_nfo", "movies_ui_nfo_usable", "nfo_candidates",
         ):
             existing[field] = record[field]
     selected = set(targets or [])

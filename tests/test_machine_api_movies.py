@@ -12,7 +12,7 @@ from harvester_core.jobs.movie_scan import run as scan
 from harvester_core.jobs.movie_scan import discover_movies
 from harvester_core.jobs.tv_materialize import run as materialize_tv
 from harvester_core.providers.profiles import profiles
-from harvester_core.rescan import rescan
+from harvester_core.rescan import rescan, rescan_movies
 from harvester_core.storage import load_json, save_json_atomic
 from harvester_core.api import inspect_item, list_artifacts
 import harvester_core.api as machine_api
@@ -477,7 +477,7 @@ class MachineApiMovieTests(unittest.TestCase):
         saved = load_json(self.state / "movie_manifest_tmdb.json")["movies"][str(nfo.resolve())]
         self.assertEqual(saved["tries"], 2)
 
-    def test_movies_ui_first_parseable_nfo_owns_the_directory_poster(self):
+    def test_movies_ui_selection_does_not_collapse_durable_nfo_ownership(self):
         folder = self.movies / "Anthology"
         folder.mkdir()
         first = folder / "first.nfo"
@@ -486,10 +486,25 @@ class MachineApiMovieTests(unittest.TestCase):
         second.write_text("<movie><title>Second</title></movie>")
         (folder / "poster.jpg").write_bytes(b"poster")
         records = discover_movies(self.movies)
-        self.assertIn(str(first.resolve()), records)
-        self.assertNotIn(str(second.resolve()), records)
-        self.assertEqual(records[str(first.resolve())]["poster_path"],
-                         str((folder / "poster.jpg").resolve()))
+        records = {key: record for key, record in records.items()
+                   if Path(key).parent == folder.resolve()}
+        self.assertEqual(set(records), {str(first.resolve()), str(second.resolve())})
+        self.assertTrue(all(record["movies_ui_selected_nfo"] == first.name
+                            for record in records.values()))
+        self.assertTrue(all(record["movies_ui_nfo_usable"] for record in records.values()))
+        self.assertTrue(all(record["poster_path"] is None for record in records.values()))
+        previous = {key: {**record, "tmdb_id": number,
+                          "query_override": {"title": f"Saved {number}"},
+                          "materialize": {"nfo": {"status": "exists"}}}
+                    for number, (key, record) in enumerate(records.items(), 1)}
+        save_json_atomic(self.state / "movie_manifest_tmdb.json", {"movies": previous})
+        rescan_movies(self.config, records)
+        rescanned = load_json(self.state / "movie_manifest_tmdb.json")["movies"]
+        self.assertEqual(set(rescanned), set(previous))
+        for key in previous:
+            self.assertEqual(rescanned[key]["tmdb_id"], previous[key]["tmdb_id"])
+            self.assertEqual(rescanned[key]["query_override"], previous[key]["query_override"])
+            self.assertEqual(rescanned[key]["materialize"], previous[key]["materialize"])
 
     def test_movie_nfo_classification_matches_movies_ui_parse_rule(self):
         fixtures = (
@@ -507,9 +522,10 @@ class MachineApiMovieTests(unittest.TestCase):
                 for filename, content in files:
                     (folder / filename).write_bytes(content)
                 records = discover_movies(root)
-                self.assertEqual(list(records), [str((folder / selected).resolve())])
-                record = next(iter(records.values()))
-                self.assertEqual(record["nfo_consumer_usable"], usable)
+                self.assertIn(str((folder / selected).resolve()), records)
+                record = records[str((folder / selected).resolve())]
+                self.assertEqual(record["movies_ui_nfo_usable"], usable)
+                self.assertEqual(record["movies_ui_selected_nfo"], selected if usable else None)
                 malformed = next((item for item in record["nfo_candidates"]
                                   if item["name"] == "a.nfo" or
                                   (name == "malformed" and item["name"] == "one.nfo")), None)

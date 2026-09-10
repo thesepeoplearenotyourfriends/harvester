@@ -84,12 +84,16 @@ def rescan_movies(config, discovered=None):
     local_fields = (
         "kind", "local_target", "nfo_path", "poster_path",
         "poster_target_status", "title", "original_title", "year",
-        "imdb_id", "local_tmdb_id", "nfo_consumer_usable", "nfo_candidates",
+        "imdb_id", "local_tmdb_id", "movies_ui_selected_nfo",
+        "movies_ui_nfo_usable", "nfo_candidates",
     )
     movies = {}
+    discovered_directory_counts = Counter(
+        Path(record["nfo_path"]).parent for record in discovered.values())
     for key, fresh in discovered.items():
         previous_record = previous_movies.get(key)
-        if previous_record is None:
+        if (previous_record is None and
+                discovered_directory_counts[Path(fresh["nfo_path"]).parent] == 1):
             siblings = [record for old_key, record in previous_movies.items()
                         if Path(record.get("nfo_path") or old_key).parent ==
                         Path(fresh["nfo_path"]).parent]
