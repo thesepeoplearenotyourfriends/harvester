@@ -1,7 +1,6 @@
 # Harvester
 
-Harvester is a small, CLI-first home for resumable movie-actor and TV metadata/image harvesting. It is not a UI, media organizer, player, or server. Its required runtime is Python's standard library.
-
+Harvester is a small, CLI-first home for resumable movie-actor and TV metadata/image harvesting. 
 ## Commands
 
 ```text
