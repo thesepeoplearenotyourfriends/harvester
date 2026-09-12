@@ -643,12 +643,11 @@ def _prepare_nfo_bytes(config, kind, identifier, record, detail, source):
 
 def prepare_item_nfo(data):
     """Prepare pasted/chosen NFO content without accepting filesystem paths."""
-    if (set(data) != {"kind", "identifier", "content_base64", "replace"} or
+    if (set(data) != {"kind", "identifier", "content_base64"} or
             data.get("kind") not in {"movie", "show"} or
             not isinstance(data.get("identifier"), str) or
-            not isinstance(data.get("content_base64"), str) or
-            not isinstance(data.get("replace"), bool)):
-        raise BridgeError("item.install_nfo requires kind, identifier, NFO bytes, and replace intent")
+            not isinstance(data.get("content_base64"), str)):
+        raise BridgeError("item.install_nfo requires kind, identifier, and NFO bytes")
     try:
         source = base64.b64decode(data["content_base64"], validate=True)
     except (ValueError, TypeError) as error:
@@ -660,12 +659,11 @@ def prepare_item_nfo(data):
 
 def adopt_item_nfo(data):
     """Resolve a bounded inspection candidate entirely on the host side."""
-    if (set(data) != {"kind", "identifier", "candidate_token", "candidate_generation", "replace"} or
+    if (set(data) != {"kind", "identifier", "candidate_token", "candidate_generation"} or
             data.get("kind") not in {"movie", "show"} or
             not isinstance(data.get("identifier"), str) or
             not isinstance(data.get("candidate_token"), str) or
-            not isinstance(data.get("candidate_generation"), str) or
-            not isinstance(data.get("replace"), bool)):
+            not isinstance(data.get("candidate_generation"), str)):
         raise BridgeError("item.adopt_nfo requires a Search identity and candidate token")
     config, record, detail = _nfo_context(data)
     if detail.get("nfo_candidates_generation") != data["candidate_generation"]:

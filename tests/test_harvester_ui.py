@@ -845,6 +845,7 @@ function selectInboxItem(index) {{ selected = index; }}
         for request in (install, adopt):
             self.assertNotIn("path:", request)
             self.assertNotIn("source:", request)
+            self.assertNotIn("replace:", request)
 
     def test_configuration_cancel_explicitly_closes_without_saving(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
@@ -1117,19 +1118,16 @@ class BulkRecipeTests(unittest.TestCase):
                     harvester_ui.run_action("item.adopt_nfo", {
                         "kind": "movie", "identifier": str(inferred),
                         "candidate_token": detail["nfo_candidates"][1]["token"],
-                        "candidate_generation": detail["nfo_candidates_generation"],
-                        "replace": False})
+                        "candidate_generation": detail["nfo_candidates_generation"]})
                 result = harvester_ui.run_action("item.adopt_nfo", {
                     "kind": "movie", "identifier": str(inferred),
                     "candidate_token": candidate["token"],
-                    "candidate_generation": detail["nfo_candidates_generation"],
-                    "replace": False})
+                    "candidate_generation": detail["nfo_candidates_generation"]})
                 with self.assertRaises(harvester_ui.BridgeError):
                     harvester_ui.run_action("item.adopt_nfo", {
                         "kind": "movie", "identifier": result["identifier"],
                         "candidate_token": "0" * 32,
-                        "candidate_generation": detail["nfo_candidates_generation"],
-                        "replace": False})
+                        "candidate_generation": detail["nfo_candidates_generation"]})
             state = load_json(config.state_path("movie_manifest_tmdb.json"))["movies"]
             self.assertNotIn(str(inferred), state)
             self.assertEqual(state[str(chosen)]["nfo_path"], str(chosen))
@@ -1180,8 +1178,7 @@ class BulkRecipeTests(unittest.TestCase):
                     harvester_ui.run_action("item.adopt_nfo", {
                         "kind": "movie", "identifier": str(inferred),
                         "candidate_token": candidate["token"],
-                        "candidate_generation": detail["nfo_candidates_generation"],
-                        "replace": False})
+                        "candidate_generation": detail["nfo_candidates_generation"]})
             state = json.loads(config.state_path("movie_manifest_tmdb.json").read_text())
             self.assertIn(str(inferred), state["movies"])
 
@@ -1211,8 +1208,7 @@ class BulkRecipeTests(unittest.TestCase):
                 harvester_ui.run_action("item.adopt_nfo", {
                     "kind": "movie", "identifier": str(inferred),
                     "candidate_token": detail["nfo_candidates"][0]["token"],
-                    "candidate_generation": detail["nfo_candidates_generation"],
-                    "replace": False})
+                    "candidate_generation": detail["nfo_candidates_generation"]})
             inbox = list_inbox(config)
             self.assertEqual(len(inbox), 1)
             self.assertEqual(inbox[0]["identities"], [str(actual)])
@@ -1247,7 +1243,7 @@ class BulkRecipeTests(unittest.TestCase):
                     mock.patch.object(harvester_ui, "PROJECT_DIR", root):
                 result = harvester_ui.run_action("item.install_nfo", {
                     "kind": "movie", "identifier": str(malformed),
-                    "content_base64": base64.b64encode(xml).decode(), "replace": True})
+                    "content_base64": base64.b64encode(xml).decode()})
             inbox = list_inbox(config)
             self.assertEqual(len(inbox), 1)
             self.assertEqual(result["item_id"], original["plan_id"])
@@ -1271,7 +1267,7 @@ class BulkRecipeTests(unittest.TestCase):
                     mock.patch.object(harvester_ui, "PROJECT_DIR", root):
                 harvester_ui.run_action("item.install_nfo", {
                     "kind": "movie", "identifier": str(other),
-                    "content_base64": base64.b64encode(xml).decode(), "replace": False})
+                    "content_base64": base64.b64encode(xml).decode()})
             provider_item = next(item for item in list_inbox(config)
                                  if item["identities"] == [str(other)])
             self.assertEqual(provider_item["workflow"], "failed-movies")
@@ -1294,7 +1290,7 @@ class BulkRecipeTests(unittest.TestCase):
                     mock.patch.object(harvester_ui, "PROJECT_DIR", root):
                 result = harvester_ui.run_action("item.install_nfo", {
                     "kind": "show", "identifier": str(show),
-                    "content_base64": base64.b64encode(tv_xml).decode(), "replace": False})
+                    "content_base64": base64.b64encode(tv_xml).decode()})
             item = get_inbox_item(config, result["item_id"])
             action = next(action for action in item["actions"]
                           if action["action"] == "write" and action["path"] == str(target))
@@ -1320,8 +1316,7 @@ class BulkRecipeTests(unittest.TestCase):
                         self.assertRaisesRegex(harvester_ui.BridgeError, "valid XML document"):
                     harvester_ui.run_action("item.install_nfo", {
                         "kind": "show", "identifier": str(show),
-                        "content_base64": base64.b64encode(b"not xml").decode(),
-                        "replace": False})
+                        "content_base64": base64.b64encode(b"not xml").decode()})
                 self.assertEqual(target.read_bytes(), existing)
 
     def test_search_nfo_prompt_uses_local_facts_without_providers(self):

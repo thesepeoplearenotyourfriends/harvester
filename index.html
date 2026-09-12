@@ -732,11 +732,10 @@
       function bindSearchNfo(detail) {
         const paste = document.querySelector("#search-nfo-paste");
         if (!paste) return;
-        const replace = () => true;
         const prepareBytes = async (bytes) => {
           if (bytes.length > 1000000) { showError("NFO is larger than 1 MB"); return; }
           try {
-            await App.request("item.install_nfo", { kind: detail.kind, identifier: detail.identifier, content_base64: bytesBase64(bytes), replace: replace() }, false, true);
+            await App.request("item.install_nfo", { kind: detail.kind, identifier: detail.identifier, content_base64: bytesBase64(bytes) }, false, true);
             await refreshInboxSummary(); showSearchPrepared();
           } catch (error) { showError(error.message || "Could not prepare NFO"); }
         };
@@ -755,7 +754,7 @@
         };
         document.querySelectorAll("[data-nfo-token]").forEach((button) => button.onclick = async () => {
           try {
-            const result = await App.request("item.adopt_nfo", { kind: detail.kind, identifier: detail.identifier, candidate_token: button.dataset.nfoToken, candidate_generation: detail.nfo_candidates_generation, replace: replace() }, false, true);
+            const result = await App.request("item.adopt_nfo", { kind: detail.kind, identifier: detail.identifier, candidate_token: button.dataset.nfoToken, candidate_generation: detail.nfo_candidates_generation }, false, true);
             if (result.prepared) { await refreshInboxSummary(); showSearchPrepared(); }
             else {
               const index = state.rows.findIndex((row) => row.identifier === detail.identifier);
