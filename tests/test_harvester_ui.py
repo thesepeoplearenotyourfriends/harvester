@@ -780,17 +780,21 @@ if (markup.includes('failed</strong> · Finished') || !markup.includes('failed</
 """
         subprocess.run(["node", "-e", script], check=True)
 
-    def test_font_size_controls_share_the_two_pixel_adjustment_path(self):
+    def test_font_size_controls_invoke_the_existing_ctrl_shortcut_path(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
         css = (harvester_ui.PROJECT_DIR / "css" / "my.css").read_text(encoding="utf-8")
         self.assertRegex(css, r'font:\s*\n\s*10px/1\.35 "Segoe UI"')
         self.assertIn('<span>Increase font size</span><kbd>Ctrl +</kbd>', page)
         self.assertIn('<span>Decrease font size</span><kbd>Ctrl -</kbd>', page)
-        self.assertIn("const FONT_SIZE_STEP = 2", page)
-        self.assertIn('adjustFontSize(e.key === "-" ? -1 : 1)', page)
-        self.assertIn('querySelector("#increase-font").onclick = () => adjustFontSize(1)', page)
-        self.assertIn('querySelector("#decrease-font").onclick = () => adjustFontSize(-1)', page)
-        self.assertIn("e.preventDefault();", page[page.index("document.onkeydown"):page.index("const splitter")])
+        self.assertIn('function invokeFontShortcut(key)', page)
+        self.assertIn('new KeyboardEvent("keydown"', page)
+        self.assertIn('querySelector("#increase-font").onclick = () => invokeFontShortcut("+")', page)
+        self.assertIn('querySelector("#decrease-font").onclick = () => invokeFontShortcut("-")', page)
+        keyboard = page[page.index("document.onkeydown"):page.index("const splitter")]
+        self.assertNotIn("document.body.style.fontSize", page)
+        self.assertNotIn("FONT_SIZE_STEP", page)
+        self.assertNotIn("e.ctrlKey", keyboard)
+        self.assertNotIn("e.preventDefault()", keyboard)
 
     def test_bulk_navigation_contract_has_inbox_without_workspace(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
@@ -1041,6 +1045,70 @@ class BulkRecipeTests(unittest.TestCase):
             self.assertEqual((movie / "poster.jpg").read_bytes(), b"existing movie poster")
             self.assertEqual((show / "show.nfo").read_bytes(), b"existing show nfo")
             self.assertEqual((show / "poster.jpg").read_bytes(), b"existing show poster")
+
+    def test_explicit_actor_refetch_stages_replacement_with_existing_precondition(self):
+        from harvester_core.artifacts import list_inbox
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); actors = movies / ".actors"; actors.mkdir()
+            target = actors / "Actor.jpg"; original = b"existing actor image"
+            target.write_bytes(original)
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            save_json_atomic(config.state_path("movie_actor_queue.json"), {"actors": {
+                "Actor": {"status": "ok", "name": "Actor", "local_file": str(target)}}})
+
+            def scan(*_args, **_kwargs):
+                save_json_atomic(config.state_path("actor_thumb_urls_tmdb.json"),
+                                 {"Actor": ["https://images/actor.jpg"]})
+                return {"processed": 1, "counts": {"ok": 1}}
+
+            class Response:
+                headers = {"Content-Type": "image/jpeg"}
+                def __enter__(self): return self
+                def __exit__(self, *_args): return False
+                def read(self): return b"replacement actor image"
+
+            transport = mock.Mock()
+            transport.open.return_value = Response()
+            with mock.patch("harvester_core.transport.transport_from_config",
+                            return_value=transport), \
+                    mock.patch("harvester_core.providers.tmdb.TMDBClient",
+                               return_value=object()), \
+                    mock.patch("harvester_core.jobs.movie_actor_scan.run", side_effect=scan), \
+                    mock.patch("harvester_core.jobs.movie_actor_fetch.normalize_actor_image",
+                               side_effect=lambda data, _enabled: data):
+                result = bulk.run_scoped(config, "refetch-actor-image", [{
+                    "identities": ["Actor"], "display_title": "Actor",
+                    "local_target": str(target), "kind": "actor",
+                }], 1)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(target.read_bytes(), original)
+            item = list_inbox(config)[0]
+            self.assertEqual(item["state"], "ready")
+            writes = [action for action in item["actions"] if action["action"] == "write"]
+            self.assertEqual(len(writes), 1)
+            self.assertEqual(writes[0]["path"], str(target))
+            self.assertEqual(writes[0]["precondition"], {
+                "exists": True, "kind": "file", "size": len(original),
+                "sha256": __import__("hashlib").sha256(original).hexdigest(),
+            })
+
+    def test_actor_item_refetch_uses_replacement_recipe(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir()
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            save_json_atomic(config.state_path("movie_actor_queue.json"), {"actors": {
+                "Actor": {"status": "ok", "name": "Actor"}}})
+            with mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                    mock.patch.object(harvester_ui, "CACHE_DIR", root / ".cache" / "ui"), \
+                    mock.patch("harvester_core.config.load_config", return_value=config):
+                argv = harvester_ui.action_argv(
+                    "item.refetch", {"kind": "actor", "identifier": "Actor"})
+            self.assertEqual(argv[4], "refetch-actor-image")
 
     def test_search_manual_images_prepare_same_inbox_item_without_library_writes(self):
         from harvester_core.artifacts import list_inbox
@@ -1592,6 +1660,12 @@ class BulkRecipeTests(unittest.TestCase):
                                          for action in inbox["actions"]), int(succeeds))
                     if not succeeds:
                         self.assertEqual(inbox["reason"], reason)
+
+    def test_actor_refetch_does_not_accept_an_exists_result_as_a_replacement(self):
+        attention, reason = bulk._scoped_artifact_outcome(
+            "refetch-actor-image", {"counts": {"image_exists": 1}})
+        self.assertTrue(attention)
+        self.assertEqual(reason, "No image artifact was prepared")
 
     def test_combined_preserves_augmented_and_planned_artifact_counts(self):
         combined = bulk._combined(("image", {

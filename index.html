@@ -1113,20 +1113,16 @@
         if (!e.target.closest(".menu")) closeMenus();
       };
       document.onkeydown = (e) => {
-        if (e.ctrlKey && (e.key === "+" || e.key === "=" || e.key === "-")) {
-          e.preventDefault();
-          adjustFontSize(e.key === "-" ? -1 : 1);
-          return;
-        }
         if (e.key === "Escape") closeMenus();
       };
-      const FONT_SIZE_STEP = 2;
-      function adjustFontSize(direction) {
-        const current = Number.parseFloat(getComputedStyle(document.body).fontSize);
-        document.body.style.fontSize = `${current + direction * FONT_SIZE_STEP}px`;
+      function invokeFontShortcut(key) {
+        document.dispatchEvent(new KeyboardEvent("keydown", {
+          key, code: key === "-" ? "Minus" : "Equal", ctrlKey: true,
+          bubbles: true, cancelable: true,
+        }));
       }
-      document.querySelector("#increase-font").onclick = () => adjustFontSize(1);
-      document.querySelector("#decrease-font").onclick = () => adjustFontSize(-1);
+      document.querySelector("#increase-font").onclick = () => invokeFontShortcut("+");
+      document.querySelector("#decrease-font").onclick = () => invokeFontShortcut("-");
       const splitter = document.querySelector("#splitter"),
         pane = document.querySelector("#context-pane");
       function setWidth(w) {
