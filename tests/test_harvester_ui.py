@@ -702,7 +702,7 @@ function showError() {{ shownError = true; }}
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
         inbox = page[page.index("function bindInboxImage"):
                      page.index("async function retryInboxItem")]
-        search = page[page.index("function bindSearchArtwork"):
+        search = page[page.index("function bindItemArtwork"):
                       page.index("function bytesBase64")]
         self.assertIn("bindServoPasteRepaint(input)", inbox)
         self.assertIn("bindServoPasteRepaint(input)", search)
@@ -836,6 +836,55 @@ function showError() {{ errors++; }}
             record = json.loads(config.state_path("movie_manifest_tmdb.json").read_text())
             self.assertEqual(record["movies"][identity]["query_override"], {"tmdb_id": 404})
 
+    def test_completed_candidate_rerun_releases_lock_and_allows_apply(self):
+        from harvester_core.artifacts import RecordingCommitter, persist_preparation
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); folder = movies / "Movie"; folder.mkdir()
+            identity = str(folder / "movie.nfo")
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"movies": {
+                identity: {"status": "unresolved", "local_target": identity}}})
+            recorder = RecordingCommitter(); recorder.write(Path(identity), b"<movie><title>Movie</title></movie>")
+            plan = persist_preparation(
+                config, "future-repair-operation", [identity], recorder, kind="movie",
+                summary={"provider_results": [{"candidates": [{"id": 404, "title": "Movie"}]}]})
+            data = {"item_id": plan["plan_id"], "candidate_index": 0}
+            program = 'print(\'{"type":"result","ok":true,"result":{"processed":1}}\')'
+            try:
+                with mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                        mock.patch.object(harvester_ui, "CACHE_DIR", root / ".cache" / "ui"), \
+                        mock.patch("harvester_core.config.load_config", return_value=config):
+                    harvester_ui.action_argv("inbox.select_candidate", data)
+                    self.assertIn(plan["plan_id"], harvester_ui._retrying_items)
+                    with mock.patch.object(harvester_ui, "action_argv",
+                                           return_value=[sys.executable, "-c", program]):
+                        harvester_ui.run_streaming_action(
+                            "inbox.select_candidate", data, lambda _event: None)
+                    self.assertNotIn(plan["plan_id"], harvester_ui._retrying_items)
+                    result = harvester_ui.run_inbox_action(
+                        "inbox.apply", {"item_id": plan["plan_id"]})
+                self.assertTrue(result["applied"])
+                self.assertEqual(Path(identity).read_bytes(), b"<movie><title>Movie</title></movie>")
+            finally:
+                harvester_ui._retrying_items.discard(plan["plan_id"])
+
+    def test_failed_candidate_rerun_releases_lock(self):
+        item_id = "c" * 32
+        data = {"item_id": item_id, "candidate_index": 0}
+        program = 'print(\'{"type":"error","ok":false,"error":"provider failed"}\')'
+        harvester_ui._retrying_items.add(item_id)
+        try:
+            with mock.patch.object(harvester_ui, "action_argv",
+                                   return_value=[sys.executable, "-c", program]):
+                with self.assertRaisesRegex(harvester_ui.BridgeError, "provider failed"):
+                    harvester_ui.run_streaming_action(
+                        "inbox.select_candidate", data, lambda _event: None)
+            self.assertNotIn(item_id, harvester_ui._retrying_items)
+        finally:
+            harvester_ui._retrying_items.discard(item_id)
+
     def test_failed_bulk_status_does_not_claim_finished(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
         start = page.index("function bulkMarkup")
@@ -919,7 +968,7 @@ function selectInboxItem(index) {{ selected = index; }}
 """
         subprocess.run(["node", "-e", script], check=True)
 
-    def test_search_inspector_uses_semantic_refetch_and_manual_image_requests(self):
+    def test_search_and_all_movies_share_semantic_item_repair_controls(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
         self.assertIn('runBulk("item.refetch", { kind: row.kind, identifier: row.identifier }', page)
         self.assertIn('App.request("item.install_image_url", { kind: row.kind, identifier: row.identifier, url: input.value }', page)
@@ -928,6 +977,48 @@ function selectInboxItem(index) {{ selected = index; }}
         request = page[page.index('App.request("item.install_image_url"'):
                        page.index('App.request("item.install_image_url"') + 180]
         self.assertNotIn("path", request)
+
+        capabilities = page[page.index("const itemCapabilities"):
+                            page.index("const App", page.index("const itemCapabilities"))]
+        functions = page[page.index("function refetchButton"):
+                         page.index("function previewSlot")]
+        script = f"""
+{capabilities}
+let requestedAction = null, bulkCalls = 0;
+const button = {{}};
+const document = {{querySelector(selector) {{
+  if (selector === '#refetch-item') return button;
+  return null;
+}}}};
+const state = {{workflow: 'search'}};
+const bulkWorkflows = {{'missing-posters': {{kind: 'movie', aspect: 'poster'}}}};
+function esc(value) {{ return String(value); }}
+function rowLabel(row) {{ return row.label; }}
+async function runBulk(action) {{ requestedAction = action; }}
+async function refreshInboxSummary() {{}}
+function setWriterControls() {{}}
+function startSelectedBulk() {{ bulkCalls++; }}
+function bindServoPasteRepaint() {{}}
+function showError() {{}}
+const App = {{request() {{}}}};
+{functions}
+(async () => {{
+  const detail = {{kind: 'movie', nfo: {{present: true}}, nfo_candidates: []}};
+  const searchControls = refetchButton(detail.kind) + itemArtworkInput(detail.kind) + itemNfoInput(detail);
+  state.workflow = 'all-movies';
+  const libraryControls = refetchButton(detail.kind) + itemArtworkInput(detail.kind) + itemNfoInput(detail);
+  if (searchControls !== libraryControls || !libraryControls.includes('refetch-item') ||
+      !libraryControls.includes('poster URL') || !libraryControls.includes('copy-nfo-prompt')) process.exit(1);
+  bindRefetch({{kind: 'movie', identifier: '/movies/Alien/movie.nfo', label: 'Alien'}});
+  await button.onclick();
+  if (requestedAction !== 'item.refetch' || bulkCalls) process.exit(2);
+  state.workflow = 'missing-posters';
+  bindRefetch({{kind: 'movie', identifier: '/movies/Alien/movie.nfo', label: 'Alien'}});
+  await button.onclick();
+  if (bulkCalls !== 1) process.exit(3);
+}})().catch(() => process.exit(4));
+"""
+        subprocess.run(["node", "-e", script], check=True)
 
     def test_image_url_fetch_uses_configured_transport(self):
         transport = object()
@@ -993,10 +1084,10 @@ if (!closed || saved) process.exit(1);
         self.assertIn("<label><span>Title</span><input", page)
         self.assertIn("<label><span>Year</span><input", page)
         inspector = page[page.index("function renderInspector"):page.index("function renderRecordInspector")]
-        self.assertLess(inspector.index("refetchButton()"), inspector.index("previewSlot()"))
-        self.assertLess(inspector.index("previewSlot()"), inspector.index("searchArtworkInput"))
-        self.assertLess(inspector.index("searchArtworkInput"), inspector.index("<dl>"))
-        self.assertLess(inspector.index("</dl>"), inspector.index("searchNfoInput"))
+        self.assertLess(inspector.index("refetchButton(detail.kind)"), inspector.index("previewSlot()"))
+        self.assertLess(inspector.index("previewSlot()"), inspector.index("itemArtworkInput"))
+        self.assertLess(inspector.index("itemArtworkInput"), inspector.index("<dl>"))
+        self.assertLess(inspector.index("</dl>"), inspector.index("itemNfoInput"))
         inbox = page[page.index("const describeAction"):page.index('document.querySelector("#apply-item")')]
         self.assertLess(inbox.index('id="apply-item"'), inbox.index("<h2>Proposal</h2>"))
         self.assertIn('const filesystemChanges = item.actions.filter', inbox)
@@ -1013,7 +1104,8 @@ if (!closed || saved) process.exit(1);
         for label in ('n: "All"', 'n: "Missing NFO"', 'n: "Missing poster"',
                       'n: "Unresolved"', 'n: "Failed"'):
             self.assertGreaterEqual(page.count(label), 2)
-        self.assertIn('state.workflow === "search" || bulkWorkflows[state.workflow]', page)
+        self.assertIn("const itemCapabilities", page)
+        self.assertNotIn('state.workflow === "search" || bulkWorkflows[state.workflow]', page)
 
 
 class BulkRecipeTests(unittest.TestCase):

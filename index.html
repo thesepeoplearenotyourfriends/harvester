@@ -201,6 +201,11 @@
         "missing-tv-nfo": { kind: "show", aspect: "nfo" },
         "missing-tv-posters": { kind: "show", aspect: "poster" },
       };
+      const itemCapabilities = {
+        actor: { refetch: true, artwork: "mugshot" },
+        movie: { refetch: true, artwork: "poster", nfo: true },
+        show: { refetch: true, artwork: "poster", nfo: true },
+      };
       const App = {
         id: 1,
         async request(action, data = {}, selection = false, background = false, onEvent = null) {
@@ -720,18 +725,18 @@
             : "Missing";
         return `<dt>${esc(name)}</dt><dd>${state}</dd>`;
       }
-      function refetchButton() {
-        return bulkWorkflows[state.workflow] || state.workflow === "search"
+      function refetchButton(kind) {
+        return itemCapabilities[kind]?.refetch
           ? '<button id="refetch-item" class="compact-action" type="button">Re-fetch this item</button>'
           : "";
       }
-      function searchArtworkInput(kind) {
-        if (!(state.workflow === "search" || bulkWorkflows[state.workflow]) || !["actor", "movie", "show"].includes(kind)) return "";
-        const noun = kind === "actor" ? "mugshot" : "poster";
+      function itemArtworkInput(kind) {
+        const noun = itemCapabilities[kind]?.artwork;
+        if (!noun) return "";
         return `<div class="image-url"><label>Use ${noun} URL: <input id="search-image-url" type="url" placeholder="https://…"></label><button id="use-search-image-url" type="button">Use image</button></div><p id="search-prepared" class="prepared-note" hidden>🟢 Prepared — <button id="search-open-inbox" type="button">Open Inbox</button></p>`;
       }
-      function searchNfoInput(detail) {
-        if (!(state.workflow === "search" || bulkWorkflows[state.workflow]) || !["movie", "show"].includes(detail.kind)) return "";
+      function itemNfoInput(detail) {
+        if (!itemCapabilities[detail.kind]?.nfo) return "";
         const candidates = detail.nfo_candidates || [], usable = candidates.filter((item) => item.usable);
         const existing = candidates.length ? `<h3>Existing NFOs on disk</h3><ul class="nfo-candidates">${candidates.map((item, index) =>
           `<li><strong>${esc(item.name)}</strong><br><span class="muted">${item.parseable ? `parseable · &lt;${esc(item.root)}&gt;${item.title ? ` · title: ${esc(item.title)}` : ""}` : `unusable · XML parse error: ${esc(item.parse_error || "unknown error")}`}</span>${item.usable ? `<br><button type="button" data-nfo-token="${esc(item.token)}" class="${usable.length === 1 ? "primary" : "compact-action"}">Use this NFO</button>` : ""}</li>`).join("")}</ul>` : '<p class="muted">No .nfo files found in this directory.</p>';
@@ -741,12 +746,12 @@
         const note = document.querySelector("#search-prepared");
         if (note) { note.hidden = false; document.querySelector("#search-open-inbox").onclick = openInbox; }
       }
-      async function refetchSearchItem(row) {
+      async function refetchItem(row) {
         await runBulk("item.refetch", { kind: row.kind, identifier: row.identifier }, `Re-fetch ${rowLabel(row)}`, null, [row]);
         await refreshInboxSummary();
         showSearchPrepared();
       }
-      function bindSearchArtwork(row) {
+      function bindItemArtwork(row) {
         const input = document.querySelector("#search-image-url"), button = document.querySelector("#use-search-image-url");
         if (!input || !button) return;
         bindServoPasteRepaint(input);
@@ -799,8 +804,10 @@
       }
       function bindRefetch(row = null) {
         const button = document.querySelector("#refetch-item");
-        if (button) button.onclick = state.workflow === "search" ? () => refetchSearchItem(row) : startSelectedBulk;
-        if (row) bindSearchArtwork(row);
+        if (button) button.onclick = bulkWorkflows[state.workflow]
+          ? startSelectedBulk
+          : () => refetchItem(row);
+        if (row) bindItemArtwork(row);
         setWriterControls();
       }
       function previewSlot() {
@@ -819,7 +826,7 @@
         const identityNote = detail.ownership?.status === "ambiguous"
           ? `<p class="error"><strong>Ambiguous poster ownership.</strong> ${esc(detail.ownership.reason)}</p>` : "";
         document.querySelector("#workspace").innerHTML =
-          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}${identityNote}${previewSlot()}${searchArtworkInput(detail.kind)}<dl><dt>Directory</dt><dd>${esc(detail.directory)}</dd>${artifactLine("NFO", detail.nfo)}${artifactLine("Poster", detail.poster)}<dt>Video files</dt><dd>${esc(detail.video_count)}</dd>${Object.entries(fields).map(([key, value]) => `<dt>${esc(key.replaceAll("_", " "))}</dt><dd>${esc(typeof value === "object" ? JSON.stringify(value) : value)}</dd>`).join("")}</dl>${searchNfoInput(detail)}${raw ? `<details><summary>Raw state</summary><pre>${esc(JSON.stringify(raw, null, 2))}</pre></details>` : ""}</article>`;
+          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton(detail.kind)}${identityNote}${previewSlot()}${itemArtworkInput(detail.kind)}<dl><dt>Directory</dt><dd>${esc(detail.directory)}</dd>${artifactLine("NFO", detail.nfo)}${artifactLine("Poster", detail.poster)}<dt>Video files</dt><dd>${esc(detail.video_count)}</dd>${Object.entries(fields).map(([key, value]) => `<dt>${esc(key.replaceAll("_", " "))}</dt><dd>${esc(typeof value === "object" ? JSON.stringify(value) : value)}</dd>`).join("")}</dl>${itemNfoInput(detail)}${raw ? `<details><summary>Raw state</summary><pre>${esc(JSON.stringify(raw, null, 2))}</pre></details>` : ""}</article>`;
         bindRefetch({ kind: detail.kind, identifier: detail.identifier, label: rowLabel(detail) });
         bindSearchNfo(detail);
         if (detail.poster?.present) loadArtifactPreview(detail.kind, detail.identifier);
@@ -827,7 +834,7 @@
       function renderRecordInspector(detail) {
         const known = contexts(detail);
         document.querySelector("#workspace").innerHTML =
-          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton()}${detail.kind === "actor" ? previewSlot() : ""}${searchArtworkInput(detail.kind)}<dl>${detailPairs(detail)}</dl><h2>Known from</h2>${known.length ? `<ul>${known.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : '<p class="muted">No saved contexts.</p>'}<details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail, null, 2))}</pre></details></article>`;
+          `<article class="inspector"><h1>${esc(rowLabel(detail))}</h1>${refetchButton(detail.kind)}${detail.kind === "actor" ? previewSlot() : ""}${itemArtworkInput(detail.kind)}<dl>${detailPairs(detail)}</dl><h2>Known from</h2>${known.length ? `<ul>${known.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : '<p class="muted">No saved contexts.</p>'}<details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail, null, 2))}</pre></details></article>`;
         bindRefetch({ kind: detail.kind, identifier: detail.name, label: rowLabel(detail) });
         if (detail.kind === "actor" && detail.local_file) loadArtifactPreview("actor", detail.name);
       }
@@ -866,7 +873,7 @@
       function renderActorRepair(detail) {
         let known = contexts(detail);
         document.querySelector("#workspace").innerHTML =
-          `<article class="actor-repair"><h1>${esc(detail.name)}</h1>${refetchButton()}<p class="missing-note">No local actor image.</p><div id="drop-zone" tabindex="0">Drop an image here<br><span>or</span><br><button id="choose-image">Choose Image…</button><input id="image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></div><h2>Known from</h2>${known.length ? `<ul>${known.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : '<p class="muted">No saved contexts.</p>'}<dl>${detailPairs(detail)}</dl><details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail, null, 2))}</pre></details></article>`;
+          `<article class="actor-repair"><h1>${esc(detail.name)}</h1>${refetchButton(detail.kind)}<p class="missing-note">No local actor image.</p><div id="drop-zone" tabindex="0">Drop an image here<br><span>or</span><br><button id="choose-image">Choose Image…</button><input id="image-file" type="file" accept="image/jpeg,image/png,image/webp" hidden></div><h2>Known from</h2>${known.length ? `<ul>${known.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : '<p class="muted">No saved contexts.</p>'}<dl>${detailPairs(detail)}</dl><details><summary>Raw state</summary><pre>${esc(JSON.stringify(detail, null, 2))}</pre></details></article>`;
         const input = document.querySelector("#image-file"),
           zone = document.querySelector("#drop-zone");
         document.querySelector("#choose-image").onclick = (e) => {
