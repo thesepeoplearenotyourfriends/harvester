@@ -354,7 +354,7 @@ def action_argv(action, data):
     try:
         suffix = builder(data)
     except BaseException:
-        if action == "inbox.retry":
+        if action in {"inbox.retry", "inbox.select_candidate"}:
             with _library_commit_lock:
                 _retrying_items.discard(data.get("item_id"))
         raise
@@ -839,7 +839,7 @@ def run_streaming_action(action, data, on_event, process_key=None):
         process = subprocess.Popen(argv, cwd=PROJECT_DIR, text=True, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, bufsize=1)
     except BaseException:
-        if action == "inbox.retry":
+        if action in {"inbox.retry", "inbox.select_candidate"}:
             with _library_commit_lock:
                 _retrying_items.discard(data.get("item_id"))
         raise
@@ -885,7 +885,7 @@ def run_streaming_action(action, data, on_event, process_key=None):
             raise BridgeError(f"Harvester API exited with status {returncode}")
         return terminal["result"]
     finally:
-        if action == "inbox.retry":
+        if action in {"inbox.retry", "inbox.select_candidate"}:
             with _library_commit_lock:
                 _retrying_items.discard(data.get("item_id"))
         if process_key is not None:
