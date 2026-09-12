@@ -152,10 +152,12 @@ work surface: **Re-fetch this item** derives its allowlisted recipe from the dur
 record identity, while dropped movie/show posters and actor mugshots are normalized
 and stored as Inbox proposals. Both paths preserve existing library files until the
 user explicitly applies the resulting Inbox item. Movie and show Search inspectors
-also enumerate bounded in-directory NFO candidates and accept chosen, dropped, or
-pasted UTF-8 XML. A valid existing movie NFO is adopted as the durable identity
+also enumerate bounded in-directory NFO candidates and accept chosen or pasted NFO
+bytes, including content that is not XML-parseable. An existing movie NFO is adopted
+as the durable identity
 without copying or rewriting it; external movie NFOs and noncanonical TV NFOs remain
-exact-byte Inbox proposals until Apply, with replacement requiring explicit intent.
+exact-byte Inbox proposals until Apply. Existing targets are valid edit destinations and
+do not require a separate replacement opt-in.
 **Copy NFO prompt** produces provider-free clipboard guidance from local facts and
 the tags emitted by Harvester's own movie or TV renderer.
 
@@ -166,8 +168,8 @@ remains a distinct durable Harvester identity, so consumer selection never colla
 ownership or assigns a shared poster ambiguously. Lost & Found treats a parse failure as
 a repair target: provider-derived replacement bytes are prepared in the Inbox and only
 replace the malformed file after explicit **Apply** and its filesystem-precondition
-check. This consumer-compatibility classification is separate from manual intake, which
-continues to require safe UTF-8, the kind-specific root, and a title. Search candidate actions carry a content-bound
+check. Consumer compatibility is diagnostic rather than an intake gate: manual edits and
+imports may intentionally repair or preserve content that is not XML-parseable. Search candidate actions carry a content-bound
 token plus a candidate-set generation; directory changes require refreshing before
 selection can proceed. Symlinked NFOs participate in consumer classification, matching
 Movies UI, but Harvester refuses to adopt them as writable durable identities.

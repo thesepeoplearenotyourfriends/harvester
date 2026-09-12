@@ -552,27 +552,10 @@ def prepare_item_image_url(data):
 MAX_NFO_BYTES = 1_000_000
 
 
-def _validated_nfo(kind, source):
-    """Validate untrusted NFO bytes while retaining their exact representation."""
-    import xml.etree.ElementTree as ET
+def _bounded_nfo(source):
+    """Bound caller-supplied NFO bytes while retaining their exact representation."""
     if not source or len(source) > MAX_NFO_BYTES:
         raise BridgeError("NFO must be between 1 byte and 1 MB")
-    try:
-        text = source.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise BridgeError("NFO must be valid UTF-8") from error
-    folded = text.casefold()
-    if "<!doctype" in folded or "<!entity" in folded:
-        raise BridgeError("NFO declarations and entities are not allowed")
-    try:
-        root = ET.fromstring(text)
-    except ET.ParseError as error:
-        raise BridgeError("NFO must contain one valid XML document") from error
-    expected = "movie" if kind == "movie" else "tvshow"
-    if root.tag != expected:
-        raise BridgeError(f"{kind} NFO root must be <{expected}>")
-    if not (root.findtext("title") or "").strip():
-        raise BridgeError("NFO requires a nonempty <title>")
     return source
 
 
@@ -588,17 +571,15 @@ def _nfo_context(data):
     return config, record, detail
 
 
-def _prepare_nfo_bytes(config, kind, identifier, record, detail, source, replace):
+def _prepare_nfo_bytes(config, kind, identifier, record, detail, source):
     """Create an Inbox write for exact caller bytes and a host-owned target."""
     from harvester_core.artifacts import (RecordingCommitter, get_inbox_item, list_inbox,
                                           persist_preparation, _precondition)
     from harvester_core.storage import save_json_atomic, write_bytes_atomic
-    source = _validated_nfo(kind, source)
+    source = _bounded_nfo(source)
     identity = detail["selected_manifest_identity"]
     target = (Path(record.get("nfo_path") or identity) if kind == "movie"
               else Path(detail["directory"]) / "show.nfo")
-    if target.exists() and not replace:
-        raise BridgeError("NFO already exists; choose Replace Existing NFO to continue")
     workflow = "unresolved-movies" if kind == "movie" else "tv-errors"
     same_identity = [item for item in list_inbox(config)
                      if item.get("identities") == [identity]]
@@ -657,7 +638,7 @@ def prepare_item_nfo(data):
         raise BridgeError("invalid NFO data") from error
     config, record, detail = _nfo_context(data)
     return _prepare_nfo_bytes(config, data["kind"], data["identifier"], record, detail,
-                              source, data["replace"])
+                              source)
 
 
 def adopt_item_nfo(data):
@@ -676,8 +657,6 @@ def adopt_item_nfo(data):
                       if item.get("token") == data["candidate_token"]), None)
     if candidate is None:
         raise BridgeError("NFO candidates changed; refresh the item")
-    if not candidate.get("usable"):
-        raise BridgeError("selected NFO candidate is unusable")
     if candidate.get("symlink"):
         raise BridgeError("refusing to adopt a symlinked NFO")
     path = Path(detail["directory"]) / candidate["name"]
@@ -704,11 +683,11 @@ def adopt_item_nfo(data):
             return {"adopted": True, "identifier": new_key, "prepared": 0}
         raise BridgeError("selected NFO is no longer available")
     canonical = Path(detail["directory"]) / "show.nfo"
-    source = _validated_nfo("show", source)
+    source = _bounded_nfo(source)
     if path == canonical:
         return {"adopted": True, "identifier": data["identifier"], "prepared": 0}
     return _prepare_nfo_bytes(config, "show", data["identifier"], record, detail,
-                              source, data["replace"])
+                              source)
 
 
 def item_nfo_prompt(data):
