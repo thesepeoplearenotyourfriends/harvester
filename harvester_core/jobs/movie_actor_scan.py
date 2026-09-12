@@ -410,6 +410,9 @@ def resolve_movie_tmdb_id(tmdb, nfo):
                 "title": movie.get("title"),
                 "original_title": movie.get("original_title"),
                 "release_date": movie.get("release_date"),
+                # Search results already contain the synopsis; freezing it here
+                # makes ambiguous review useful without another provider call.
+                "overview": movie.get("overview"),
             }
             for score, movie in scored[:5]
         ],
