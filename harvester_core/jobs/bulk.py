@@ -366,6 +366,19 @@ def run(config, workflow, kind, identities, reporter=None):
         )
     records = [get_record(config, "show", value) for value in identities]
     targets = [record["local_target"] for record in records if record.get("status") == "matched"]
+    if workflow == "refetch-tv-nfo":
+        attempts = scanned.get("attempt_results", {})
+        failed_attempt = next((attempts.get(target) for target in _show_targets(config, identities)
+                               if not attempts.get(target, {}).get("ok")), None)
+        if failed_attempt is not None or any(
+                target not in attempts for target in _show_targets(config, identities)):
+            reason = ((failed_attempt or {}).get("reason") or
+                      "Explicit refetch produced no fresh provider result")
+            return _finish(
+                config, workflow, kind, identities, recorder,
+                _item_result(identities, ("identity", scanned),
+                             message=f"Provider refetch failed: {reason}"),
+                attention=1)
     write_nfo = workflow in {"missing-tv-nfo", "refetch-tv-nfo"} or (
         workflow in {"unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors"} and
         any(not (Path(record["local_target"]) / "show.nfo").is_file() for record in records

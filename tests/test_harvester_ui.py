@@ -1178,7 +1178,8 @@ class BulkRecipeTests(unittest.TestCase):
                 state["shows"][str(show)].update({"status": "matched", "tvdb_id": 7,
                                                   "nfo": {"title": "Show"}, "assets": {}})
                 save_json_atomic(config.state_path("tv_show_urls_tvdb.json"), state)
-                return {"processed": 1, "status_counts": {"matched": 1}}
+                return {"processed": 1, "status_counts": {"matched": 1},
+                        "attempt_results": {str(show): {"ok": True}}}
 
             for argv, scanner in ((movie_argv, movie_scan), (show_argv, show_scan)):
                 scope_path = Path(argv[argv.index("--scope-file") + 1])
@@ -1355,6 +1356,77 @@ class BulkRecipeTests(unittest.TestCase):
                 durable = json.loads(config.state_path("movie_manifest_tmdb.json").read_text())
                 record = durable["movies"][str(nfo)]
                 self.assertEqual(record["status"], "ok")
+                self.assertEqual(record["nfo"], old_payload)
+                if label == "ambiguous":
+                    self.assertTrue(record["candidates"])
+                harvester_ui._retrying_items.discard(item["item_id"])
+
+    def test_failed_or_ambiguous_tv_retry_cannot_stage_an_older_tvdb_payload(self):
+        from harvester_core.artifacts import RecordingCommitter, get_inbox_item, persist_preparation
+
+        class RetryProvider:
+            def __init__(self, results):
+                self.results = results
+
+            def get(self, path, params=None):
+                if path == "/search":
+                    return self.results, False
+                raise AssertionError(f"stale TV provider payload was materialized via {path}")
+
+        cases = {
+            "failed": [],
+            "ambiguous": [
+                {"tvdb_id": 2, "name": "Wrong", "year": "2010", "type": "series"},
+                {"tvdb_id": 3, "name": "Wrong", "year": "2011", "type": "series"},
+            ],
+        }
+        for label, results in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+                movies.mkdir(); tv.mkdir(); show = tv / "The Office (2005)"; show.mkdir()
+                nfo = show / "show.nfo"; old_bytes = b"<tvshow><title>Old</title></tvshow>"
+                nfo.write_bytes(old_bytes)
+                old_payload = {"title": "The Office", "year": 2005,
+                               "genre": ["Comedy"], "ids": {"tvdb": 73244}}
+                config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                      "tv_root": tv}, environ={}, app_dir=root)
+                save_json_atomic(config.state_path("tv_show_urls_tvdb.json"), {"_meta": {}, "shows": {
+                    str(show): {"status": "matched", "local_target": str(show),
+                                "folder_name": show.name, "query_title": "The Office",
+                                "query_year": 2005, "tvdb_id": 73244, "nfo": old_payload,
+                                "assets": {}, "candidates": []}}})
+                plan = persist_preparation(
+                    config, "refetch-tv-nfo", [str(show)], RecordingCommitter(),
+                    state="needs_attention", kind="show", local_target=str(show),
+                    requested_artifacts=["nfo"], reason="Retry provider search")
+                item = get_inbox_item(config, plan["plan_id"])
+                cache = root / ".cache" / "ui"
+                with mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                        mock.patch.object(harvester_ui, "CACHE_DIR", cache), \
+                        mock.patch("harvester_core.config.load_config", return_value=config):
+                    argv = harvester_ui.action_argv(
+                        "inbox.retry", {"item_id": item["item_id"],
+                                        "query": {"title": "Wrong", "year": "2009"}})
+                scope = Path(argv[argv.index("--scope-file") + 1])
+                generation = argv[argv.index("--generation") + 1]
+                items = bulk.load_scope_items(config, argv[4], scope, generation, 1)
+                with mock.patch("harvester_core.providers.tvdb.TVDBClient",
+                                return_value=RetryProvider(results)), \
+                        mock.patch("harvester_core.transport.transport_from_config",
+                                   return_value=object()):
+                    bulk.run_scoped(config, argv[4], items, 1)
+
+                retried = get_inbox_item(config, item["item_id"])
+                self.assertEqual(retried["state"], "needs_attention")
+                self.assertEqual(retried["actions"], [])
+                self.assertIn("Provider refetch failed", retried["reason"])
+                attempt = retried["summary"]["provider_attempts"][str(show)]
+                self.assertFalse(attempt["ok"])
+                self.assertIn(attempt["status"], {"not_found", "ambiguous", "error"})
+                self.assertEqual(nfo.read_bytes(), old_bytes)
+                durable = json.loads(config.state_path("tv_show_urls_tvdb.json").read_text())
+                record = durable["shows"][str(show)]
+                self.assertEqual(record["status"], "matched")
                 self.assertEqual(record["nfo"], old_payload)
                 if label == "ambiguous":
                     self.assertTrue(record["candidates"])
