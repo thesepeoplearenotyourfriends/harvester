@@ -926,6 +926,11 @@ if (!closed || saved) process.exit(1);
         self.assertLess(inspector.index("</dl>"), inspector.index("searchNfoInput"))
         inbox = page[page.index("const describeAction"):page.index('document.querySelector("#apply-item")')]
         self.assertLess(inbox.index('id="apply-item"'), inbox.index("<h2>Proposal</h2>"))
+        self.assertIn('<textarea class="proposal-receipt" aria-label="Proposal" readonly', inbox)
+        self.assertNotIn("<h2>Proposal</h2><pre>", inbox)
+        self.assertIn(".proposal-receipt", css)
+        self.assertIn("resize: none", css)
+        self.assertIn("appearance: none", css)
         self.assertIn("destination was ${action.precondition", page)
         for label in ('n: "All"', 'n: "Missing NFO"', 'n: "Missing poster"',
                       'n: "Unresolved"', 'n: "Failed"'):
