@@ -214,6 +214,9 @@ button {
 .bulk-content {
   max-width: 620px;
 }
+.bulk-title {
+  width: 100%;
+}
 .bulk-title,
 .workflow-heading {
   display: flex;
@@ -460,8 +463,24 @@ pre {
   border-radius: 4px;
 }
 
-/* Proposals are read-only receipts, but must remain easy to copy by selection. */
-.inspector pre { user-select: text; cursor: text; }
+/* Servo's textarea selection works before ordinary DOM text selection does. */
+.proposal-receipt {
+  display: block;
+  width: 100%;
+  margin: 1em 0;
+  padding: 8px;
+  overflow: auto;
+  resize: none;
+  appearance: none;
+  outline: 0;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-family: monospace;
+  white-space: pre-wrap;
+}
 .image-url { display: flex; flex-wrap: wrap; align-items: end; gap: .45rem; margin: .75rem 0; }
 .image-url label { display: grid; gap: .2rem; width: min(40rem, 100%); }
 .image-url input { padding: .45rem; border: 1px solid var(--line); border-radius: 4px; background: var(--background); }

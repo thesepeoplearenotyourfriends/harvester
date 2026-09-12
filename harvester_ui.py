@@ -102,7 +102,7 @@ def _rescan(data):
 
 
 BULK_WORKFLOWS = frozenset({
-    "missing-actor-images", "failed-actors", "lost-found", "missing-posters",
+    "missing-actor-images", "refetch-actor-image", "failed-actors", "lost-found", "missing-posters",
     "unresolved-movies", "failed-movies", "unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors",
     "missing-tv-nfo", "missing-tv-posters",
 })
@@ -180,7 +180,7 @@ def _item_refetch(data):
     identity = record.get("name") if data["kind"] == "actor" else (
         record.get("nfo_path") or record.get("local_target") if data["kind"] == "movie"
         else record.get("local_target"))
-    workflow = {"actor": "missing-actor-images", "movie": "unresolved-movies",
+    workflow = {"actor": "refetch-actor-image", "movie": "unresolved-movies",
                 "show": "tv-errors"}[data["kind"]]
     row = {"identifier": identity, "display_name": data["identifier"],
            "local_target": record.get("local_target"), "kind": data["kind"]}

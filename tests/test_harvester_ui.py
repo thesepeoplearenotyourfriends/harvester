@@ -507,13 +507,15 @@ if (identityless.liveProcessed !== 1 || identityless.activity !== 'Broken row') 
         self.assertIn("showStartupRescanFailure(error)", page)
         self.assertIn("Work queues and Search remain unavailable", page)
 
-    def test_bulk_drawer_and_workspace_share_navigation_safe_frozen_state(self):
+    def test_bulk_drawer_uses_navigation_safe_frozen_state(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
         self.assertIn('bulk: { job: null, drawerOpen: false }', page)
         self.assertIn('state.bulk.job = {', page)
         self.assertIn('scope,', page)
         self.assertIn('runBulk("bulk.workflow", { workflow, scope }', page)
-        self.assertIn('if (state.workflow === "bulk")', page)
+        self.assertNotIn('data-work="bulk"', page)
+        self.assertNotIn("showBulkWorkspace", page)
+        self.assertNotIn("bulkMarkup(true)", page)
         self.assertIn('state.bulk.drawerOpen = false', page)
         self.assertNotIn('state.bulk.job = null', page)
         self.assertNotIn('completed: identities.length', page)
@@ -772,9 +774,50 @@ const state = {{bulk: {{job: {{status: 'failed', processed: null, counts: {{}},
   inbox: {{unseen: 0, ready: 0, attention: 1, applied: 0}}}};
 function esc(value) {{ return String(value); }}
 {function}
-const markup = bulkMarkup(true);
+const markup = bulkMarkup();
 if (markup.includes('failed</strong> · Finished') || !markup.includes('failed</strong>'))
   process.exit(1);
+"""
+        subprocess.run(["node", "-e", script], check=True)
+
+    def test_bulk_navigation_contract_has_inbox_without_workspace(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        work_menu = page[page.index('id="work-menu"'):page.index("</div>", page.index('id="work-menu"'))]
+        self.assertIn('data-work="inbox">Bulk Inbox', work_menu)
+        self.assertNotIn('data-work="bulk"', work_menu)
+        toc = page[page.index("function tocRows"):page.index("function renderOverview")]
+        self.assertIn('{ h: "Review" }', toc)
+        self.assertIn('{ n: "Bulk Inbox", w: "inbox", c: state.inbox.items.length }', toc)
+        self.assertNotIn("showBulkWorkspace", page)
+        self.assertNotIn("bulkMarkup(true)", page)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is unavailable for renderer regression")
+    def test_closing_running_bulk_drawer_preserves_job_and_does_not_stop(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        start = page.index("function bulkMarkup")
+        end = page.index("\n      async function refreshInboxSummary", start)
+        functions = page[start:end]
+        script = f"""
+let stopRequests = 0;
+const state = {{workflow: 'overview', bulk: {{drawerOpen: true, job: {{
+  status: 'running', processed: null, liveProcessed: 1, total: 3, counts: {{}},
+  title: 'Repair', message: 'Working', requestId: 'stable', activity: ''
+}}}}, inbox: {{items: [], unseen: 0, ready: 0, attention: 0, applied: 0}}}};
+const nodes = {{
+  '#job-strip': {{setAttribute() {{}}}},
+  '#bulk-drawer': {{hidden: false, innerHTML: ''}},
+  '#close-bulk': {{}}, '#open-inbox': {{}}, '#stop-bulk': {{}}
+}};
+const document = {{querySelector(selector) {{ return nodes[selector] || null; }}}};
+const App = {{request() {{ stopRequests++; }}}};
+function openInbox() {{}}
+function esc(value) {{ return String(value); }}
+{functions}
+renderBulkPresentations();
+if ((nodes['#bulk-drawer'].innerHTML.match(/id="close-bulk"/g) || []).length !== 1) process.exit(1);
+nodes['#close-bulk'].onclick({{stopPropagation() {{}}}});
+if (state.bulk.drawerOpen || state.bulk.job.status !== 'running' ||
+    state.bulk.job.requestId !== 'stable' || stopRequests) process.exit(2);
 """
         subprocess.run(["node", "-e", script], check=True)
 
@@ -883,6 +926,16 @@ if (!closed || saved) process.exit(1);
         self.assertLess(inspector.index("</dl>"), inspector.index("searchNfoInput"))
         inbox = page[page.index("const describeAction"):page.index('document.querySelector("#apply-item")')]
         self.assertLess(inbox.index('id="apply-item"'), inbox.index("<h2>Proposal</h2>"))
+        self.assertIn('const filesystemChanges = item.actions.filter', inbox)
+        self.assertIn('action.action === "mkdir" && action.precondition?.exists', inbox)
+        self.assertIn('action.precondition.kind === "directory"', inbox)
+        self.assertIn('filesystemChanges.map((action)', inbox)
+        self.assertNotIn('item.actions.map((action)', inbox)
+        self.assertIn('<textarea class="proposal-receipt" aria-label="Proposal" readonly', inbox)
+        self.assertNotIn("<h2>Proposal</h2><pre>", inbox)
+        self.assertIn(".proposal-receipt", css)
+        self.assertIn("resize: none", css)
+        self.assertIn("appearance: none", css)
         self.assertIn("destination was ${action.precondition", page)
         for label in ('n: "All"', 'n: "Missing NFO"', 'n: "Missing poster"',
                       'n: "Unresolved"', 'n: "Failed"'):
@@ -986,6 +1039,70 @@ class BulkRecipeTests(unittest.TestCase):
             self.assertEqual((movie / "poster.jpg").read_bytes(), b"existing movie poster")
             self.assertEqual((show / "show.nfo").read_bytes(), b"existing show nfo")
             self.assertEqual((show / "poster.jpg").read_bytes(), b"existing show poster")
+
+    def test_explicit_actor_refetch_stages_replacement_with_existing_precondition(self):
+        from harvester_core.artifacts import list_inbox
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); actors = movies / ".actors"; actors.mkdir()
+            target = actors / "Actor.jpg"; original = b"existing actor image"
+            target.write_bytes(original)
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            save_json_atomic(config.state_path("movie_actor_queue.json"), {"actors": {
+                "Actor": {"status": "ok", "name": "Actor", "local_file": str(target)}}})
+
+            def scan(*_args, **_kwargs):
+                save_json_atomic(config.state_path("actor_thumb_urls_tmdb.json"),
+                                 {"Actor": ["https://images/actor.jpg"]})
+                return {"processed": 1, "counts": {"ok": 1}}
+
+            class Response:
+                headers = {"Content-Type": "image/jpeg"}
+                def __enter__(self): return self
+                def __exit__(self, *_args): return False
+                def read(self): return b"replacement actor image"
+
+            transport = mock.Mock()
+            transport.open.return_value = Response()
+            with mock.patch("harvester_core.transport.transport_from_config",
+                            return_value=transport), \
+                    mock.patch("harvester_core.providers.tmdb.TMDBClient",
+                               return_value=object()), \
+                    mock.patch("harvester_core.jobs.movie_actor_scan.run", side_effect=scan), \
+                    mock.patch("harvester_core.jobs.movie_actor_fetch.normalize_actor_image",
+                               side_effect=lambda data, _enabled: data):
+                result = bulk.run_scoped(config, "refetch-actor-image", [{
+                    "identities": ["Actor"], "display_title": "Actor",
+                    "local_target": str(target), "kind": "actor",
+                }], 1)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(target.read_bytes(), original)
+            item = list_inbox(config)[0]
+            self.assertEqual(item["state"], "ready")
+            writes = [action for action in item["actions"] if action["action"] == "write"]
+            self.assertEqual(len(writes), 1)
+            self.assertEqual(writes[0]["path"], str(target))
+            self.assertEqual(writes[0]["precondition"], {
+                "exists": True, "kind": "file", "size": len(original),
+                "sha256": __import__("hashlib").sha256(original).hexdigest(),
+            })
+
+    def test_actor_item_refetch_uses_replacement_recipe(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir()
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            save_json_atomic(config.state_path("movie_actor_queue.json"), {"actors": {
+                "Actor": {"status": "ok", "name": "Actor"}}})
+            with mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                    mock.patch.object(harvester_ui, "CACHE_DIR", root / ".cache" / "ui"), \
+                    mock.patch("harvester_core.config.load_config", return_value=config):
+                argv = harvester_ui.action_argv(
+                    "item.refetch", {"kind": "actor", "identifier": "Actor"})
+            self.assertEqual(argv[4], "refetch-actor-image")
 
     def test_search_manual_images_prepare_same_inbox_item_without_library_writes(self):
         from harvester_core.artifacts import list_inbox
@@ -1537,6 +1654,12 @@ class BulkRecipeTests(unittest.TestCase):
                                          for action in inbox["actions"]), int(succeeds))
                     if not succeeds:
                         self.assertEqual(inbox["reason"], reason)
+
+    def test_actor_refetch_does_not_accept_an_exists_result_as_a_replacement(self):
+        attention, reason = bulk._scoped_artifact_outcome(
+            "refetch-actor-image", {"counts": {"image_exists": 1}})
+        self.assertTrue(attention)
+        self.assertEqual(reason, "No image artifact was prepared")
 
     def test_combined_preserves_augmented_and_planned_artifact_counts(self):
         combined = bulk._combined(("image", {

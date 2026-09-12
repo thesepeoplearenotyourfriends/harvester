@@ -19,7 +19,7 @@ from ..events import emit
 
 
 WORKFLOW_KINDS = {
-    "missing-actor-images": "actor", "failed-actors": "actor",
+    "missing-actor-images": "actor", "refetch-actor-image": "actor", "failed-actors": "actor",
     "lost-found": "movie", "missing-posters": "movie",
     "unresolved-movies": "movie", "failed-movies": "movie",
     "unresolved-tv": "show", "ambiguous-tv": "show", "not-found-tv": "show",
@@ -157,6 +157,7 @@ def _finish(config, workflow, kind, identities, recorder, result, attention=0):
         reason=result.get("message") if state == "needs_attention" else None,
         logical_identity=result.pop("_logical_identity", None), kind=kind,
         requested_artifacts={"missing-actor-images": ["actor_image"],
+                             "refetch-actor-image": ["actor_image"],
                              "lost-found": ["nfo"], "missing-posters": ["poster"],
                              "missing-tv-nfo": ["nfo"],
                              "missing-tv-posters": ["poster"]}.get(
@@ -193,6 +194,7 @@ def _scoped_artifact_outcome(workflow, result):
     """Classify requested artifact preparation without consulting provider totals."""
     expected = {
         "missing-actor-images": ("image", ("failed", "unresolved_source")),
+        "refetch-actor-image": ("image", ("failed", "unresolved_source")),
         "missing-posters": ("poster", ("error", "no_url", "unresolved_target")),
         "lost-found": ("nfo", ("error", "unresolved_target", "unusable")),
         "missing-tv-nfo": ("nfo", ("error",)),
@@ -220,8 +222,10 @@ def _scoped_artifact_outcome(workflow, result):
                            for value in details.values()
                            if value.get("status") in failures), None)
             return True, str(reason or f"{key.replace('_', ' ')}: {diagnostics[key]}")
+    successful_names = (("planned",) if workflow == "refetch-actor-image"
+                        else ("planned", "exists"))
     successful = sum(int(diagnostics.get(f"{prefix}_{name}", 0))
-                     for name in ("planned", "exists"))
+                     for name in successful_names)
     if not successful:
         return True, f"No {prefix.replace('_', ' ')} artifact was prepared"
     return False, None
@@ -236,14 +240,15 @@ def run(config, workflow, kind, identities, reporter=None):
         except KeyError as error:
             raise ValueError(f"Bulk {kind} identity conflicts with authoritative records") from error
     recorder = RecordingCommitter()
-    if workflow == "missing-actor-images":
+    if workflow in {"missing-actor-images", "refetch-actor-image"}:
         from .movie_actor_scan import run as scan
         from .movie_actor_fetch import run as fetch
         from ..providers.tmdb import TMDBClient
         from ..transport import transport_from_config
         transport = transport_from_config(config)
         urls = load_json(config.state_path("actor_thumb_urls_tmdb.json"), {})
-        missing_sources = [name for name in identities if not urls.get(name)]
+        replacing = workflow == "refetch-actor-image"
+        missing_sources = identities if replacing else [name for name in identities if not urls.get(name)]
         scanned = {"processed": 0, "counts": {}}
         if missing_sources:
             provider = TMDBClient(config.tmdb_api_key, config.tmdb_bearer_token,
@@ -254,7 +259,7 @@ def run(config, workflow, kind, identities, reporter=None):
         available = [name for name in identities if urls.get(name)]
         unresolved = len(identities) - len(available)
         fetched = ({"processed": 0, "counts": {}} if not available else
-                   fetch(config, reporter, retry_failed=True, overwrite=False,
+                   fetch(config, reporter, retry_failed=True, overwrite=replacing,
                          targets=available, transport=transport, committer=recorder))
         fetched.setdefault("counts", {})["unresolved_source"] = unresolved
         return _finish(config, workflow, kind, identities, recorder,
