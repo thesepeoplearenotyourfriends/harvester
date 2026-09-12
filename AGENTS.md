@@ -32,7 +32,7 @@ The scripts in `reference/` are behavioral evidence from real, large runs. They 
 
 During consolidation:
 
-- preserve resumability, matching conservatism, caching, retry/backoff behavior, atomic writes, and skip-existing behavior unless there is a concrete reason to change them;
+- preserve resumability, matching conservatism, caching, retry/backoff behavior, atomic writes, and skip-existing behavior for unattended/broad runs unless there is a concrete reason to change them; do not generalize skip-existing behavior to explicit repair or editing operations;
 - do not rewrite a working algorithm merely to make it look more unified;
 - add focused regression coverage around important behavior before or alongside structural refactors;
 - if behavior intentionally changes, document why.
@@ -46,7 +46,11 @@ Prefer boring, inspectable state: JSON work files/caches, NFO/XML, JPG/PNG, and 
 - Write mutable state atomically.
 - Treat interruption and restart as normal operation.
 - Do not silently discard useful prior state after a transient provider failure.
-- Existing filesystem artifacts are receipts; do not redownload/rewrite them without an explicit reason or overwrite request.
+- Existing filesystem artifacts are receipts during automatic, broad, or resumable runs; skip them by default unless that operation explicitly requests replacement.
+- Interactive repair is different. An explicit re-fetch, candidate selection, manual edit/import, or other repair request may prepare a replacement for an existing, missing, malformed, stale, or incorrect artifact.
+- Preparation never authorizes mutation of the media library. Proposed bytes, destinations, and current-filesystem preconditions belong in the Inbox; explicit Apply is the authorization boundary for library writes.
+- A missing or malformed destination must not block preparation of a valid replacement. Conversely, a malformed proposed replacement must not be accepted merely because the destination is also malformed.
+- Do not turn "preserve existing files until Apply" into "refuse to prepare a replacement for existing files."
 - Keep work/manifests understandable enough that a human can inspect them when Harvester itself is unavailable.
 
 Avoid making an opaque database the sole source of truth unless a future requirement genuinely demands it.
