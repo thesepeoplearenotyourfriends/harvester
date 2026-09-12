@@ -834,7 +834,7 @@ function selectInboxItem(index) {{ selected = index; }}
         self.assertIn("Copy NFO prompt", page)
         self.assertIn("Existing NFOs on disk", page)
         self.assertNotIn("Drop .nfo here", page)
-        self.assertIn("Paste NFO content…", page)
+        self.assertIn("Paste XML…", page)
         self.assertIn('document.execCommand("copy")', page)
         self.assertIn('App.request("item.install_nfo", { kind: detail.kind, identifier: detail.identifier, content_base64:', page)
         self.assertIn('App.request("item.adopt_nfo", { kind: detail.kind, identifier: detail.identifier, candidate_token:', page)
@@ -1113,6 +1113,12 @@ class BulkRecipeTests(unittest.TestCase):
             self.assertFalse(detail["nfo_candidates"][1]["usable"])
             with mock.patch("harvester_core.config.load_config", return_value=config), \
                     mock.patch.object(harvester_ui, "PROJECT_DIR", root):
+                with self.assertRaisesRegex(harvester_ui.BridgeError, "candidate is unusable"):
+                    harvester_ui.run_action("item.adopt_nfo", {
+                        "kind": "movie", "identifier": str(inferred),
+                        "candidate_token": detail["nfo_candidates"][1]["token"],
+                        "candidate_generation": detail["nfo_candidates_generation"],
+                        "replace": False})
                 result = harvester_ui.run_action("item.adopt_nfo", {
                     "kind": "movie", "identifier": str(inferred),
                     "candidate_token": candidate["token"],
@@ -1272,74 +1278,51 @@ class BulkRecipeTests(unittest.TestCase):
             self.assertEqual(provider_item["state"], "needs_attention")
             self.assertEqual(provider_item["reason"], "Provider identity unresolved")
 
-    def test_search_nfo_intake_preserves_bytes_and_allows_existing_targets(self):
+    def test_valid_nfo_replaces_existing_malformed_show_via_inbox(self):
         from harvester_core.artifacts import get_inbox_item
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); movies = root / "movies"; tv = root / "tv"
-            movies.mkdir(); tv.mkdir(); movie = movies / "Movie"; show = tv / "Show"
-            movie.mkdir(); show.mkdir(); movie_target = movie / "movie.nfo"
+            movies.mkdir(); tv.mkdir(); show = tv / "Show"; show.mkdir()
+            target = show / "show.nfo"; existing = b"<tvshow>"
+            target.write_bytes(existing)
             config = load_config({"state_dir": root / "state", "movie_root": movies,
                                   "tv_root": tv}, environ={}, app_dir=root)
-            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"movies": {
-                str(movie_target): {"status": "unresolved", "local_target": str(movie_target),
-                                    "nfo_path": str(movie_target), "tmdb_id": 12}}})
             save_json_atomic(config.state_path("tv_show_urls_tvdb.json"), {"shows": {
                 str(show): {"status": "matched", "local_target": str(show), "tvdb_id": 34}}})
-            movie_xml = b'<?xml version="1.0"?>\n<movie><title>Movie</title><unknown x="1">retain</unknown></movie>\n'
             tv_xml = b"<tvshow><title>Show</title><extra>retain</extra></tvshow>"
             with mock.patch("harvester_core.config.load_config", return_value=config), \
                     mock.patch.object(harvester_ui, "PROJECT_DIR", root):
-                movie_result = harvester_ui.run_action("item.install_nfo", {
-                    "kind": "movie", "identifier": str(movie_target),
-                    "content_base64": base64.b64encode(movie_xml).decode(), "replace": False})
-                tv_result = harvester_ui.run_action("item.install_nfo", {
+                result = harvester_ui.run_action("item.install_nfo", {
                     "kind": "show", "identifier": str(show),
                     "content_base64": base64.b64encode(tv_xml).decode(), "replace": False})
-                (show / "show.nfo").write_bytes(b"existing")
-                tv_result = harvester_ui.run_action("item.install_nfo", {
-                    "kind": "show", "identifier": str(show),
-                    "content_base64": base64.b64encode(b"not xml").decode(), "replace": False})
-                movie_result = harvester_ui.run_action("item.install_nfo", {
-                    "kind": "movie", "identifier": str(movie_target),
-                    "content_base64": base64.b64encode(b"<movie>").decode(), "replace": False})
-                with self.assertRaises(harvester_ui.BridgeError):
-                    harvester_ui.run_action("item.install_nfo", {
-                        "kind": "movie", "identifier": str(movie_target),
-                        "content_base64": base64.b64encode(movie_xml).decode(),
-                        "replace": False, "path": "/tmp/escape.nfo"})
-            for result, expected in ((movie_result, b"<movie>"), (tv_result, b"not xml")):
-                item = get_inbox_item(config, result["item_id"])
-                blob = root / ".cache" / "bulk" / "inbox" / item["item_id"] / item["actions"][-1]["blob"]
-                self.assertEqual(blob.read_bytes(), expected)
-            self.assertFalse(movie_target.exists())
-            self.assertEqual((show / "show.nfo").read_bytes(), b"existing")
+            item = get_inbox_item(config, result["item_id"])
+            action = next(action for action in item["actions"]
+                          if action["action"] == "write" and action["path"] == str(target))
+            blob = root / ".cache" / "bulk" / "inbox" / item["item_id"] / action["blob"]
+            self.assertEqual(blob.read_bytes(), tv_xml)
+            self.assertEqual(action["precondition"], {
+                "exists": True, "kind": "file", "size": len(existing),
+                "sha256": __import__("hashlib").sha256(existing).hexdigest()})
+            self.assertEqual(target.read_bytes(), existing)
 
-    def test_search_can_adopt_a_non_parseable_existing_movie_nfo(self):
-        from harvester_core.api import inspect_item
-        from harvester_core.storage import load_json
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
-            movies.mkdir(); tv.mkdir(); folder = movies / "Repair"; folder.mkdir()
-            inferred = folder / "missing.nfo"
-            existing = folder / "broken.nfo"; existing.write_bytes(b"not xml")
-            config = load_config({"state_dir": root / "state", "movie_root": movies,
-                                  "tv_root": tv}, environ={}, app_dir=root)
-            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"movies": {
-                str(inferred): {"status": "unresolved", "local_target": str(inferred),
-                                "nfo_path": str(inferred)}}})
-            detail = inspect_item(config, "movie", str(inferred))
-            candidate = detail["nfo_candidates"][0]
-            self.assertFalse(candidate["parseable"])
-            with mock.patch("harvester_core.config.load_config", return_value=config), \
-                    mock.patch.object(harvester_ui, "PROJECT_DIR", root):
-                result = harvester_ui.run_action("item.adopt_nfo", {
-                    "kind": "movie", "identifier": str(inferred),
-                    "candidate_token": candidate["token"],
-                    "candidate_generation": detail["nfo_candidates_generation"],
-                    "replace": False})
-            self.assertEqual(result["identifier"], str(existing))
-            self.assertIn(str(existing), load_json(
-                config.state_path("movie_manifest_tmdb.json"))["movies"])
+    def test_malformed_nfo_payload_cannot_replace_an_existing_show_nfo(self):
+        for existing in (b"<tvshow><title>Valid</title></tvshow>", b"<tvshow>"):
+            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+                movies.mkdir(); tv.mkdir(); show = tv / "Show"; show.mkdir()
+                target = show / "show.nfo"; target.write_bytes(existing)
+                config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                      "tv_root": tv}, environ={}, app_dir=root)
+                save_json_atomic(config.state_path("tv_show_urls_tvdb.json"), {"shows": {
+                    str(show): {"status": "matched", "local_target": str(show)}}})
+                with mock.patch("harvester_core.config.load_config", return_value=config), \
+                        mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                        self.assertRaisesRegex(harvester_ui.BridgeError, "valid XML document"):
+                    harvester_ui.run_action("item.install_nfo", {
+                        "kind": "show", "identifier": str(show),
+                        "content_base64": base64.b64encode(b"not xml").decode(),
+                        "replace": False})
+                self.assertEqual(target.read_bytes(), existing)
 
     def test_search_nfo_prompt_uses_local_facts_without_providers(self):
         with tempfile.TemporaryDirectory() as temporary:
