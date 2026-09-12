@@ -701,7 +701,7 @@
         const candidates = detail.nfo_candidates || [], usable = candidates.filter((item) => item.usable);
         const existing = candidates.length ? `<h3>Existing NFOs on disk</h3><ul class="nfo-candidates">${candidates.map((item, index) =>
           `<li><strong>${esc(item.name)}</strong><br><span class="muted">${item.parseable ? `parseable · &lt;${esc(item.root)}&gt;${item.title ? ` · title: ${esc(item.title)}` : ""}` : `unusable · XML parse error: ${esc(item.parse_error || "unknown error")}`}</span>${item.usable ? `<br><button type="button" data-nfo-token="${esc(item.token)}" class="${usable.length === 1 ? "primary" : "compact-action"}">Use this NFO</button>` : ""}</li>`).join("")}</ul>` : '<p class="muted">No .nfo files found in this directory.</p>';
-        return `<section class="search-nfo"><h2>NFO</h2><p><strong>${detail.nfo?.present ? "Present" : "Missing"}</strong></p><button id="copy-nfo-prompt" type="button" class="compact-action">Copy NFO prompt</button>${existing}<h3>Use NFO:</h3><label><input id="replace-search-nfo" type="checkbox"> Replace Existing NFO</label><textarea id="search-nfo-paste" rows="7" placeholder="Paste XML…"></textarea><button id="prepare-pasted-nfo" type="button">Use pasted XML</button></section>`;
+        return `<section class="search-nfo"><h2>NFO</h2><p><strong>${detail.nfo?.present ? "Present" : "Missing"}</strong></p><button id="copy-nfo-prompt" type="button" class="compact-action">Copy NFO prompt</button>${existing}<h3>Use NFO:</h3><textarea id="search-nfo-paste" rows="7" placeholder="Paste XML…"></textarea><button id="prepare-pasted-nfo" type="button">Use pasted XML</button></section>`;
       }
       function showSearchPrepared() {
         const note = document.querySelector("#search-prepared");
@@ -732,11 +732,10 @@
       function bindSearchNfo(detail) {
         const paste = document.querySelector("#search-nfo-paste");
         if (!paste) return;
-        const replace = () => document.querySelector("#replace-search-nfo").checked;
         const prepareBytes = async (bytes) => {
           if (bytes.length > 1000000) { showError("NFO is larger than 1 MB"); return; }
           try {
-            await App.request("item.install_nfo", { kind: detail.kind, identifier: detail.identifier, content_base64: bytesBase64(bytes), replace: replace() }, false, true);
+            await App.request("item.install_nfo", { kind: detail.kind, identifier: detail.identifier, content_base64: bytesBase64(bytes) }, false, true);
             await refreshInboxSummary(); showSearchPrepared();
           } catch (error) { showError(error.message || "Could not prepare NFO"); }
         };
@@ -755,7 +754,7 @@
         };
         document.querySelectorAll("[data-nfo-token]").forEach((button) => button.onclick = async () => {
           try {
-            const result = await App.request("item.adopt_nfo", { kind: detail.kind, identifier: detail.identifier, candidate_token: button.dataset.nfoToken, candidate_generation: detail.nfo_candidates_generation, replace: replace() }, false, true);
+            const result = await App.request("item.adopt_nfo", { kind: detail.kind, identifier: detail.identifier, candidate_token: button.dataset.nfoToken, candidate_generation: detail.nfo_candidates_generation }, false, true);
             if (result.prepared) { await refreshInboxSummary(); showSearchPrepared(); }
             else {
               const index = state.rows.findIndex((row) => row.identifier === detail.identifier);

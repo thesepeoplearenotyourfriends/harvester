@@ -588,7 +588,7 @@ def _nfo_context(data):
     return config, record, detail
 
 
-def _prepare_nfo_bytes(config, kind, identifier, record, detail, source, replace):
+def _prepare_nfo_bytes(config, kind, identifier, record, detail, source):
     """Create an Inbox write for exact caller bytes and a host-owned target."""
     from harvester_core.artifacts import (RecordingCommitter, get_inbox_item, list_inbox,
                                           persist_preparation, _precondition)
@@ -597,8 +597,6 @@ def _prepare_nfo_bytes(config, kind, identifier, record, detail, source, replace
     identity = detail["selected_manifest_identity"]
     target = (Path(record.get("nfo_path") or identity) if kind == "movie"
               else Path(detail["directory"]) / "show.nfo")
-    if target.exists() and not replace:
-        raise BridgeError("NFO already exists; choose Replace Existing NFO to continue")
     workflow = "unresolved-movies" if kind == "movie" else "tv-errors"
     same_identity = [item for item in list_inbox(config)
                      if item.get("identities") == [identity]]
@@ -645,29 +643,27 @@ def _prepare_nfo_bytes(config, kind, identifier, record, detail, source, replace
 
 def prepare_item_nfo(data):
     """Prepare pasted/chosen NFO content without accepting filesystem paths."""
-    if (set(data) != {"kind", "identifier", "content_base64", "replace"} or
+    if (set(data) != {"kind", "identifier", "content_base64"} or
             data.get("kind") not in {"movie", "show"} or
             not isinstance(data.get("identifier"), str) or
-            not isinstance(data.get("content_base64"), str) or
-            not isinstance(data.get("replace"), bool)):
-        raise BridgeError("item.install_nfo requires kind, identifier, NFO bytes, and replace intent")
+            not isinstance(data.get("content_base64"), str)):
+        raise BridgeError("item.install_nfo requires kind, identifier, and NFO bytes")
     try:
         source = base64.b64decode(data["content_base64"], validate=True)
     except (ValueError, TypeError) as error:
         raise BridgeError("invalid NFO data") from error
     config, record, detail = _nfo_context(data)
     return _prepare_nfo_bytes(config, data["kind"], data["identifier"], record, detail,
-                              source, data["replace"])
+                              source)
 
 
 def adopt_item_nfo(data):
     """Resolve a bounded inspection candidate entirely on the host side."""
-    if (set(data) != {"kind", "identifier", "candidate_token", "candidate_generation", "replace"} or
+    if (set(data) != {"kind", "identifier", "candidate_token", "candidate_generation"} or
             data.get("kind") not in {"movie", "show"} or
             not isinstance(data.get("identifier"), str) or
             not isinstance(data.get("candidate_token"), str) or
-            not isinstance(data.get("candidate_generation"), str) or
-            not isinstance(data.get("replace"), bool)):
+            not isinstance(data.get("candidate_generation"), str)):
         raise BridgeError("item.adopt_nfo requires a Search identity and candidate token")
     config, record, detail = _nfo_context(data)
     if detail.get("nfo_candidates_generation") != data["candidate_generation"]:
@@ -708,7 +704,7 @@ def adopt_item_nfo(data):
     if path == canonical:
         return {"adopted": True, "identifier": data["identifier"], "prepared": 0}
     return _prepare_nfo_bytes(config, "show", data["identifier"], record, detail,
-                              source, data["replace"])
+                              source)
 
 
 def item_nfo_prompt(data):
