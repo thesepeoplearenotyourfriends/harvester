@@ -55,6 +55,14 @@ title/year or actor-name override and rerun the same preparation-only recipe; th
 changes provider lookup input only, never the local identity, directory, or artifact
 destination. Clearing the fields restores filesystem-inferred searches.
 
+The Inbox is the write-safety boundary. Explicit repair may prepare replacements for
+existing, missing, malformed, stale, or incorrect artifacts; the current library file
+remains untouched until **Apply**. The prepared action records the current destination
+precondition so Apply refuses to write over an unexpected filesystem change. Broad,
+unattended, or resumable harvesting still treats existing artifacts as completed work
+by default. In other words, "preserve existing files" means preserve them on disk until
+Apply, not refuse to prepare a replacement for them.
+
 Pillow is optional and imported only while treating actor images. Without it, downloaded bytes are preserved unchanged.
 
 Network requests use direct sockets by default. Set `HARVESTER_SOCKS5=127.0.0.1:1080`
@@ -76,7 +84,7 @@ All state is ordinary atomically replaced JSON:
 * `movie_manifest_tmdb.json` — frozen movie identity, NFO payloads, poster URLs, errors, and materialization receipts.
 * `tmdb_api_cache.json` and `tvdb_api_cache.json` — persistent raw GET response caches.
 
-Normal runs resume these files. An actor found in several NFOs is tried through those movie contexts until one resolves. Movie lookup prefers local TMDB ID, then IMDb lookup, then conservative title/year matching. Existing actor files are always receipts; NFO/poster overwrite behavior retains the reference defaults and has explicit opt-outs. Failed transfers are retried only when the corresponding retry control permits it. A transient refresh failure does not replace a prior successful match. Ambiguous title-only TV searches remain staged as ambiguous for human correction rather than selecting recklessly. CLI results are compact summaries; detailed receipts remain in these JSON files. Malformed state is never silently replaced: jobs report an actionable read error, while `status` marks the affected file unreadable and continues checking the others.
+Normal runs resume these files. An actor found in several NFOs is tried through those movie contexts until one resolves. Movie lookup prefers local TMDB ID, then IMDb lookup, then conservative title/year matching. Unattended and broad runs retain the reference skip-existing defaults so already-present artifacts act as resumability receipts. Explicit targeted repair/editing is different: it may stage a replacement for an existing artifact in the Inbox without touching the library until Apply. Failed transfers are retried only when the corresponding retry control permits it. A transient refresh failure does not replace a prior successful match. Ambiguous title-only TV searches remain staged as ambiguous for human correction rather than selecting recklessly. CLI results are compact summaries; detailed receipts remain in these JSON files. Malformed state is never silently replaced: jobs report an actionable read error, while `status` marks the affected file unreadable and continues checking the others.
 
 For offline integrations, `api get movie|show IDENTIFIER` remains the raw durable-record
 primitive. `api inspect movie|show IDENTIFIER` instead reports the artifacts currently
@@ -126,16 +134,18 @@ immutable collection cache before starting a semantic, allowlisted recipe. Leavi
 queue or closing the drawer does not stop the work. While a Bulk writer is active,
 navigation and inspection remain available but other UI write controls are disabled.
 Broad materialization preserves files that already exist rather than treating the
-workflow as an overwrite request; Bulk state is session-only and is not a job-history
-store. Lost & Found resolves provider metadata before preparing an NFO. Missing Poster
-reports records without an already-safe poster target as unresolved rather than
-inventing a filename.
+workflow as an overwrite request. Targeted re-fetch/edit operations are different:
+they may prepare replacement artifacts for existing destinations and rely on Inbox
+review, filesystem preconditions, and explicit Apply to protect the library. Bulk state
+is session-only and is not a job-history store. Lost & Found resolves provider metadata
+before preparing an NFO. Missing Poster reports records without an already-safe poster
+target as unresolved rather than inventing a filename.
 
 `Re-fetch from web` is preparation-only: provider work may update Harvester manifests
-and caches, but its artifact recipes never mutate the configured media roots. Prepared
-bytes and an atomic review manifest live under disposable `.cache/bulk/<plan-id>/` data;
-the Bulk summary reports prepared, attention, and applied counts, with applied fixed at
-zero until a future inspectable review/apply surface exists.
+and caches, but artifact preparation never mutates the configured media roots. Prepared
+bytes and their durable review manifests live under `.cache/bulk/inbox/`. The Bulk
+summary reports prepared, attention, and applied counts; actual filesystem mutation
+happens only through an explicit Inbox **Apply** after its preconditions are revalidated.
 
 Movie discovery treats only immediate, non-hidden children of `MOVIE_ROOT` as movie
 containers, so nested sample/extras/disc directories cannot become census records.
@@ -152,10 +162,11 @@ work surface: **Re-fetch this item** derives its allowlisted recipe from the dur
 record identity, while dropped movie/show posters and actor mugshots are normalized
 and stored as Inbox proposals. Both paths preserve existing library files until the
 user explicitly applies the resulting Inbox item. Movie and show Search inspectors
-also enumerate bounded in-directory NFO candidates and accept chosen, dropped, or
-pasted UTF-8 XML. A valid existing movie NFO is adopted as the durable identity
+also enumerate bounded in-directory NFO candidates and accept chosen or pasted UTF-8
+XML. A valid existing movie NFO is adopted as the durable identity
 without copying or rewriting it; external movie NFOs and noncanonical TV NFOs remain
-exact-byte Inbox proposals until Apply, with replacement requiring explicit intent.
+exact-byte Inbox proposals until Apply. Existing targets are valid edit destinations and
+do not require a separate replacement opt-in.
 **Copy NFO prompt** produces provider-free clipboard guidance from local facts and
 the tags emitted by Harvester's own movie or TV renderer.
 
@@ -166,8 +177,9 @@ remains a distinct durable Harvester identity, so consumer selection never colla
 ownership or assigns a shared poster ambiguously. Lost & Found treats a parse failure as
 a repair target: provider-derived replacement bytes are prepared in the Inbox and only
 replace the malformed file after explicit **Apply** and its filesystem-precondition
-check. This consumer-compatibility classification is separate from manual intake, which
-continues to require safe UTF-8, the kind-specific root, and a title. Search candidate actions carry a content-bound
+check. Malformed existing NFOs do not block preparing a valid replacement, but newly
+supplied content must be safe UTF-8 with the kind-specific root and a title. Search
+candidate actions carry a content-bound
 token plus a candidate-set generation; directory changes require refreshing before
 selection can proceed. Symlinked NFOs participate in consumer classification, matching
 Movies UI, but Harvester refuses to adopt them as writable durable identities.
