@@ -33,9 +33,7 @@
           View
         </button>
         <div class="menu-items">
-          <button id="increase-font"><span>Increase font size</span><kbd>Ctrl +</kbd></button
-          ><button id="decrease-font"><span>Decrease font size</span><kbd>Ctrl -</kbd></button
-          ><button id="toggle-context">Hide Context Pane</button
+          <button id="toggle-context">Hide Context Pane</button
           ><button id="reset-pane">Reset Pane Width</button
           ><button id="open-configuration">Configuration…</button>
         </div>
@@ -1115,14 +1113,6 @@
       document.onkeydown = (e) => {
         if (e.key === "Escape") closeMenus();
       };
-      function invokeFontShortcut(key) {
-        document.dispatchEvent(new KeyboardEvent("keydown", {
-          key, code: key === "-" ? "Minus" : "Equal", ctrlKey: true,
-          bubbles: true, cancelable: true,
-        }));
-      }
-      document.querySelector("#increase-font").onclick = () => invokeFontShortcut("+");
-      document.querySelector("#decrease-font").onclick = () => invokeFontShortcut("-");
       const splitter = document.querySelector("#splitter"),
         pane = document.querySelector("#context-pane");
       function setWidth(w) {

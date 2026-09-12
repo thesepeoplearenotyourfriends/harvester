@@ -780,22 +780,6 @@ if (markup.includes('failed</strong> · Finished') || !markup.includes('failed</
 """
         subprocess.run(["node", "-e", script], check=True)
 
-    def test_font_size_controls_invoke_the_existing_ctrl_shortcut_path(self):
-        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
-        css = (harvester_ui.PROJECT_DIR / "css" / "my.css").read_text(encoding="utf-8")
-        self.assertRegex(css, r'font:\s*\n\s*10px/1\.35 "Segoe UI"')
-        self.assertIn('<span>Increase font size</span><kbd>Ctrl +</kbd>', page)
-        self.assertIn('<span>Decrease font size</span><kbd>Ctrl -</kbd>', page)
-        self.assertIn('function invokeFontShortcut(key)', page)
-        self.assertIn('new KeyboardEvent("keydown"', page)
-        self.assertIn('querySelector("#increase-font").onclick = () => invokeFontShortcut("+")', page)
-        self.assertIn('querySelector("#decrease-font").onclick = () => invokeFontShortcut("-")', page)
-        keyboard = page[page.index("document.onkeydown"):page.index("const splitter")]
-        self.assertNotIn("document.body.style.fontSize", page)
-        self.assertNotIn("FONT_SIZE_STEP", page)
-        self.assertNotIn("e.ctrlKey", keyboard)
-        self.assertNotIn("e.preventDefault()", keyboard)
-
     def test_bulk_navigation_contract_has_inbox_without_workspace(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
         work_menu = page[page.index('id="work-menu"'):page.index("</div>", page.index('id="work-menu"'))]
