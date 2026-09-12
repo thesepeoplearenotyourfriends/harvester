@@ -926,6 +926,11 @@ if (!closed || saved) process.exit(1);
         self.assertLess(inspector.index("</dl>"), inspector.index("searchNfoInput"))
         inbox = page[page.index("const describeAction"):page.index('document.querySelector("#apply-item")')]
         self.assertLess(inbox.index('id="apply-item"'), inbox.index("<h2>Proposal</h2>"))
+        self.assertIn('const filesystemChanges = item.actions.filter', inbox)
+        self.assertIn('action.action === "mkdir" && action.precondition?.exists', inbox)
+        self.assertIn('action.precondition.kind === "directory"', inbox)
+        self.assertIn('filesystemChanges.map((action)', inbox)
+        self.assertNotIn('item.actions.map((action)', inbox)
         self.assertIn('<textarea class="proposal-receipt" aria-label="Proposal" readonly', inbox)
         self.assertNotIn("<h2>Proposal</h2><pre>", inbox)
         self.assertIn(".proposal-receipt", css)
