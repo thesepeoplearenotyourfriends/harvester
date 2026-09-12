@@ -48,7 +48,7 @@ body {
   color: var(--text);
   color-scheme: dark;
   font:
-    12px/1.35 "Segoe UI",
+    10px/1.35 "Segoe UI",
     Tahoma,
     sans-serif;
 }
@@ -110,12 +110,20 @@ button {
   display: block;
 }
 .menu-items button {
-  display: block;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
   width: 100%;
   padding: 4px 10px;
   text-align: left;
   border: 0;
   background: transparent;
+}
+.menu-items kbd {
+  margin-left: auto;
+  color: var(--muted);
+  font: inherit;
+  white-space: nowrap;
 }
 .menu-items button:hover {
   background: #ffffff14;
@@ -213,6 +221,9 @@ button {
 }
 .bulk-content {
   max-width: 620px;
+}
+.bulk-title {
+  width: 100%;
 }
 .bulk-title,
 .workflow-heading {

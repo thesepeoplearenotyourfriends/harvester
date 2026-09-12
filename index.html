@@ -26,7 +26,6 @@
           ><button data-work="unresolved-movies">Unresolved Movies</button
           ><button data-work="unresolved-tv">Unresolved TV</button>
           <button data-work="inbox">Bulk Inbox</button>
-          <button data-work="bulk">Bulk</button>
         </div>
       </div>
       <div class="menu">
@@ -34,7 +33,9 @@
           View
         </button>
         <div class="menu-items">
-          <button id="toggle-context">Hide Context Pane</button
+          <button id="increase-font"><span>Increase font size</span><kbd>Ctrl +</kbd></button
+          ><button id="decrease-font"><span>Decrease font size</span><kbd>Ctrl -</kbd></button
+          ><button id="toggle-context">Hide Context Pane</button
           ><button id="reset-pane">Reset Pane Width</button
           ><button id="open-configuration">Configuration…</button>
         </div>
@@ -333,6 +334,8 @@
           { n: "Failed", w: "tv-errors", c: count("tv", "error") },
           { h: "Providers" },
           { n: "Provider status", w: "providers" },
+          { h: "Review" },
+          { n: "Bulk Inbox", w: "inbox", c: state.inbox.items.length },
         ];
       }
       function renderOverview() {
@@ -394,10 +397,6 @@
       async function openWorkflow(name) {
         if (name === "inbox") {
           await openInbox();
-          return;
-        }
-        if (name === "bulk") {
-          showBulkWorkspace();
           return;
         }
         const cfg = workflows[name];
@@ -504,16 +503,17 @@
         });
         document.body.classList.toggle("bulk-writing", active);
       }
-      function bulkMarkup(full = false) {
+      function bulkMarkup() {
         const job = state.bulk.job;
-        if (!job) return `<div class="bulk-empty"><h1>Bulk Inbox</h1><p>${state.inbox.unseen} unseen · ${state.inbox.ready} ready · ${state.inbox.attention} needs attention</p><button id="open-inbox" type="button">Open Inbox</button></div>`;
+        const title = '<div class="bulk-title"><h1>Bulk Inbox</h1><button id="close-bulk" type="button" aria-label="Close Bulk drawer">×</button></div>';
+        if (!job) return `${title}<div class="bulk-content bulk-empty"><p>${state.inbox.unseen} unseen · ${state.inbox.ready} ready · ${state.inbox.attention} needs attention</p><button id="open-inbox" type="button">Open Inbox</button></div>`;
         const progress = job.status === "running" ? `${job.liveProcessed} / ${job.total}`
           : job.processed !== null ? `${job.processed} processed`
           : ["failed", "interrupted"].includes(job.status) ? "" : "Finished";
         const counts = Object.entries(job.counts || {}).map(([name, value]) => `<li>${esc(name.replaceAll("_", " "))}: ${esc(value)}</li>`).join("");
         const activity = job.status === "running" && job.activity ? `<p><strong>${esc(job.stage ? job.stage[0].toUpperCase() + job.stage.slice(1) + ":" : "Current:")}</strong><br>${esc(job.activity)}${job.activityStatus ? ` · ${esc(job.activityStatus)}` : ""}</p>` : "";
         const inbox = state.inbox;
-        return `<div class="bulk-content"><div class="bulk-title"><h1>Bulk Inbox</h1>${full ? "" : '<button id="close-bulk" type="button" aria-label="Close Bulk drawer">×</button>'}</div><h2>${esc(job.title)}</h2><p><strong>${esc(job.status)}</strong>${progress ? ` · ${esc(progress)}` : ""}</p>${job.status === "running" ? '<progress aria-label="Bulk work in progress"></progress><button id="stop-bulk">Stop acquisition</button>' : ""}${activity}<dl><dt>Unseen</dt><dd>${inbox.unseen}</dd><dt>Ready</dt><dd>${inbox.ready}</dd><dt>Needs attention</dt><dd>${inbox.attention}</dd><dt>Applied</dt><dd>${inbox.applied}</dd></dl><button id="open-inbox" type="button">Open Inbox</button><p class="muted">${esc(job.message)}</p>${counts ? `<ul>${counts}</ul>` : ""}</div>`;
+        return `${title}<div class="bulk-content"><h2>${esc(job.title)}</h2><p><strong>${esc(job.status)}</strong>${progress ? ` · ${esc(progress)}` : ""}</p>${job.status === "running" ? '<progress aria-label="Bulk work in progress"></progress><button id="stop-bulk">Stop acquisition</button>' : ""}${activity}<dl><dt>Unseen</dt><dd>${inbox.unseen}</dd><dt>Ready</dt><dd>${inbox.ready}</dd><dt>Needs attention</dt><dd>${inbox.attention}</dd><dt>Applied</dt><dd>${inbox.applied}</dd></dl><button id="open-inbox" type="button">Open Inbox</button><p class="muted">${esc(job.message)}</p>${counts ? `<ul>${counts}</ul>` : ""}</div>`;
       }
       function renderBulkPresentations() {
         const job = state.bulk.job;
@@ -522,22 +522,13 @@
         strip.setAttribute("aria-expanded", state.bulk.drawerOpen);
         const drawer = document.querySelector("#bulk-drawer");
         drawer.hidden = !state.bulk.drawerOpen;
-        drawer.innerHTML = state.bulk.drawerOpen ? bulkMarkup(false) : "";
+        drawer.innerHTML = state.bulk.drawerOpen ? bulkMarkup() : "";
         const close = document.querySelector("#close-bulk");
         if (close) close.onclick = (event) => { event.stopPropagation(); state.bulk.drawerOpen = false; renderBulkPresentations(); };
         const open = document.querySelector("#open-inbox");
         if (open) open.onclick = () => openInbox();
         const stop = document.querySelector("#stop-bulk");
         if (stop) stop.onclick = () => App.request("bulk.stop", { request_id: job.requestId }, false, true);
-        if (state.workflow === "bulk") document.querySelector("#workspace").innerHTML = bulkMarkup(true);
-      }
-      function showBulkWorkspace() {
-        state.generation++;
-        state.selectionGeneration++;
-        state.workflow = "bulk";
-        document.querySelector("#context-pane").innerHTML = '<div class="context-nav"><button id="back-overview">⮪ Overview</button></div><div class="context-scroll"><h1>Bulk</h1><p class="muted">Application background work</p></div>';
-        document.querySelector("#back-overview").onclick = () => loadOverview();
-        renderBulkPresentations();
       }
       async function refreshInboxSummary() {
         const value = await App.request("inbox.list", {}, false, true);
@@ -1122,8 +1113,20 @@
         if (!e.target.closest(".menu")) closeMenus();
       };
       document.onkeydown = (e) => {
+        if (e.ctrlKey && (e.key === "+" || e.key === "=" || e.key === "-")) {
+          e.preventDefault();
+          adjustFontSize(e.key === "-" ? -1 : 1);
+          return;
+        }
         if (e.key === "Escape") closeMenus();
       };
+      const FONT_SIZE_STEP = 2;
+      function adjustFontSize(direction) {
+        const current = Number.parseFloat(getComputedStyle(document.body).fontSize);
+        document.body.style.fontSize = `${current + direction * FONT_SIZE_STEP}px`;
+      }
+      document.querySelector("#increase-font").onclick = () => adjustFontSize(1);
+      document.querySelector("#decrease-font").onclick = () => adjustFontSize(-1);
       const splitter = document.querySelector("#splitter"),
         pane = document.querySelector("#context-pane");
       function setWidth(w) {

@@ -507,13 +507,15 @@ if (identityless.liveProcessed !== 1 || identityless.activity !== 'Broken row') 
         self.assertIn("showStartupRescanFailure(error)", page)
         self.assertIn("Work queues and Search remain unavailable", page)
 
-    def test_bulk_drawer_and_workspace_share_navigation_safe_frozen_state(self):
+    def test_bulk_drawer_uses_navigation_safe_frozen_state(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
         self.assertIn('bulk: { job: null, drawerOpen: false }', page)
         self.assertIn('state.bulk.job = {', page)
         self.assertIn('scope,', page)
         self.assertIn('runBulk("bulk.workflow", { workflow, scope }', page)
-        self.assertIn('if (state.workflow === "bulk")', page)
+        self.assertNotIn('data-work="bulk"', page)
+        self.assertNotIn("showBulkWorkspace", page)
+        self.assertNotIn("bulkMarkup(true)", page)
         self.assertIn('state.bulk.drawerOpen = false', page)
         self.assertNotIn('state.bulk.job = null', page)
         self.assertNotIn('completed: identities.length', page)
@@ -772,9 +774,62 @@ const state = {{bulk: {{job: {{status: 'failed', processed: null, counts: {{}},
   inbox: {{unseen: 0, ready: 0, attention: 1, applied: 0}}}};
 function esc(value) {{ return String(value); }}
 {function}
-const markup = bulkMarkup(true);
+const markup = bulkMarkup();
 if (markup.includes('failed</strong> · Finished') || !markup.includes('failed</strong>'))
   process.exit(1);
+"""
+        subprocess.run(["node", "-e", script], check=True)
+
+    def test_font_size_controls_share_the_two_pixel_adjustment_path(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        css = (harvester_ui.PROJECT_DIR / "css" / "my.css").read_text(encoding="utf-8")
+        self.assertRegex(css, r'font:\s*\n\s*10px/1\.35 "Segoe UI"')
+        self.assertIn('<span>Increase font size</span><kbd>Ctrl +</kbd>', page)
+        self.assertIn('<span>Decrease font size</span><kbd>Ctrl -</kbd>', page)
+        self.assertIn("const FONT_SIZE_STEP = 2", page)
+        self.assertIn('adjustFontSize(e.key === "-" ? -1 : 1)', page)
+        self.assertIn('querySelector("#increase-font").onclick = () => adjustFontSize(1)', page)
+        self.assertIn('querySelector("#decrease-font").onclick = () => adjustFontSize(-1)', page)
+        self.assertIn("e.preventDefault();", page[page.index("document.onkeydown"):page.index("const splitter")])
+
+    def test_bulk_navigation_contract_has_inbox_without_workspace(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        work_menu = page[page.index('id="work-menu"'):page.index("</div>", page.index('id="work-menu"'))]
+        self.assertIn('data-work="inbox">Bulk Inbox', work_menu)
+        self.assertNotIn('data-work="bulk"', work_menu)
+        toc = page[page.index("function tocRows"):page.index("function renderOverview")]
+        self.assertIn('{ h: "Review" }', toc)
+        self.assertIn('{ n: "Bulk Inbox", w: "inbox", c: state.inbox.items.length }', toc)
+        self.assertNotIn("showBulkWorkspace", page)
+        self.assertNotIn("bulkMarkup(true)", page)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is unavailable for renderer regression")
+    def test_closing_running_bulk_drawer_preserves_job_and_does_not_stop(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        start = page.index("function bulkMarkup")
+        end = page.index("\n      async function refreshInboxSummary", start)
+        functions = page[start:end]
+        script = f"""
+let stopRequests = 0;
+const state = {{workflow: 'overview', bulk: {{drawerOpen: true, job: {{
+  status: 'running', processed: null, liveProcessed: 1, total: 3, counts: {{}},
+  title: 'Repair', message: 'Working', requestId: 'stable', activity: ''
+}}}}, inbox: {{items: [], unseen: 0, ready: 0, attention: 0, applied: 0}}}};
+const nodes = {{
+  '#job-strip': {{setAttribute() {{}}}},
+  '#bulk-drawer': {{hidden: false, innerHTML: ''}},
+  '#close-bulk': {{}}, '#open-inbox': {{}}, '#stop-bulk': {{}}
+}};
+const document = {{querySelector(selector) {{ return nodes[selector] || null; }}}};
+const App = {{request() {{ stopRequests++; }}}};
+function openInbox() {{}}
+function esc(value) {{ return String(value); }}
+{functions}
+renderBulkPresentations();
+if ((nodes['#bulk-drawer'].innerHTML.match(/id="close-bulk"/g) || []).length !== 1) process.exit(1);
+nodes['#close-bulk'].onclick({{stopPropagation() {{}}}});
+if (state.bulk.drawerOpen || state.bulk.job.status !== 'running' ||
+    state.bulk.job.requestId !== 'stable' || stopRequests) process.exit(2);
 """
         subprocess.run(["node", "-e", script], check=True)
 
