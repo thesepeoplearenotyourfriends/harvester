@@ -21,9 +21,10 @@ from ..events import emit
 WORKFLOW_KINDS = {
     "missing-actor-images": "actor", "refetch-actor-image": "actor", "failed-actors": "actor",
     "lost-found": "movie", "missing-posters": "movie",
-    "unresolved-movies": "movie", "failed-movies": "movie",
+    "unresolved-movies": "movie", "failed-movies": "movie", "refetch-movie-nfo": "movie",
     "unresolved-tv": "show", "ambiguous-tv": "show", "not-found-tv": "show",
-    "tv-errors": "show", "missing-tv-nfo": "show", "missing-tv-posters": "show",
+    "tv-errors": "show", "refetch-tv-nfo": "show", "missing-tv-nfo": "show",
+    "missing-tv-posters": "show",
 }
 WORKFLOWS = frozenset(WORKFLOW_KINDS)
 
@@ -119,6 +120,7 @@ def _combined(*results, message="Finished"):
     counts = Counter()
     processed = 0
     phase_results = {}
+    attempt_results = {}
     for prefix, result in results:
         processed += int(result.get("processed", 0))
         # Non-committing materializers can expose their normal/planned summary
@@ -133,8 +135,10 @@ def _combined(*results, message="Finished"):
             counts[name if name.startswith(prefix + "_") else f"{prefix}_{name}"] += value
         if result.get("planned_statuses"):
             phase_results[prefix] = result["planned_statuses"]
+        if isinstance(result.get("attempt_results"), dict):
+            attempt_results.update(result["attempt_results"])
     return {"processed": processed, "counts": dict(counts), "message": message,
-            "phase_results": phase_results}
+            "phase_results": phase_results, "attempt_results": attempt_results}
 
 
 def _item_result(identities, *results, message="Finished"):
@@ -158,8 +162,10 @@ def _finish(config, workflow, kind, identities, recorder, result, attention=0):
         logical_identity=result.pop("_logical_identity", None), kind=kind,
         requested_artifacts={"missing-actor-images": ["actor_image"],
                              "refetch-actor-image": ["actor_image"],
-                             "lost-found": ["nfo"], "missing-posters": ["poster"],
+                             "lost-found": ["nfo"], "refetch-movie-nfo": ["nfo"],
+                             "missing-posters": ["poster"],
                              "missing-tv-nfo": ["nfo"],
+                             "refetch-tv-nfo": ["nfo"],
                              "missing-tv-posters": ["poster"]}.get(
                                  workflow, ["identity"]),
     )
@@ -197,7 +203,9 @@ def _scoped_artifact_outcome(workflow, result):
         "refetch-actor-image": ("image", ("failed", "unresolved_source")),
         "missing-posters": ("poster", ("error", "no_url", "unresolved_target")),
         "lost-found": ("nfo", ("error", "unresolved_target", "unusable")),
+        "refetch-movie-nfo": ("nfo", ("error", "unresolved_target", "unusable")),
         "missing-tv-nfo": ("nfo", ("error",)),
+        "refetch-tv-nfo": ("nfo", ("error",)),
         "missing-tv-posters": ("poster", ("error", "no_url")),
     }.get(workflow)
     # Identity-repair recipes may opportunistically add a missing NFO after a
@@ -275,7 +283,7 @@ def run(config, workflow, kind, identities, reporter=None):
         return _finish(config, workflow, kind, identities, recorder, _item_result(
             identities, ("identity", scan(config, provider, reporter, refresh=True,
                                             retry_failed=True, targets=identities))))
-    if workflow in {"lost-found", "unresolved-movies", "failed-movies"}:
+    if workflow in {"lost-found", "unresolved-movies", "failed-movies", "refetch-movie-nfo"}:
         from .movie_scan import run as scan
         from ..providers.tmdb import TMDBClient
         from ..transport import transport_from_config
@@ -285,11 +293,25 @@ def run(config, workflow, kind, identities, reporter=None):
                               config.state_path("tmdb_api_cache.json"), transport)
         scanned = scan(config, provider, reporter, refresh=True, targets=targets)
         records = [get_record(config, "movie", value) for value in identities]
+        if workflow == "refetch-movie-nfo":
+            attempts = scanned.get("attempt_results", {})
+            failed_attempt = next((attempts.get(target) for target in targets
+                                   if not attempts.get(target, {}).get("ok")), None)
+            if failed_attempt is not None or any(target not in attempts for target in targets):
+                reason = ((failed_attempt or {}).get("reason") or
+                          "Explicit refetch produced no fresh provider result")
+                return _finish(
+                    config, workflow, kind, identities, recorder,
+                    _item_result(identities, ("identity", scanned),
+                                 message=f"Provider refetch failed: {reason}"),
+                    attention=1)
         unusable = [record for record in records
                     if Path(record.get("nfo_path") or record.get("local_target", "")).is_file() and
                     not first_indexable_nfo(Path(
                         record.get("nfo_path") or record.get("local_target", "")).parent)[0]]
-        should_prepare_nfo = workflow == "lost-found" or any(
+        # Explicit refetch is replacement intent. It must never inherit the
+        # receipt-preserving skip semantics of unattended identity repair.
+        should_prepare_nfo = workflow in {"lost-found", "refetch-movie-nfo"} or any(
             record.get("status") == "ok" and
             not first_indexable_nfo(Path(
                 record.get("nfo_path") or record.get("local_target", "")).parent)[0]
@@ -301,8 +323,9 @@ def run(config, workflow, kind, identities, reporter=None):
         written = materialize(config, reporter, overwrite_nfo=False, overwrite_poster=False,
                               targets=targets, transport=transport, write_nfo=True,
                               write_poster=False, committer=recorder,
-                              replace_nfo_targets={record["local_target"]
-                                                   for record in unusable})
+                              replace_nfo_targets=(set(targets) if workflow == "refetch-movie-nfo"
+                                                   else {record["local_target"]
+                                                         for record in unusable}))
         return _finish(config, workflow, kind, identities, recorder,
                        _item_result(identities, ("identity", scanned), ("nfo", written)))
     if workflow == "missing-posters":
@@ -334,7 +357,7 @@ def run(config, workflow, kind, identities, reporter=None):
                           config.state_path("tvdb_api_cache.json"), transport)
     records = [get_record(config, "show", value) for value in identities]
     needs_resolution = [record for record in records if (
-        workflow == "tv-errors" or record.get("status") != "matched")]
+        workflow in {"tv-errors", "refetch-tv-nfo"} or record.get("status") != "matched")]
     scanned = {"processed": 0, "counts": {}}
     if needs_resolution:
         scanned = scan(
@@ -343,7 +366,20 @@ def run(config, workflow, kind, identities, reporter=None):
         )
     records = [get_record(config, "show", value) for value in identities]
     targets = [record["local_target"] for record in records if record.get("status") == "matched"]
-    write_nfo = workflow == "missing-tv-nfo" or (
+    if workflow == "refetch-tv-nfo":
+        attempts = scanned.get("attempt_results", {})
+        failed_attempt = next((attempts.get(target) for target in _show_targets(config, identities)
+                               if not attempts.get(target, {}).get("ok")), None)
+        if failed_attempt is not None or any(
+                target not in attempts for target in _show_targets(config, identities)):
+            reason = ((failed_attempt or {}).get("reason") or
+                      "Explicit refetch produced no fresh provider result")
+            return _finish(
+                config, workflow, kind, identities, recorder,
+                _item_result(identities, ("identity", scanned),
+                             message=f"Provider refetch failed: {reason}"),
+                attention=1)
+    write_nfo = workflow in {"missing-tv-nfo", "refetch-tv-nfo"} or (
         workflow in {"unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors"} and
         any(not (Path(record["local_target"]) / "show.nfo").is_file() for record in records
             if record.get("status") == "matched"))
@@ -353,7 +389,7 @@ def run(config, workflow, kind, identities, reporter=None):
         from .tv_materialize import run as materialize
         prepared = materialize(config, reporter, targets=targets, transport=transport,
                                write_nfo=write_nfo, write_poster=write_poster,
-                               write_actors=False, overwrite_nfo=False,
+                               write_actors=False, overwrite_nfo=workflow == "refetch-tv-nfo",
                                overwrite_poster=False, committer=recorder)
         results.append(("nfo" if write_nfo else "poster", prepared))
     return _finish(config, workflow, kind, identities, recorder,
@@ -409,6 +445,7 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
             manifest["local_target"] = item.get("local_target") or manifest.get("local_target")
             manifest["summary"] = {"stage_diagnostics": result.get("counts", {}),
                                    "artifact_results": result.get("phase_results", {}),
+                                   "provider_attempts": result.get("attempt_results", {}),
                                    "message": result.get("message")}
             records = []
             for identity in identities:
@@ -436,10 +473,12 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
             record_attention, record_reason = _scoped_record_outcome(
                 kind, identities, records)
             artifact_attention, artifact_reason = _scoped_artifact_outcome(workflow, result)
-            if artifact_attention and manifest["state"] == "ready":
+            if artifact_attention and (manifest["state"] == "ready" or
+                                       manifest.get("reason") == "No filesystem operation was prepared"):
                 manifest["state"] = "needs_attention"
                 manifest["reason"] = artifact_reason
-            elif record_attention and manifest["state"] == "ready":
+            elif record_attention and (manifest["state"] == "ready" or
+                                       manifest.get("reason") == "No filesystem operation was prepared"):
                 manifest["state"] = "needs_attention"
                 manifest["reason"] = record_reason
             # Persist presentation semantics with the work receipt. The renderer

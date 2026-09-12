@@ -180,8 +180,8 @@ def _item_refetch(data):
     identity = record.get("name") if data["kind"] == "actor" else (
         record.get("nfo_path") or record.get("local_target") if data["kind"] == "movie"
         else record.get("local_target"))
-    workflow = {"actor": "refetch-actor-image", "movie": "unresolved-movies",
-                "show": "tv-errors"}[data["kind"]]
+    workflow = {"actor": "refetch-actor-image", "movie": "refetch-movie-nfo",
+                "show": "refetch-tv-nfo"}[data["kind"]]
     row = {"identifier": identity, "display_name": data["identifier"],
            "local_target": record.get("local_target"), "kind": data["kind"]}
     generation = hashlib.sha256(json.dumps(

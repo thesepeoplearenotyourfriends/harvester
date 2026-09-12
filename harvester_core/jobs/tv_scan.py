@@ -681,6 +681,7 @@ def run(
     matched = ambiguous = not_found = errors = 0
     api_cache_hits = api_cache_misses = 0
     changed_since_save = 0
+    attempt_results = {}
     sleep = sleep or time.sleep
     selected = set(targets or [])
     try:
@@ -730,6 +731,7 @@ def run(
                 sleep_after_show = False
                 if old_status == "matched" and record.get("nfo"):
                     record["last_error"] = "refresh left unresolved: " + resolved["status"]
+                    record["candidates"] = resolved.get("candidates") or []
                 else:
                     record.update({
                         "status": resolved["status"],
@@ -740,6 +742,11 @@ def run(
                         ambiguous += 1
                     else:
                         not_found += 1
+                attempt_results[str(show_dir)] = {
+                    "ok": False, "status": resolved["status"],
+                    "reason": "refresh left unresolved: " + resolved["status"],
+                    "candidates": resolved.get("candidates") or [],
+                }
             else:
                 tvdb_id = resolved["tvdb_id"]
                 details, detail_cache_hit = provider.get(
@@ -764,6 +771,10 @@ def run(
                     "nfo": nfo, "assets": assets, "last_error": None,
                 })
                 matched += 1
+                attempt_results[str(show_dir)] = {
+                    "ok": True, "status": "matched", "tvdb_id": tvdb_id,
+                    "method": record["match"]["method"],
+                }
         except KeyboardInterrupt:
             raise
         except Exception as error:
@@ -774,6 +785,9 @@ def run(
                 record["status"] = "error"
                 record["last_error"] = repr(error)
                 errors += 1
+            attempt_results[str(show_dir)] = {
+                "ok": False, "status": "error", "reason": repr(error),
+            }
         processed += 1
         changed_since_save += 1
         manifest["_meta"]["updated"] = now_iso()
@@ -795,4 +809,8 @@ def run(
             "api_cache_misses": api_cache_misses,
         }
         json_save_atomic(work_path, manifest)
-    return {"processed": processed, "shows": len(manifest["shows"]), "status_counts": manifest_status_counts(manifest)}
+    return {"processed": processed, "shows": len(manifest["shows"]),
+            "status_counts": manifest_status_counts(manifest),
+            # Explicit replacements consume this invocation receipt rather
+            # than a retained matched status from an older successful run.
+            "attempt_results": attempt_results}

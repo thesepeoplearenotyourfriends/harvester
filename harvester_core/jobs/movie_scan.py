@@ -176,6 +176,7 @@ def run(config, provider, reporter=None, limit=None, rebuild=False, refresh=Fals
             existing[field] = record[field]
     selected = set(targets or [])
     processed = 0
+    attempt_results = {}
     try:
         config_data = provider.get("/configuration", {})
         images = config_data.get("images") or {}
@@ -215,7 +216,12 @@ def run(config, provider, reporter=None, limit=None, rebuild=False, refresh=Fals
                         record["status"] = "ok"
                     else:
                         record["status"] = "unresolved"
-                        record["last_error"] = identity.get("reason")
+                    record["last_error"] = identity.get("reason")
+                    attempt_results[key] = {
+                        "ok": False, "status": "unresolved",
+                        "reason": identity.get("reason"),
+                        "candidates": identity.get("top") or [],
+                    }
                 else:
                     movie_id = identity["movie_id"]
                     details = provider.get(f"/movie/{movie_id}", {})
@@ -224,9 +230,16 @@ def run(config, provider, reporter=None, limit=None, rebuild=False, refresh=Fals
                                    "nfo": build_nfo(details, credits), "last_error": None})
                     poster_path = details.get("poster_path")
                     record["poster_url"] = base.rstrip("/") + "/" + size + poster_path if poster_path else None
+                    attempt_results[key] = {
+                        "ok": True, "status": "ok", "movie_id": movie_id,
+                        "method": identity.get("method"),
+                    }
             except Exception as error:
                 record["status"] = "error"
                 record["last_error"] = f"{type(error).__name__}: {error}"
+                attempt_results[key] = {
+                    "ok": False, "status": "error", "reason": record["last_error"],
+                }
             processed += 1
             save_json_atomic(path, manifest)
             emit(reporter, "progress", key, status=record["status"], target_kind="movie", id=key)
@@ -235,4 +248,9 @@ def run(config, provider, reporter=None, limit=None, rebuild=False, refresh=Fals
         raise
     manifest["_meta"]["updated"] = now_iso()
     save_json_atomic(path, manifest)
-    return {"processed": processed, "movies": len(manifest["movies"]), "status_counts": dict(Counter(x.get("status") for x in manifest["movies"].values()))}
+    return {"processed": processed, "movies": len(manifest["movies"]),
+            "status_counts": dict(Counter(x.get("status") for x in manifest["movies"].values())),
+            # This invocation-scoped receipt is the authority for an explicit
+            # replacement. Durable status may intentionally preserve older
+            # successful work after a transient or ambiguous retry.
+            "attempt_results": attempt_results}
