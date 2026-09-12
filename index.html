@@ -568,8 +568,7 @@
           ? `<label><span>Name</span><input id="query-name" value="${esc(query.name || "")}" maxlength="300"></label>`
           : `<label><span>Title</span><input id="query-title" value="${esc(query.title || "")}" maxlength="300"></label><label><span>Year</span><input id="query-year" value="${esc(query.year || "")}" inputmode="numeric" maxlength="4"></label>`;
         const candidates = ["movie", "show"].includes(kind) ? (item.summary?.provider_results?.[0]?.candidates || []) : [];
-        const rememberedIndex = state.inbox.candidateIndexes[item.item_id] || 0;
-        const candidateIndex = Math.min(rememberedIndex, Math.max(0, candidates.length - 1));
+        const candidateIndex = rememberCandidateIndex(item.item_id, candidates.length);
         const candidateCards = candidates.length > 1
           ? candidateReview(item, kind, query, candidates, candidateIndex)
           : candidates.length === 1 ? `<section class="candidate-results"><h2>Candidate results</h2>${candidateDetails(kind, candidates[0], 0, 1)}</section>` : "";
@@ -589,6 +588,14 @@
         bindCandidateReview(item, kind, query, candidates);
         bindInboxImage(item);
         await refreshInboxSummary();
+      }
+      function rememberCandidateIndex(itemId, candidateCount) {
+        const remembered = state.inbox.candidateIndexes[itemId] || 0;
+        const candidateIndex = Math.max(0, Math.min(remembered, candidateCount - 1));
+        // A Retry can replace the frozen set while retaining the stable Inbox
+        // identity. Store the bounded value before navigation handlers use it.
+        state.inbox.candidateIndexes[itemId] = candidateIndex;
+        return candidateIndex;
       }
       function candidateDetails(kind, candidate, candidateIndex, total) {
         const title = candidate.title || candidate.name || "Untitled";

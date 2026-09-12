@@ -572,6 +572,38 @@ if (providerRequests || state.inbox.candidateIndexes.stable !== 1 ||
         self.assertIn('candidates.length > 1', page)
         self.assertIn('candidates.length === 1', page)
 
+    def test_candidate_review_clamps_remembered_position_after_results_shrink(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        start = page.index("function rememberCandidateIndex")
+        end = page.index("\n      async function selectCandidate", start)
+        functions = page[start:end]
+        script = f"""
+function esc(value) {{ return String(value); }}
+const state = {{inbox: {{candidateIndexes: {{stable: 7}}}}}};
+const nodes = {{}};
+const document = {{querySelector(selector) {{ return nodes[selector] || null; }}}};
+{functions}
+const item = {{item_id: 'stable', display_title: 'Shrunken'}};
+const query = {{title: 'Shrunken'}};
+const candidates = [{{tvdb_id: 1, name: 'First'}}, {{tvdb_id: 2, name: 'Last'}}];
+const index = rememberCandidateIndex(item.item_id, candidates.length);
+let html = candidateReview(item, 'show', query, candidates, index);
+if (index !== 1 || state.inbox.candidateIndexes.stable !== 1 ||
+    !html.includes('2 / 2') || !html.match(/id=\"candidate-next\"[^>]*disabled/) ||
+    html.match(/id=\"candidate-previous\"[^>]*disabled/)) process.exit(1);
+const review = {{set outerHTML(value) {{ html = value; }}}};
+const previous = {{}}, next = {{}}, use = {{dataset: {{candidateIndex: '1'}}}};
+nodes['#candidate-review'] = review; nodes['#candidate-previous'] = previous;
+nodes['#candidate-next'] = next; nodes['[data-candidate-index]'] = use;
+function selectCandidate() {{}}
+bindCandidateReview(item, 'show', query, candidates);
+previous.onclick();
+if (state.inbox.candidateIndexes.stable !== 0 || !html.includes('1 / 2') ||
+    !html.match(/id=\"candidate-previous\"[^>]*disabled/) ||
+    html.match(/id=\"candidate-next\"[^>]*disabled/)) process.exit(2);
+"""
+        subprocess.run(["node", "-e", script], check=True)
+
     def test_candidate_click_supplies_frozen_row_and_issues_semantic_request(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
         start = page.index("async function selectCandidate")
