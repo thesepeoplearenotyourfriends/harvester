@@ -120,6 +120,7 @@ def _combined(*results, message="Finished"):
     counts = Counter()
     processed = 0
     phase_results = {}
+    attempt_results = {}
     for prefix, result in results:
         processed += int(result.get("processed", 0))
         # Non-committing materializers can expose their normal/planned summary
@@ -134,8 +135,10 @@ def _combined(*results, message="Finished"):
             counts[name if name.startswith(prefix + "_") else f"{prefix}_{name}"] += value
         if result.get("planned_statuses"):
             phase_results[prefix] = result["planned_statuses"]
+        if isinstance(result.get("attempt_results"), dict):
+            attempt_results.update(result["attempt_results"])
     return {"processed": processed, "counts": dict(counts), "message": message,
-            "phase_results": phase_results}
+            "phase_results": phase_results, "attempt_results": attempt_results}
 
 
 def _item_result(identities, *results, message="Finished"):
@@ -290,6 +293,18 @@ def run(config, workflow, kind, identities, reporter=None):
                               config.state_path("tmdb_api_cache.json"), transport)
         scanned = scan(config, provider, reporter, refresh=True, targets=targets)
         records = [get_record(config, "movie", value) for value in identities]
+        if workflow == "refetch-movie-nfo":
+            attempts = scanned.get("attempt_results", {})
+            failed_attempt = next((attempts.get(target) for target in targets
+                                   if not attempts.get(target, {}).get("ok")), None)
+            if failed_attempt is not None or any(target not in attempts for target in targets):
+                reason = ((failed_attempt or {}).get("reason") or
+                          "Explicit refetch produced no fresh provider result")
+                return _finish(
+                    config, workflow, kind, identities, recorder,
+                    _item_result(identities, ("identity", scanned),
+                                 message=f"Provider refetch failed: {reason}"),
+                    attention=1)
         unusable = [record for record in records
                     if Path(record.get("nfo_path") or record.get("local_target", "")).is_file() and
                     not first_indexable_nfo(Path(
@@ -417,6 +432,7 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
             manifest["local_target"] = item.get("local_target") or manifest.get("local_target")
             manifest["summary"] = {"stage_diagnostics": result.get("counts", {}),
                                    "artifact_results": result.get("phase_results", {}),
+                                   "provider_attempts": result.get("attempt_results", {}),
                                    "message": result.get("message")}
             records = []
             for identity in identities:

@@ -1170,7 +1170,8 @@ class BulkRecipeTests(unittest.TestCase):
                 state = json.loads(config.state_path("movie_manifest_tmdb.json").read_text())
                 state["movies"][str(movie_nfo)]["nfo"] = {"title": "Movie"}
                 save_json_atomic(config.state_path("movie_manifest_tmdb.json"), state)
-                return {"processed": 1, "counts": {"ok": 1}}
+                return {"processed": 1, "counts": {"ok": 1},
+                        "attempt_results": {str(movie_nfo): {"ok": True}}}
 
             def show_scan(*_args, **_kwargs):
                 state = json.loads(config.state_path("tv_show_urls_tvdb.json").read_text())
@@ -1261,6 +1262,8 @@ class BulkRecipeTests(unittest.TestCase):
             self.assertEqual(inbox[0]["state"], "ready")
             self.assertEqual(len(inbox[0]["actions"]), 1)
             staged = get_inbox_item(config, inbox[0]["item_id"])
+            self.assertEqual(staged["summary"]["provider_attempts"][str(nfo)]["movie_id"],
+                             13475)
             blob = root / ".cache" / "bulk" / "inbox" / staged["item_id"] / \
                 staged["actions"][0]["blob"]
             self.assertIn(b"<year>2009</year>", blob.read_bytes())
@@ -1281,6 +1284,81 @@ class BulkRecipeTests(unittest.TestCase):
             self.assertEqual(visible["nfo"]["fields"]["year"], "2009")
             self.assertEqual(visible["nfo"]["fields"]["unique_ids"],
                              {"tmdb": "13475", "imdb": "tt0796366"})
+
+    def test_failed_or_ambiguous_retry_cannot_stage_an_older_tmdb_payload(self):
+        from harvester_core.artifacts import RecordingCommitter, get_inbox_item, persist_preparation
+
+        class RetryProvider:
+            def __init__(self, results):
+                self.results = results
+
+            def get(self, path, params=None):
+                if path == "/configuration":
+                    return {"images": {}}
+                if path == "/search/movie":
+                    return {"results": self.results}
+                raise AssertionError(f"stale provider payload was materialized via {path}")
+
+        cases = {
+            "failed": [],
+            "ambiguous": [
+                {"id": 2, "title": "Wrong Part Two", "original_title": "Wrong Part Two",
+                 "release_date": "2010-01-01", "popularity": 1},
+                {"id": 3, "title": "A Different Wrong", "original_title": "A Different Wrong",
+                 "release_date": "2011-01-01", "popularity": 1},
+            ],
+        }
+        for label, results in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+                movies.mkdir(); tv.mkdir(); folder = movies / "Star Trek (2009)"; folder.mkdir()
+                nfo = folder / "Star Trek.nfo"; old_bytes = b"<movie><title>Old</title></movie>"
+                nfo.write_bytes(old_bytes)
+                old_payload = {"title": "Star Trek", "year": 2009,
+                               "genre": ["Science Fiction"],
+                               "ids": {"tmdb": 13475, "imdb": "tt0796366"}}
+                config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                      "tv_root": tv}, environ={}, app_dir=root)
+                save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"_meta": {}, "movies": {
+                    str(nfo): {"status": "ok", "local_target": str(nfo),
+                               "nfo_path": str(nfo), "title": "Star Trek", "year": 2009,
+                               "tmdb_id": 13475, "nfo": old_payload, "candidates": []}}})
+                plan = persist_preparation(
+                    config, "refetch-movie-nfo", [str(nfo)], RecordingCommitter(),
+                    state="needs_attention", kind="movie", local_target=str(nfo),
+                    requested_artifacts=["nfo"], reason="Retry provider search")
+                item = get_inbox_item(config, plan["plan_id"])
+                cache = root / ".cache" / "ui"
+                with mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                        mock.patch.object(harvester_ui, "CACHE_DIR", cache), \
+                        mock.patch("harvester_core.config.load_config", return_value=config):
+                    argv = harvester_ui.action_argv(
+                        "inbox.retry", {"item_id": item["item_id"],
+                                        "query": {"title": "Wrong", "year": "2009"}})
+                scope = Path(argv[argv.index("--scope-file") + 1])
+                generation = argv[argv.index("--generation") + 1]
+                items = bulk.load_scope_items(config, argv[4], scope, generation, 1)
+                with mock.patch("harvester_core.providers.tmdb.TMDBClient",
+                                return_value=RetryProvider(results)), \
+                        mock.patch("harvester_core.transport.transport_from_config",
+                                   return_value=object()):
+                    bulk.run_scoped(config, argv[4], items, 1)
+
+                retried = get_inbox_item(config, item["item_id"])
+                self.assertEqual(retried["state"], "needs_attention")
+                self.assertEqual(retried["actions"], [])
+                self.assertIn("Provider refetch failed", retried["reason"])
+                attempt = retried["summary"]["provider_attempts"][str(nfo)]
+                self.assertFalse(attempt["ok"])
+                self.assertIn(attempt["status"], {"unresolved", "error"})
+                self.assertEqual(nfo.read_bytes(), old_bytes)
+                durable = json.loads(config.state_path("movie_manifest_tmdb.json").read_text())
+                record = durable["movies"][str(nfo)]
+                self.assertEqual(record["status"], "ok")
+                self.assertEqual(record["nfo"], old_payload)
+                if label == "ambiguous":
+                    self.assertTrue(record["candidates"])
+                harvester_ui._retrying_items.discard(item["item_id"])
 
     def test_explicit_actor_refetch_stages_replacement_with_existing_precondition(self):
         from harvester_core.artifacts import list_inbox
