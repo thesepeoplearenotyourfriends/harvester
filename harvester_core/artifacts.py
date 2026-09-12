@@ -131,6 +131,11 @@ def persist_preparation(config, workflow, identities, committer, *, state="ready
             item.update({"blob": f"blobs/{digest}", "size": len(data),
                          "sha256": digest})
         manifest_actions.append(item)
+    if state == "ready" and not manifest_actions:
+        # A reviewable proposal is the preparation postcondition. Provider
+        # success or a processed counter cannot substitute for an operation.
+        state = "needs_attention"
+        reason = reason or "No filesystem operation was prepared"
     if kind is None:
         kind = _recover_manifest_kind(config, {"identities": list(identities),
                                                 "local_target": local_target,
@@ -314,6 +319,8 @@ def apply_inbox_item(config, item_id, *, provenance_records=None):
     manifest = get_inbox_item(config, item_id, provenance_records=provenance_records)
     if manifest["state"] != "ready":
         raise ValueError("Bulk Inbox item is not ready to apply")
+    if not manifest.get("actions"):
+        raise ValueError("Bulk Inbox item has no filesystem actions to apply")
     root = _prepared_root(config) / "inbox" / item_id
     prepared = []
     for action in manifest["actions"]:
@@ -361,6 +368,24 @@ def apply_inbox_item(config, item_id, *, provenance_records=None):
     committer = FilesystemCommitter()
     for action, data in prepared:
         getattr(committer, action["action"])(action["path"], *( [data] if data is not None else []))
+    # Apply means the frozen postconditions are observable on disk. Keep the
+    # Inbox receipt if a committer/filesystem ever returns without satisfying
+    # them, so a UI cannot turn a false success into lost repair intent.
+    for action in manifest["actions"]:
+        observed = _precondition(action["path"])
+        if action["action"] == "write":
+            satisfied = (observed.get("exists") is True and observed.get("kind") == "file"
+                         and observed.get("size") == action.get("size")
+                         and observed.get("sha256") == action.get("sha256"))
+        elif action["action"] == "mkdir":
+            satisfied = observed == {"exists": True, "kind": "directory"}
+        else:
+            satisfied = observed == {"exists": False}
+        if not satisfied:
+            manifest.update({"state": "needs_attention",
+                             "reason": f"Apply did not satisfy the prepared {action['action']} postcondition for {action['path']}"})
+            save_json_atomic(root / "manifest.json", manifest)
+            raise OSError(manifest["reason"])
     shutil.rmtree(root)
     return {"item_id": item_id, "applied": 1}
 

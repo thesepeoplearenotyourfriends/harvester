@@ -122,6 +122,36 @@ class ArtifactCommitSeamTests(unittest.TestCase):
                          b"prepared nfo")
         self.assertFalse(destination.exists())
 
+    def test_zero_action_preparation_cannot_be_ready_or_applied(self):
+        plan = persist_preparation(
+            self.config, "lost-found", ["movie"], RecordingCommitter(), kind="movie",
+            local_target=str(self.movies / "Movie" / "movie.nfo"))
+        root = self.root / ".cache" / "bulk" / "inbox" / plan["plan_id"]
+        manifest = json.loads((root / "manifest.json").read_text())
+        self.assertEqual(manifest["state"], "needs_attention")
+        self.assertEqual(manifest["reason"], "No filesystem operation was prepared")
+
+        # Also reject a legacy/tampered manifest which predates preparation's
+        # ready-state invariant, and retain it for diagnosis.
+        manifest["state"] = "ready"
+        save_json_atomic(root / "manifest.json", manifest)
+        with self.assertRaisesRegex(ValueError, "no filesystem actions"):
+            apply_inbox_item(self.config, plan["plan_id"])
+        self.assertTrue(root.is_dir())
+
+    def test_apply_retains_item_when_disk_postcondition_is_not_satisfied(self):
+        target = self.movies / "Movie" / "movie.nfo"
+        recorder = RecordingCommitter()
+        recorder.write(target, b"replacement")
+        plan = persist_preparation(self.config, "lost-found", ["movie"], recorder,
+                                   kind="movie")
+        with mock.patch("harvester_core.artifacts.FilesystemCommitter.write"):
+            with self.assertRaisesRegex(OSError, "did not satisfy"):
+                apply_inbox_item(self.config, plan["plan_id"])
+        item = get_inbox_item(self.config, plan["plan_id"])
+        self.assertEqual(item["state"], "needs_attention")
+        self.assertFalse(target.exists())
+
     def test_inbox_survives_reload_and_opening_marks_seen_without_deciding(self):
         recorder = RecordingCommitter()
         recorder.write(self.movies / "Movie" / "movie.nfo", b"offline")

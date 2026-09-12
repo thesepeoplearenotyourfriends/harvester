@@ -1164,8 +1164,8 @@ class BulkRecipeTests(unittest.TestCase):
                             {"kind": "show", "identifier": str(show), "path": "/tmp/x"}):
                     with self.assertRaises(harvester_ui.BridgeError):
                         harvester_ui.action_argv("item.refetch", bad)
-            self.assertEqual(movie_argv[4], "unresolved-movies")
-            self.assertEqual(show_argv[4], "tv-errors")
+            self.assertEqual(movie_argv[4], "refetch-movie-nfo")
+            self.assertEqual(show_argv[4], "refetch-tv-nfo")
             def movie_scan(*_args, **_kwargs):
                 state = json.loads(config.state_path("movie_manifest_tmdb.json").read_text())
                 state["movies"][str(movie_nfo)]["nfo"] = {"title": "Movie"}
@@ -1191,9 +1191,9 @@ class BulkRecipeTests(unittest.TestCase):
                            mock.patch("harvester_core.transport.transport_from_config",
                                       return_value=object()),
                            mock.patch("harvester_core.jobs.movie_scan.run",
-                                      side_effect=scanner if workflow == "unresolved-movies" else None),
+                                      side_effect=scanner if workflow == "refetch-movie-nfo" else None),
                            mock.patch("harvester_core.jobs.tv_scan.run",
-                                      side_effect=scanner if workflow == "tv-errors" else None))
+                                      side_effect=scanner if workflow == "refetch-tv-nfo" else None))
                 with patches[0], patches[1], patches[2], patches[3], patches[4]:
                     bulk.run_scoped(config, workflow, items, 1)
             from harvester_core.artifacts import list_inbox
@@ -1204,6 +1204,83 @@ class BulkRecipeTests(unittest.TestCase):
             self.assertEqual((movie / "poster.jpg").read_bytes(), b"existing movie poster")
             self.assertEqual((show / "show.nfo").read_bytes(), b"existing show nfo")
             self.assertEqual((show / "poster.jpg").read_bytes(), b"existing show poster")
+
+    def test_explicit_movie_refetch_changes_disk_and_survives_rescan(self):
+        """Exercise the user-visible repair contract, not intermediate counters."""
+        from harvester_core.api import inspect_item, list_records
+        from harvester_core.artifacts import apply_inbox_item, get_inbox_item, list_inbox
+        from harvester_core.rescan import rescan
+
+        class StarTrekProvider:
+            def get(self, path, params=None):
+                if path == "/configuration":
+                    return {"images": {}}
+                if path == "/search/movie":
+                    return {"results": [{"id": 13475, "title": "Star Trek",
+                                          "original_title": "Star Trek",
+                                          "release_date": "2009-05-08",
+                                          "popularity": 10}]}
+                if path == "/movie/13475":
+                    return {"id": 13475, "imdb_id": "tt0796366", "title": "Star Trek",
+                            "original_title": "Star Trek", "release_date": "2009-05-08",
+                            "overview": "The future begins.",
+                            "genres": [{"name": "Science Fiction"},
+                                       {"name": "Action"}]}
+                if path == "/movie/13475/credits":
+                    return {"crew": [], "cast": []}
+                raise AssertionError((path, params))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); folder = movies / "Star Trek (2009)"; folder.mkdir()
+            nfo = folder / "Star Trek.nfo"
+            old = b"<movie><title>Star Trek</title></movie>"
+            nfo.write_bytes(old)
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            rescan(config)
+            cache = root / ".cache" / "ui"
+            with mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                    mock.patch.object(harvester_ui, "CACHE_DIR", cache), \
+                    mock.patch("harvester_core.config.load_config", return_value=config):
+                argv = harvester_ui.action_argv(
+                    "item.refetch", {"kind": "movie", "identifier": str(nfo)})
+            workflow = argv[4]
+            scope = Path(argv[argv.index("--scope-file") + 1])
+            generation = argv[argv.index("--generation") + 1]
+            items = bulk.load_scope_items(config, workflow, scope, generation, 1)
+            with mock.patch("harvester_core.providers.tmdb.TMDBClient",
+                            return_value=StarTrekProvider()), \
+                    mock.patch("harvester_core.transport.transport_from_config",
+                               return_value=object()):
+                bulk.run_scoped(config, workflow, items, 1)
+
+            self.assertEqual(nfo.read_bytes(), old)
+            inbox = list_inbox(config)
+            self.assertEqual(len(inbox), 1)
+            self.assertEqual(inbox[0]["state"], "ready")
+            self.assertEqual(len(inbox[0]["actions"]), 1)
+            staged = get_inbox_item(config, inbox[0]["item_id"])
+            blob = root / ".cache" / "bulk" / "inbox" / staged["item_id"] / \
+                staged["actions"][0]["blob"]
+            self.assertIn(b"<year>2009</year>", blob.read_bytes())
+
+            apply_inbox_item(config, staged["item_id"])
+            repaired = nfo.read_bytes()
+            self.assertNotEqual(repaired, old)
+            for expected in (b"<year>2009</year>", b"<genre>Science Fiction</genre>",
+                             b"<genre>Action</genre>", b'type="tmdb">13475',
+                             b'type="imdb">tt0796366'):
+                self.assertIn(expected, repaired)
+            self.assertEqual(list_inbox(config), [])
+
+            rescan(config)
+            movie_rows = list_records(config, "movie")
+            self.assertEqual(movie_rows[0]["year"], 2009)
+            visible = inspect_item(config, "movie", str(nfo))
+            self.assertEqual(visible["nfo"]["fields"]["year"], "2009")
+            self.assertEqual(visible["nfo"]["fields"]["unique_ids"],
+                             {"tmdb": "13475", "imdb": "tt0796366"})
 
     def test_explicit_actor_refetch_stages_replacement_with_existing_precondition(self):
         from harvester_core.artifacts import list_inbox
