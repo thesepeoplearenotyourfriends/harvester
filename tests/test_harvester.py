@@ -301,6 +301,24 @@ class HarvesterTests(unittest.TestCase):
         self.assertEqual(result["movie_id"], 7)
         self.assertEqual(result["method"], "title_year_search")
 
+    def test_ambiguous_movie_candidates_freeze_search_overview(self):
+        provider = FakeProvider({
+            "/search/movie": {"results": [
+                {"id": 7, "title": "Possible One", "original_title": "Original One",
+                 "release_date": "2004-01-01", "overview": "Already in search."},
+                {"id": 8, "title": "Possible Two", "release_date": "2005-01-01",
+                 "overview": "Another synopsis."},
+            ]}
+        })
+        result = resolve_movie_tmdb_id(
+            provider, {"title": "Something Else", "original_title": None, "year": None}
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "ambiguous_movie_search")
+        self.assertEqual(result["top"][0]["overview"], "Already in search.")
+        self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(provider.calls[0][0], "/search/movie")
+
     def test_actor_resolution_tries_multiple_movie_contexts(self):
         provider = FakeProvider({
             "/movie/1/credits": {"cast": []},

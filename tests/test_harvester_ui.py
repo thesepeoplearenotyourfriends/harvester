@@ -531,6 +531,47 @@ if (identityless.liveProcessed !== 1 || identityless.activity !== 'Broken row') 
         self.assertIn('#query-title { width: min(40ch, 100%); }',
                       (harvester_ui.PROJECT_DIR / "css" / "my.css").read_text(encoding="utf-8"))
 
+    def test_candidate_review_pages_frozen_results_without_requests(self):
+        page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
+        start = page.index("function candidateDetails")
+        end = page.index("\n      async function selectCandidate", start)
+        functions = page[start:end]
+        script = f"""
+function esc(value) {{ return String(value); }}
+let providerRequests = 0;
+const state = {{inbox: {{candidateIndexes: {{}}}}}};
+const nodes = {{}};
+const document = {{querySelector(selector) {{ return nodes[selector] || null; }}}};
+{functions}
+const item = {{item_id: 'stable', display_title: 'The Feed'}};
+const query = {{title: 'The Feed', year: 2019}};
+const candidates = [
+  {{tvdb_id: 1, name: 'First', year: 2018, type: 'Series', score: 90,
+    exact_title: false, overview: 'First overview'}},
+  {{tvdb_id: 2, name: 'The Feed', year: 2019, type: 'Series', score: 115,
+    exact_title: true, overview: 'Second overview'}}
+];
+let html = candidateReview(item, 'show', query, candidates, 0);
+if ((html.match(/class=\"candidate\"/g) || []).length !== 1 ||
+    !html.includes('1 / 2') || !html.includes('Looking for: The Feed · 2019') ||
+    !html.includes('First overview') || !html.includes('candidate-previous') ||
+    !html.match(/id=\"candidate-previous\"[^>]*disabled/) ||
+    html.match(/id=\"candidate-next\"[^>]*disabled/)) process.exit(1);
+const review = {{set outerHTML(value) {{ html = value; }}}};
+const previous = {{}}, next = {{}}, use = {{dataset: {{candidateIndex: '0'}}}};
+nodes['#candidate-review'] = review; nodes['#candidate-previous'] = previous;
+nodes['#candidate-next'] = next; nodes['[data-candidate-index]'] = use;
+function selectCandidate() {{ providerRequests++; }}
+bindCandidateReview(item, 'show', query, candidates);
+next.onclick();
+if (providerRequests || state.inbox.candidateIndexes.stable !== 1 ||
+    !html.includes('2 / 2') || !html.includes('Second overview') ||
+    !html.match(/id=\"candidate-next\"[^>]*disabled/)) process.exit(2);
+"""
+        subprocess.run(["node", "-e", script], check=True)
+        self.assertIn('candidates.length > 1', page)
+        self.assertIn('candidates.length === 1', page)
+
     def test_candidate_click_supplies_frozen_row_and_issues_semantic_request(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
         start = page.index("async function selectCandidate")
@@ -548,7 +589,7 @@ function selectInboxItem() {{}}
   const item = {{item_id:'plan', display_title:'Movie', identities:['movie.nfo']}};
   await selectCandidate(item, 2);
   if (captured[0] !== 'inbox.select_candidate') process.exit(1);
-  if (captured[1].candidate_index !== 2 || captured[4][0].identifier !== 'movie.nfo') process.exit(2);
+  if (captured[1].candidate_index !== 2 || Object.keys(captured[1]).sort().join(',') !== 'candidate_index,item_id' || captured[4][0].identifier !== 'movie.nfo') process.exit(2);
   if (state.inbox.items.length !== 0) process.exit(3);
 }})().catch(() => process.exit(3));
 """

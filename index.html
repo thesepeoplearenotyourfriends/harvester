@@ -75,7 +75,7 @@
         searchTimer: null,
         collectionDescriptor: null,
         bulk: { job: null, drawerOpen: false },
-        inbox: { items: [], unseen: 0, ready: 0, attention: 0, applied: 0 },
+        inbox: { items: [], unseen: 0, ready: 0, attention: 0, applied: 0, candidateIndexes: {} },
         selectedIndex: null,
       };
       const workflows = {
@@ -568,7 +568,11 @@
           ? `<label><span>Name</span><input id="query-name" value="${esc(query.name || "")}" maxlength="300"></label>`
           : `<label><span>Title</span><input id="query-title" value="${esc(query.title || "")}" maxlength="300"></label><label><span>Year</span><input id="query-year" value="${esc(query.year || "")}" inputmode="numeric" maxlength="4"></label>`;
         const candidates = ["movie", "show"].includes(kind) ? (item.summary?.provider_results?.[0]?.candidates || []) : [];
-        const candidateCards = candidates.length ? `<section class="candidate-results"><h2>Candidate results</h2>${candidates.map((candidate, candidateIndex) => `<article class="candidate"><strong>${esc(candidate.title || candidate.name || "Untitled")}</strong>${candidate.original_title && candidate.original_title !== candidate.title ? `<span>Original title: ${esc(candidate.original_title)}</span>` : ""}<span>${kind === "show" ? "Year" : "Release"}: ${esc(candidate.release_date || candidate.year || "Unknown")}</span><span>Score: ${esc(candidate.score ?? "Unknown")}</span><button type="button" data-candidate-index="${candidateIndex}">Use this result</button></article>`).join("")}</section>` : "";
+        const rememberedIndex = state.inbox.candidateIndexes[item.item_id] || 0;
+        const candidateIndex = Math.min(rememberedIndex, Math.max(0, candidates.length - 1));
+        const candidateCards = candidates.length > 1
+          ? candidateReview(item, kind, query, candidates, candidateIndex)
+          : candidates.length === 1 ? `<section class="candidate-results"><h2>Candidate results</h2>${candidateDetails(kind, candidates[0], 0, 1)}</section>` : "";
         const imageArtifact = kind === "actor" ? "actor_image" : "poster";
         const manualImage = item.requested_artifacts?.includes(imageArtifact) ? `<div class="image-url"><label>Use image URL: <input id="inbox-image-url" type="url" placeholder="https://…"></label><button id="use-inbox-image-url" type="button">Use image</button></div>` : "";
         const applyReason = item.state === "ready" ? "Apply prepared filesystem changes" : (item.reason || "Resolve this item before applying");
@@ -582,9 +586,38 @@
         document.querySelector("#apply-item").onclick = () => inboxDecision("inbox.apply", item.item_id);
         document.querySelector("#discard-item").onclick = () => inboxDecision("inbox.discard", item.item_id);
         document.querySelector("#retry-item").onclick = () => retryInboxItem(item, kind);
-        document.querySelectorAll("[data-candidate-index]").forEach((button) => button.onclick = () => selectCandidate(item, +button.dataset.candidateIndex));
+        bindCandidateReview(item, kind, query, candidates);
         bindInboxImage(item);
         await refreshInboxSummary();
+      }
+      function candidateDetails(kind, candidate, candidateIndex, total) {
+        const title = candidate.title || candidate.name || "Untitled";
+        const date = candidate.release_date || candidate.year;
+        const identity = kind === "show" ? candidate.tvdb_id : candidate.id;
+        const provider = kind === "show" ? "TVDB" : "TMDB";
+        const exact = candidate.exact_title;
+        const facts = [
+          exact === undefined ? "" : `<dt>title</dt><dd>${exact ? "exact" : "not exact"}</dd>`,
+          candidate.year ? `<dt>year</dt><dd>${esc(candidate.year)}</dd>` : "",
+          candidate.score === undefined ? "" : `<dt>score</dt><dd>${esc(candidate.score)}</dd>`,
+        ].join("");
+        return `<article class="candidate"><h3>${esc(title)}</h3>${candidate.original_title && candidate.original_title !== candidate.title ? `<p class="candidate-original">Original title: ${esc(candidate.original_title)}</p>` : ""}<p>${date ? esc(date) : "Unknown"}${identity === undefined || identity === null ? "" : ` · ${provider} ${esc(identity)}`}</p>${kind === "show" && candidate.type ? `<p>${esc(candidate.type)}</p>` : ""}${candidate.overview ? `<p class="candidate-overview">${esc(candidate.overview)}</p>` : ""}${facts ? `<section class="match-facts"><h4>Match</h4><dl>${facts}</dl></section>` : ""}<button type="button" data-candidate-index="${candidateIndex}">Use this result</button></article>`;
+      }
+      function candidateReview(item, kind, query, candidates, candidateIndex) {
+        const lookingFor = [query.title, query.year].filter((value) => value !== undefined && value !== null && value !== "").map(esc).join(" · ");
+        return `<section id="candidate-review" class="candidate-results"><div class="candidate-heading"><h2>${esc(item.display_title)}</h2><strong>${candidateIndex + 1} / ${candidates.length}</strong></div>${lookingFor ? `<p>Looking for: ${lookingFor}</p>` : ""}<nav class="candidate-navigation" aria-label="Candidate results"><button id="candidate-previous" type="button" aria-label="Previous candidate" ${candidateIndex === 0 ? "disabled" : ""}>&lt;</button><button id="candidate-next" type="button" aria-label="Next candidate" ${candidateIndex === candidates.length - 1 ? "disabled" : ""}>&gt;</button></nav>${candidateDetails(kind, candidates[candidateIndex], candidateIndex, candidates.length)}</section>`;
+      }
+      function bindCandidateReview(item, kind, query, candidates) {
+        const use = document.querySelector("[data-candidate-index]");
+        if (use) use.onclick = () => selectCandidate(item, +use.dataset.candidateIndex);
+        if (candidates.length <= 1) return;
+        const show = (index) => {
+          state.inbox.candidateIndexes[item.item_id] = index;
+          document.querySelector("#candidate-review").outerHTML = candidateReview(item, kind, query, candidates, index);
+          bindCandidateReview(item, kind, query, candidates);
+        };
+        document.querySelector("#candidate-previous").onclick = () => show(state.inbox.candidateIndexes[item.item_id] - 1);
+        document.querySelector("#candidate-next").onclick = () => show((state.inbox.candidateIndexes[item.item_id] || 0) + 1);
       }
       async function selectCandidate(item, candidateIndex) {
         const generation = state.generation, selectionGeneration = state.selectionGeneration;
