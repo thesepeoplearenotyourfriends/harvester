@@ -387,8 +387,9 @@ def apply_inbox_item(config, item_id, *, provenance_records=None):
             save_json_atomic(root / "manifest.json", manifest)
             raise OSError(manifest["reason"])
     actor_result = None
-    if manifest.get("kind") == "movie" and manifest.get("fetch_actor_mugshots"):
-        actor_result = _maintain_selected_nfo_actors(config, manifest)
+    if manifest.get("kind") == "movie":
+        actor_result = _maintain_selected_nfo_actors(
+            config, manifest, acquire=bool(manifest.get("fetch_actor_mugshots")))
     shutil.rmtree(root)
     result = {"item_id": item_id, "applied": 1}
     if actor_result is not None:
@@ -396,22 +397,24 @@ def apply_inbox_item(config, item_id, *, provenance_records=None):
     return result
 
 
-def _maintain_selected_nfo_actors(config, manifest):
-    """Best-effort targeted maintenance after the selected NFO is committed.
+def _maintain_selected_nfo_actors(config, manifest, *, acquire=True):
+    """Reconcile committed actor contexts, then optionally acquire mugshots.
 
     Actor failures remain in the ordinary actor queue/status files and never
     roll back or block the movie artifact the user just authorized.
     """
     from .images import safe_actor_filename
-    from .jobs.movie_actor_scan import parse_nfo_file, run as scan, upsert_nfo_actors
+    from .jobs.movie_actor_scan import parse_nfo_document, run as scan, upsert_nfo_actors
     from .jobs.movie_actor_fetch import run as fetch
     nfo_paths = [Path(action["path"]) for action in manifest.get("actions", [])
                  if action.get("action") == "write" and
                  Path(action.get("path", "")).suffix.casefold() == ".nfo"]
-    parsed = parse_nfo_file(nfo_paths[0]) if len(nfo_paths) == 1 else None
+    parsed = parse_nfo_document(nfo_paths[0]) if len(nfo_paths) == 1 else None
+    # Unreadable/malformed input is not authoritative and must not erase the
+    # last good census. A valid empty cast, in contrast, is authoritative.
+    if parsed is None:
+        return None
     names = list(dict.fromkeys(actor["name"] for actor in (parsed or {}).get("actors", [])))
-    if not names:
-        return {"existing": 0, "fetched": 0, "unavailable": 0}
     existing = [name for name in names
                 if (config.movie_root / ".actors" / safe_actor_filename(name)).is_file()]
     missing = [name for name in names if name not in existing]
@@ -419,7 +422,7 @@ def _maintain_selected_nfo_actors(config, manifest):
     queue_path = config.state_path("movie_actor_queue.json")
     queue = load_json(queue_path, {"_meta": {"version": 1}, "actors": {}})
     save_json_atomic(queue_path, upsert_nfo_actors(queue, parsed))
-    if not missing:
+    if not acquire or not missing:
         return {"existing": len(existing), "fetched": 0, "unavailable": 0}
     try:
         from .providers.tmdb import TMDBClient

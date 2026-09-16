@@ -168,10 +168,12 @@ accept chosen or pasted UTF-8 XML. A valid existing movie NFO is adopted as the 
 without copying or rewriting it; external movie NFOs and noncanonical TV NFOs remain
 exact-byte Inbox proposals until Apply. Existing targets are valid edit destinations and
 do not require a separate replacement opt-in.
-Movie NFO acquisition also offers **Fetch associated actor mugshots**. Once one NFO is
-selected and applied (or an existing NFO is explicitly adopted), Harvester quietly sends
-only its named actors with missing local images through the targeted actor resolver and
-fetcher. Actor failures remain ordinary actor maintenance state and never block movie Apply.
+Once a movie NFO is selected and applied (or an existing NFO is explicitly adopted),
+Harvester reconciles that NFO's actor contexts in the durable actor census. The optional
+**Fetch associated actor mugshots** checkbox controls only network/image acquisition: when
+enabled, Harvester quietly sends its named actors with missing local images through the
+targeted actor resolver and fetcher. Actor failures remain ordinary actor maintenance state
+and never block movie Apply.
 **Copy NFO prompt** produces provider-free clipboard guidance from local facts and
 the tags emitted by Harvester's own movie or TV renderer.
 

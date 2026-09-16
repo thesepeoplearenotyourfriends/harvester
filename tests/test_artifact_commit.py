@@ -79,6 +79,80 @@ class ArtifactCommitSeamTests(unittest.TestCase):
         self.assertEqual(json.loads(self.config.state_path(
             "actor_photo_download_status.json").read_text()), saved_downloads)
 
+    def _apply_movie_nfo_with_actor_state(self, source, queue, *, acquire):
+        folder = self.movies / "Replacement"; folder.mkdir(exist_ok=True)
+        nfo = folder / "movie.nfo"
+        save_json_atomic(self.config.state_path("movie_manifest_tmdb.json"), {"movies": {
+            str(nfo): {"status": "ok", "local_target": str(nfo), "nfo_path": str(nfo)}}})
+        save_json_atomic(self.config.state_path("movie_actor_queue.json"), queue)
+        recorder = RecordingCommitter(); recorder.write(nfo, source)
+        plan = persist_preparation(
+            self.config, "refetch-movie-nfo", [str(nfo)], recorder, kind="movie",
+            requested_artifacts=["nfo"])
+        item = get_inbox_item(self.config, plan["plan_id"])
+        item["fetch_actor_mugshots"] = acquire
+        save_json_atomic(self.root / ".cache" / "bulk" / "inbox" /
+                         item["item_id"] / "manifest.json", item)
+        return apply_inbox_item(self.config, item["item_id"]), json.loads(
+            self.config.state_path("movie_actor_queue.json").read_text())
+
+    def test_empty_replacement_cast_clears_contexts_end_to_end(self):
+        path = str(self.movies / "Replacement" / "movie.nfo")
+        queue = {"_meta": {"version": 1}, "actors": {"Former": {
+            "status": "ok", "tries": 3, "urls": ["https://image/former.jpg"],
+            "contexts": [{"nfo": path}, {"nfo": "/movies/other.nfo"}]}}}
+        _result, durable = self._apply_movie_nfo_with_actor_state(
+            b"<movie><title>Replacement</title></movie>", queue, acquire=False)
+        self.assertEqual(durable["actors"]["Former"]["contexts"],
+                         [{"nfo": "/movies/other.nfo"}])
+        self.assertEqual(durable["actors"]["Former"]["status"], "ok")
+        self.assertEqual(durable["actors"]["Former"]["tries"], 3)
+
+    def test_disabled_mugshots_reconcile_without_provider_or_image_work(self):
+        from harvester_core.jobs.movie_actor_scan import run as scan_actors
+
+        class ActorProvider:
+            def get(self, path, params=None):
+                if path == "/configuration":
+                    return {"images": {"secure_base_url": "https://images/",
+                                       "profile_sizes": ["w185"]}}
+                if path == "/movie/77/credits":
+                    return {"cast": [{"id": 8, "name": "Current", "order": 0,
+                                      "profile_path": "/current.jpg"}]}
+                if path == "/person/8/images":
+                    return {"profiles": []}
+                raise AssertionError((path, params))
+
+        path = str(self.movies / "Replacement" / "movie.nfo")
+        queue = {"_meta": {"version": 1}, "actors": {"Removed": {
+            "status": "ok", "contexts": [{"nfo": path}]}}}
+        with mock.patch("harvester_core.providers.tmdb.TMDBClient") as provider, \
+                mock.patch("harvester_core.jobs.movie_actor_fetch.run") as fetch:
+            result, durable = self._apply_movie_nfo_with_actor_state(
+                b"<movie><title>Replacement</title><uniqueid type=\"tmdb\">77</uniqueid>"
+                b"<actor><name>Current</name>"
+                b"</actor></movie>", queue, acquire=False)
+        provider.assert_not_called(); fetch.assert_not_called()
+        self.assertEqual(durable["actors"]["Removed"]["contexts"], [])
+        self.assertEqual(durable["actors"]["Current"]["contexts"][0]["nfo"], path)
+        self.assertEqual(result["actor_mugshots"],
+                         {"existing": 0, "fetched": 0, "unavailable": 0})
+        scan_actors(self.config, ActorProvider(), refresh=True, targets=["Current"])
+        resolved = json.loads(self.config.state_path("movie_actor_queue.json").read_text())
+        self.assertEqual(resolved["actors"]["Current"]["status"], "ok")
+        self.assertEqual(resolved["actors"]["Current"]["movie_tmdb_id"], 77)
+        self.assertEqual(resolved["actors"]["Current"]["urls"],
+                         ["https://images/w185/current.jpg"])
+        self.assertEqual(resolved["actors"]["Removed"]["contexts"], [])
+
+    def test_malformed_committed_nfo_preserves_last_good_actor_census(self):
+        path = str(self.movies / "Replacement" / "movie.nfo")
+        queue = {"_meta": {"version": 1}, "actors": {"Last Good": {
+            "status": "ok", "contexts": [{"nfo": path}, {"nfo": "/other.nfo"}]}}}
+        _result, durable = self._apply_movie_nfo_with_actor_state(
+            b"<movie><title>broken", queue, acquire=False)
+        self.assertEqual(durable["actors"], queue["actors"])
+
     def test_actor_prepare_records_bytes_without_artifact_or_receipt(self):
         save_json_atomic(self.config.state_path("actor_thumb_urls_tmdb.json"),
                          {"Actor": ["https://images/actor"]})

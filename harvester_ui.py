@@ -709,10 +709,12 @@ def adopt_item_nfo(data):
             from harvester_core.artifacts import migrate_inbox_identity
             migrate_inbox_identity(config, old_key, new_key)
             result = {"adopted": True, "identifier": new_key, "prepared": 0}
-            if data.get("fetch_actor_mugshots", True):
-                from harvester_core.artifacts import _maintain_selected_nfo_actors
-                result["actor_mugshots"] = _maintain_selected_nfo_actors(
-                    config, {"actions": [{"action": "write", "path": new_key}]})
+            from harvester_core.artifacts import _maintain_selected_nfo_actors
+            actor_result = _maintain_selected_nfo_actors(
+                config, {"actions": [{"action": "write", "path": new_key}]},
+                acquire=bool(data.get("fetch_actor_mugshots", True)))
+            if actor_result is not None:
+                result["actor_mugshots"] = actor_result
             return result
         raise BridgeError("selected NFO is no longer available")
     canonical = Path(detail["directory"]) / "show.nfo"

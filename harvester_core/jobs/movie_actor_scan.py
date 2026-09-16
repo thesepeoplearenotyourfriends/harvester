@@ -84,7 +84,8 @@ def uniqueid(root, wanted_type):
     return None
 
 
-def parse_nfo_file(path):
+def parse_nfo_document(path):
+    """Parse a valid NFO, including an authoritative empty actor list."""
     try:
         tree = et.parse(path)
     except Exception:
@@ -133,9 +134,6 @@ def parse_nfo_file(path):
             "nfo_thumb": thumb.strip() if thumb else None,
         })
 
-    if not actors:
-        return None
-
     return {
         "path": os.path.abspath(path),
         "title": title,
@@ -145,6 +143,12 @@ def parse_nfo_file(path):
         "tmdb_id": int(tmdb_id) if tmdb_id and str(tmdb_id).isdigit() else None,
         "actors": actors,
     }
+
+
+def parse_nfo_file(path):
+    """Return actor-bearing NFOs for the legacy global actor census."""
+    record = parse_nfo_document(path)
+    return record if record and record["actors"] else None
 
 
 def scan_nfos(DIRS):
