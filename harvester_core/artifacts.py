@@ -386,8 +386,58 @@ def apply_inbox_item(config, item_id, *, provenance_records=None):
                              "reason": f"Apply did not satisfy the prepared {action['action']} postcondition for {action['path']}"})
             save_json_atomic(root / "manifest.json", manifest)
             raise OSError(manifest["reason"])
+    actor_result = None
+    if manifest.get("kind") == "movie" and manifest.get("fetch_actor_mugshots"):
+        actor_result = _maintain_selected_nfo_actors(config, manifest)
     shutil.rmtree(root)
-    return {"item_id": item_id, "applied": 1}
+    result = {"item_id": item_id, "applied": 1}
+    if actor_result is not None:
+        result["actor_mugshots"] = actor_result
+    return result
+
+
+def _maintain_selected_nfo_actors(config, manifest):
+    """Best-effort targeted maintenance after the selected NFO is committed.
+
+    Actor failures remain in the ordinary actor queue/status files and never
+    roll back or block the movie artifact the user just authorized.
+    """
+    from .images import safe_actor_filename
+    from .jobs.movie_actor_scan import parse_nfo_file, run as scan
+    from .jobs.movie_actor_fetch import run as fetch
+    nfo_paths = [Path(action["path"]) for action in manifest.get("actions", [])
+                 if action.get("action") == "write" and
+                 Path(action.get("path", "")).suffix.casefold() == ".nfo"]
+    parsed = parse_nfo_file(nfo_paths[0]) if len(nfo_paths) == 1 else None
+    names = list(dict.fromkeys(actor["name"] for actor in (parsed or {}).get("actors", [])))
+    existing = [name for name in names
+                if (config.movie_root / ".actors" / safe_actor_filename(name)).is_file()]
+    missing = [name for name in names if name not in existing]
+    if not missing:
+        return {"existing": len(existing), "fetched": 0, "unavailable": 0}
+    try:
+        from .providers.tmdb import TMDBClient
+        from .transport import transport_from_config
+        transport = transport_from_config(config)
+        provider = TMDBClient(config.tmdb_api_key, config.tmdb_bearer_token,
+                              config.state_path("tmdb_api_cache.json"), transport)
+        scan(config, provider, rebuild=True, refresh=True, retry_failed=True, targets=missing)
+        outcome = fetch(config, retry_failed=True, targets=missing, transport=transport)
+        fetched = int(outcome.get("counts", {}).get("ok", 0))
+        unavailable = len(missing) - fetched
+    except Exception as error:
+        # A failure before the scanner reaches its per-actor loop (configuration,
+        # credentials, transport) still belongs in the normal durable actor queue.
+        from .storage import load_json, save_json_atomic
+        queue_path = config.state_path("movie_actor_queue.json")
+        queue = load_json(queue_path, {"actors": {}})
+        actors = queue.setdefault("actors", {})
+        for name in missing:
+            item = actors.setdefault(name, {"contexts": []})
+            item.update({"status": "error", "fail_reason": str(error)})
+        save_json_atomic(queue_path, queue)
+        fetched, unavailable = 0, len(missing)
+    return {"existing": len(existing), "fetched": fetched, "unavailable": unavailable}
 
 
 def discard_inbox_item(config, item_id):

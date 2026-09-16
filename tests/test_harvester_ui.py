@@ -970,7 +970,7 @@ function selectInboxItem(index) {{ selected = index; }}
 
     def test_search_and_all_movies_share_semantic_item_repair_controls(self):
         page = (harvester_ui.PROJECT_DIR / "index.html").read_text(encoding="utf-8")
-        self.assertIn('runBulk("item.refetch", { kind: row.kind, identifier: row.identifier }', page)
+        self.assertIn('runBulk("item.refetch", { kind: row.kind, identifier: row.identifier, fetch_actor_mugshots:', page)
         self.assertIn('App.request("item.install_image_url", { kind: row.kind, identifier: row.identifier, url: input.value }', page)
         self.assertIn('Use ${noun} URL:', page)
         self.assertIn('🟢 Prepared — <button id="search-open-inbox"', page)
@@ -1102,7 +1102,7 @@ if (!closed || saved) process.exit(1);
         self.assertIn("appearance: none", css)
         self.assertIn("destination was ${action.precondition", page)
         for label in ('n: "All"', 'n: "Missing NFO"', 'n: "Missing poster"',
-                      'n: "Unresolved"', 'n: "Failed"'):
+                      'n: "Failed"'):
             self.assertGreaterEqual(page.count(label), 2)
         self.assertIn("const itemCapabilities", page)
         self.assertNotIn('state.workflow === "search" || bulkWorkflows[state.workflow]', page)
@@ -1164,7 +1164,7 @@ class BulkRecipeTests(unittest.TestCase):
                             {"kind": "show", "identifier": str(show), "path": "/tmp/x"}):
                     with self.assertRaises(harvester_ui.BridgeError):
                         harvester_ui.action_argv("item.refetch", bad)
-            self.assertEqual(movie_argv[4], "refetch-movie-nfo")
+            self.assertEqual(movie_argv[4], "refetch-movie")
             self.assertEqual(show_argv[4], "refetch-tv-nfo")
             def movie_scan(*_args, **_kwargs):
                 state = json.loads(config.state_path("movie_manifest_tmdb.json").read_text())
@@ -1193,15 +1193,17 @@ class BulkRecipeTests(unittest.TestCase):
                            mock.patch("harvester_core.transport.transport_from_config",
                                       return_value=object()),
                            mock.patch("harvester_core.jobs.movie_scan.run",
-                                      side_effect=scanner if workflow == "refetch-movie-nfo" else None),
+                                      side_effect=scanner if workflow == "refetch-movie" else None),
                            mock.patch("harvester_core.jobs.tv_scan.run",
                                       side_effect=scanner if workflow == "refetch-tv-nfo" else None))
                 with patches[0], patches[1], patches[2], patches[3], patches[4]:
                     bulk.run_scoped(config, workflow, items, 1)
             from harvester_core.artifacts import list_inbox
             prepared = list_inbox(config)
-            self.assertEqual(len(prepared), 2)
-            self.assertTrue(all(item["state"] == "ready" for item in prepared))
+            self.assertEqual(len(prepared), 3)
+            self.assertEqual({item["workflow"] for item in prepared},
+                             {"refetch-movie-nfo", "refetch-movie-poster",
+                              "refetch-tv-nfo"})
             self.assertEqual(movie_nfo.read_bytes(), b"<movie><title>Movie</title></movie>")
             self.assertEqual((movie / "poster.jpg").read_bytes(), b"existing movie poster")
             self.assertEqual((show / "show.nfo").read_bytes(), b"existing show nfo")
@@ -1259,10 +1261,11 @@ class BulkRecipeTests(unittest.TestCase):
 
             self.assertEqual(nfo.read_bytes(), old)
             inbox = list_inbox(config)
-            self.assertEqual(len(inbox), 1)
-            self.assertEqual(inbox[0]["state"], "ready")
-            self.assertEqual(len(inbox[0]["actions"]), 1)
-            staged = get_inbox_item(config, inbox[0]["item_id"])
+            self.assertEqual(len(inbox), 2)
+            nfo_item = next(item for item in inbox
+                            if item["workflow"] == "refetch-movie-nfo")
+            staged = get_inbox_item(config, nfo_item["item_id"])
+            self.assertEqual(len(staged["actions"]), 1)
             self.assertEqual(staged["summary"]["provider_attempts"][str(nfo)]["movie_id"],
                              13475)
             blob = root / ".cache" / "bulk" / "inbox" / staged["item_id"] / \
@@ -1276,7 +1279,9 @@ class BulkRecipeTests(unittest.TestCase):
                              b"<genre>Action</genre>", b'type="tmdb">13475',
                              b'type="imdb">tt0796366'):
                 self.assertIn(expected, repaired)
-            self.assertEqual(list_inbox(config), [])
+            remaining = list_inbox(config)
+            self.assertEqual(len(remaining), 1)
+            self.assertEqual(remaining[0]["workflow"], "refetch-movie-poster")
 
             rescan(config)
             movie_rows = list_records(config, "movie")
@@ -1920,13 +1925,6 @@ class BulkRecipeTests(unittest.TestCase):
         self.assertTrue(attention)
         self.assertEqual(reason, "cannot render NFO")
 
-    def test_opportunistic_nfo_requires_planned_or_existing_artifact(self):
-        result = {"counts": {"identity_ok": 1, "nfo_skipped": 1},
-                  "phase_results": {"nfo": {"movie": {"status": "skipped"}}}}
-        attention, reason = bulk._scoped_artifact_outcome("unresolved-movies", result)
-        self.assertTrue(attention)
-        self.assertEqual(reason, "No nfo artifact was prepared")
-
     def test_movie_query_override_controls_tmdb_without_changing_local_identity(self):
         from harvester_core.jobs import movie_scan
         with tempfile.TemporaryDirectory() as temporary:
@@ -2289,7 +2287,7 @@ class BulkRecipeTests(unittest.TestCase):
                 bulk.load_scope_items(config, "unresolved-tv", path, generation, 1)
 
     def test_workflow_kind_mismatches_fail_before_provider_or_job_dispatch(self):
-        cases = (("show", "unresolved-movies"),
+        cases = (("show", "failed-movies"),
                  ("show", "missing-actor-images"),
                  ("movie", "missing-tv-nfo"),
                  ("actor", "missing-posters"))

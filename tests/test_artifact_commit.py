@@ -31,6 +31,37 @@ class ArtifactCommitSeamTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
+    def test_applied_movie_nfo_targets_only_its_missing_actor_mugshots(self):
+        from harvester_core.artifacts import _maintain_selected_nfo_actors
+        folder = self.movies / "Movie"; folder.mkdir()
+        nfo = folder / "movie.nfo"
+        nfo.write_text("<movie><title>Movie</title><actor><name>Existing</name></actor>"
+                       "<actor><name>Missing</name></actor></movie>", encoding="utf-8")
+        actors = self.movies / ".actors"; actors.mkdir()
+        (actors / "Existing.jpg").write_bytes(b"already here")
+        scanned = []
+        fetched = []
+
+        def scan(*_args, **kwargs):
+            scanned.extend(kwargs["targets"])
+            return {"processed": 1}
+
+        def fetch(*_args, **kwargs):
+            fetched.extend(kwargs["targets"])
+            return {"counts": {"ok": 1}}
+
+        with mock.patch("harvester_core.jobs.movie_actor_scan.run", side_effect=scan), \
+                mock.patch("harvester_core.jobs.movie_actor_fetch.run", side_effect=fetch), \
+                mock.patch("harvester_core.providers.tmdb.TMDBClient", return_value=object()), \
+                mock.patch("harvester_core.transport.transport_from_config",
+                           return_value=object()):
+            result = _maintain_selected_nfo_actors(
+                self.config, {"actions": [{"action": "write", "path": str(nfo)}]})
+
+        self.assertEqual(scanned, ["Missing"])
+        self.assertEqual(fetched, ["Missing"])
+        self.assertEqual(result, {"existing": 1, "fetched": 1, "unavailable": 0})
+
     def test_actor_prepare_records_bytes_without_artifact_or_receipt(self):
         save_json_atomic(self.config.state_path("actor_thumb_urls_tmdb.json"),
                          {"Actor": ["https://images/actor"]})

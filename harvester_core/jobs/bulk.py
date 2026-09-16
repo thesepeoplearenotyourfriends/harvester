@@ -21,7 +21,8 @@ from ..events import emit
 WORKFLOW_KINDS = {
     "missing-actor-images": "actor", "refetch-actor-image": "actor", "failed-actors": "actor",
     "lost-found": "movie", "missing-posters": "movie",
-    "unresolved-movies": "movie", "failed-movies": "movie", "refetch-movie-nfo": "movie",
+    "failed-movies": "movie", "refetch-movie": "movie",
+    "refetch-movie-nfo": "movie", "refetch-movie-poster": "movie",
     "unresolved-tv": "show", "ambiguous-tv": "show", "not-found-tv": "show",
     "tv-errors": "show", "refetch-tv-nfo": "show", "missing-tv-nfo": "show",
     "missing-tv-posters": "show",
@@ -104,7 +105,8 @@ def load_scope_items(config, workflow, scope_file, generation, count):
         grouped.append({"identities": identities, "display_title":
                         row.get("display_name") or row.get("label") or row.get("name") or
                         row.get("local_target") or (identities[0] if identities else "Item"),
-                        "local_target": row.get("local_target"), "kind": kind})
+                        "local_target": row.get("local_target"), "kind": kind,
+                        "fetch_actor_mugshots": row.get("fetch_actor_mugshots", True)})
     return grouped
 
 
@@ -163,7 +165,7 @@ def _finish(config, workflow, kind, identities, recorder, result, attention=0):
         requested_artifacts={"missing-actor-images": ["actor_image"],
                              "refetch-actor-image": ["actor_image"],
                              "lost-found": ["nfo"], "refetch-movie-nfo": ["nfo"],
-                             "missing-posters": ["poster"],
+                             "missing-posters": ["poster"], "refetch-movie-poster": ["poster"],
                              "missing-tv-nfo": ["nfo"],
                              "refetch-tv-nfo": ["nfo"],
                              "missing-tv-posters": ["poster"]}.get(
@@ -202,6 +204,7 @@ def _scoped_artifact_outcome(workflow, result):
         "missing-actor-images": ("image", ("failed", "unresolved_source")),
         "refetch-actor-image": ("image", ("failed", "unresolved_source")),
         "missing-posters": ("poster", ("error", "no_url", "unresolved_target")),
+        "refetch-movie-poster": ("poster", ("error", "no_url", "unresolved_target")),
         "lost-found": ("nfo", ("error", "unresolved_target", "unusable")),
         "refetch-movie-nfo": ("nfo", ("error", "unresolved_target", "unusable")),
         "missing-tv-nfo": ("nfo", ("error",)),
@@ -212,7 +215,7 @@ def _scoped_artifact_outcome(workflow, result):
     # successful match. Once that phase runs, its artifact outcome—not merely
     # the provider status—decides whether Apply is safe.
     if expected is None and workflow in {
-            "unresolved-movies", "failed-movies", "unresolved-tv", "ambiguous-tv", "not-found-tv",
+            "failed-movies", "unresolved-tv", "ambiguous-tv", "not-found-tv",
             "tv-errors"}:
         diagnostics = result.get("counts", {})
         if (result.get("phase_results", {}).get("nfo") or
@@ -283,7 +286,7 @@ def run(config, workflow, kind, identities, reporter=None):
         return _finish(config, workflow, kind, identities, recorder, _item_result(
             identities, ("identity", scan(config, provider, reporter, refresh=True,
                                             retry_failed=True, targets=identities))))
-    if workflow in {"lost-found", "unresolved-movies", "failed-movies", "refetch-movie-nfo"}:
+    if workflow in {"lost-found", "failed-movies", "refetch-movie-nfo"}:
         from .movie_scan import run as scan
         from ..providers.tmdb import TMDBClient
         from ..transport import transport_from_config
@@ -328,14 +331,15 @@ def run(config, workflow, kind, identities, reporter=None):
                                                          for record in unusable}))
         return _finish(config, workflow, kind, identities, recorder,
                        _item_result(identities, ("identity", scanned), ("nfo", written)))
-    if workflow == "missing-posters":
+    if workflow in {"missing-posters", "refetch-movie-poster"}:
         from .movie_materialize import run as materialize
         from ..transport import transport_from_config
         records = [get_record(config, "movie", value) for value in identities]
         targets = [record["local_target"] for record in records if record.get("poster_path")]
         unresolved = len(records) - len(targets)
         result = ({"processed": 0, "counts": {}} if not targets else
-                  materialize(config, reporter, overwrite_nfo=False, overwrite_poster=False,
+                  materialize(config, reporter, overwrite_nfo=False,
+                              overwrite_poster=(workflow == "refetch-movie-poster"),
                               targets=targets, transport=transport_from_config(config),
                               write_nfo=False, write_poster=True, committer=recorder))
         result["processed"] = int(result.get("processed", 0)) + unresolved
@@ -403,6 +407,18 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
     Phase counters retain that identity-specific detail, but the top-level processed
     value must use the same logical-row unit shown by the UI's progress denominator.
     """
+    if workflow == "refetch-movie":
+        results = [run_scoped(config, artifact, items, logical_count, reporter)
+                   for artifact in ("refetch-movie-nfo", "refetch-movie-poster")]
+        counts = Counter()
+        preparations = []
+        for result in results:
+            counts.update(result.get("counts", {}))
+            preparations.extend(result.get("preparations", []))
+        return {"ok": all(result.get("ok", True) for result in results),
+                "processed": logical_count, "counts": dict(counts),
+                "preparations": preparations,
+                "message": f"Prepared NFO and poster for {logical_count} item(s)"}
     if not isinstance(logical_count, int) or logical_count < 0:
         raise ValueError("invalid logical Bulk scope count")
     if items and not isinstance(items[0], dict):
@@ -441,8 +457,12 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
             manifest_path = (config.app_dir / ".cache" / "bulk" / "inbox" /
                              plan["plan_id"] / "manifest.json")
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            manifest["display_title"] = item.get("display_title") or manifest["display_title"]
+            title = item.get("display_title") or manifest["display_title"]
+            suffix = {"refetch-movie-nfo": "NFO", "refetch-movie-poster": "Poster"}.get(workflow)
+            manifest["display_title"] = f"{title} — {suffix}" if suffix else title
             manifest["local_target"] = item.get("local_target") or manifest.get("local_target")
+            if workflow == "refetch-movie-nfo":
+                manifest["fetch_actor_mugshots"] = bool(item.get("fetch_actor_mugshots", True))
             manifest["summary"] = {"stage_diagnostics": result.get("counts", {}),
                                    "artifact_results": result.get("phase_results", {}),
                                    "provider_attempts": result.get("attempt_results", {}),
