@@ -249,6 +249,12 @@ def upsert_nfo_actors(queue, nfo):
     """
     actors = queue.setdefault("actors", {})
     nfo_path = nfo.get("path")
+    # Replacement is authoritative for this one NFO. Remove its old context
+    # from every actor first so cast members omitted by the replacement do not
+    # retain a stale association; actor records and their other history stay.
+    for item in actors.values():
+        item["contexts"] = [context for context in item.get("contexts", [])
+                            if context.get("nfo") != nfo_path]
     for actor in nfo.get("actors", []):
         name = actor["name"]
         item = actors.setdefault(name, {
@@ -263,8 +269,6 @@ def upsert_nfo_actors(queue, nfo):
                    "tmdb_id": nfo.get("tmdb_id"), "nfo": nfo_path,
                    "role": actor.get("role"),
                    "old_nfo_thumb": actor.get("nfo_thumb")}
-        item["contexts"] = [value for value in item.get("contexts", [])
-                            if value.get("nfo") != nfo_path]
         item["contexts"].append(context)
     meta = queue.setdefault("_meta", {})
     meta["updated"] = now_iso()
