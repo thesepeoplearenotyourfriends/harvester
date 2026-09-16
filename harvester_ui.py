@@ -265,7 +265,8 @@ def _prepare_inbox_rerun(config, item, kind, override):
            "manifest_identities": item["identities"],
            "identifier": item["identities"][0] if item["identities"] else None,
            "display_name": item["display_title"], "local_target": item.get("local_target"),
-           "kind": kind}
+           "kind": kind,
+           "fetch_actor_mugshots": item.get("fetch_actor_mugshots", True)}
     generation = hashlib.sha256(json.dumps(
         [row], ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
     ).encode("utf-8")).hexdigest()[:20]

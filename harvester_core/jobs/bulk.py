@@ -334,6 +334,24 @@ def run(config, workflow, kind, identities, reporter=None):
     if workflow in {"missing-posters", "refetch-movie-poster"}:
         from .movie_materialize import run as materialize
         from ..transport import transport_from_config
+        scanned = {"processed": 0, "counts": {}}
+        if workflow == "refetch-movie-poster":
+            from .movie_scan import run as scan
+            from ..providers.tmdb import TMDBClient
+            transport = transport_from_config(config)
+            targets = _movie_targets(config, identities)
+            provider = TMDBClient(config.tmdb_api_key, config.tmdb_bearer_token,
+                                  config.state_path("tmdb_api_cache.json"), transport)
+            scanned = scan(config, provider, reporter, refresh=True, targets=targets)
+            attempts = scanned.get("attempt_results", {})
+            failed_attempt = next((attempts.get(target) for target in targets
+                                   if not attempts.get(target, {}).get("ok")), None)
+            if failed_attempt is not None or any(target not in attempts for target in targets):
+                reason = ((failed_attempt or {}).get("reason") or
+                          "Explicit poster refetch produced no fresh provider result")
+                return _finish(config, workflow, kind, identities, recorder,
+                               _item_result(identities, ("identity", scanned),
+                                            message=f"Provider refetch failed: {reason}"), 1)
         records = [get_record(config, "movie", value) for value in identities]
         targets = [record["local_target"] for record in records if record.get("poster_path")]
         unresolved = len(records) - len(targets)
@@ -346,7 +364,8 @@ def run(config, workflow, kind, identities, reporter=None):
         result.setdefault("counts", {})["poster_unresolved_target"] = unresolved
         message = (f"{unresolved} item(s) have no safe poster target" if unresolved
                    else "Finished")
-        combined = _item_result(identities, ("poster", result), message=message)
+        combined = _item_result(identities, ("identity", scanned), ("poster", result),
+                                message=message)
         combined["ok"] = not unresolved
         return _finish(config, workflow, kind, identities, recorder, combined, unresolved)
     # Reaching the TV implementation is an explicit authoritative-kind dispatch,
@@ -459,7 +478,9 @@ def run_scoped(config, workflow, items, logical_count, reporter=None):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             title = item.get("display_title") or manifest["display_title"]
             suffix = {"refetch-movie-nfo": "NFO", "refetch-movie-poster": "Poster"}.get(workflow)
-            manifest["display_title"] = f"{title} — {suffix}" if suffix else title
+            decorated = f" — {suffix}" if suffix else ""
+            manifest["display_title"] = (title if decorated and title.endswith(decorated)
+                                         else f"{title}{decorated}")
             manifest["local_target"] = item.get("local_target") or manifest.get("local_target")
             if workflow == "refetch-movie-nfo":
                 manifest["fetch_actor_mugshots"] = bool(item.get("fetch_actor_mugshots", True))

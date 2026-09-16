@@ -1595,6 +1595,116 @@ class BulkRecipeTests(unittest.TestCase):
             self.assertEqual(len(by_workflow["refetch-movie-poster"]["actions"]), 1)
             self.assertEqual(len(by_workflow["refetch-movie-nfo"]["actions"]), 1)
 
+    def test_nfo_candidate_rerun_preserves_disabled_actor_acquisition(self):
+        from harvester_core.artifacts import (RecordingCommitter, apply_inbox_item,
+                                              get_inbox_item, persist_preparation)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); folder = movies / "Movie"; folder.mkdir()
+            nfo = folder / "movie.nfo"
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            candidates = [{"id": 404, "title": "Chosen"}]
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"_meta": {}, "movies": {
+                str(nfo): {"status": "unresolved", "local_target": str(nfo),
+                           "nfo_path": str(nfo), "poster_path": str(folder / "poster.jpg"),
+                           "query_title": "Movie", "candidates": candidates}}})
+            plan = persist_preparation(
+                config, "refetch-movie-nfo", [str(nfo)], RecordingCommitter(), kind="movie",
+                state="needs_attention", requested_artifacts=["nfo"],
+                display_title="Movie — NFO",
+                summary={"provider_results": [{"candidates": candidates}]})
+            item = get_inbox_item(config, plan["plan_id"])
+            item["fetch_actor_mugshots"] = False
+            save_json_atomic(root / ".cache" / "bulk" / "inbox" / item["item_id"] /
+                             "manifest.json", item)
+
+            class Provider:
+                def get(self, path, params=None):
+                    if path == "/configuration": return {"images": {}}
+                    if path == "/movie/404": return {"id": 404, "title": "Chosen"}
+                    if path == "/movie/404/credits":
+                        return {"crew": [], "cast": [{"name": "Actor", "order": 0}]}
+                    raise AssertionError((path, params))
+
+            cache = root / ".cache" / "ui"
+            with mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                    mock.patch.object(harvester_ui, "CACHE_DIR", cache), \
+                    mock.patch("harvester_core.config.load_config", return_value=config):
+                argv = harvester_ui.action_argv("inbox.select_candidate", {
+                    "item_id": item["item_id"], "candidate_index": 0})
+            scope = Path(argv[argv.index("--scope-file") + 1])
+            rows = bulk.load_scope_items(config, argv[4], scope,
+                                         argv[argv.index("--generation") + 1], 1)
+            self.assertFalse(rows[0]["fetch_actor_mugshots"])
+            with mock.patch("harvester_core.providers.tmdb.TMDBClient", return_value=Provider()), \
+                    mock.patch("harvester_core.transport.transport_from_config",
+                               return_value=object()):
+                bulk.run_scoped(config, argv[4], rows, 1)
+            rebuilt = get_inbox_item(config, item["item_id"])
+            self.assertFalse(rebuilt["fetch_actor_mugshots"], rebuilt)
+            self.assertEqual(rebuilt["display_title"], "Movie — NFO")
+            with mock.patch("harvester_core.providers.tmdb.TMDBClient") as actor_provider, \
+                    mock.patch("harvester_core.jobs.movie_actor_fetch.run") as actor_fetch:
+                apply_inbox_item(config, rebuilt["item_id"])
+            actor_provider.assert_not_called(); actor_fetch.assert_not_called()
+            queue = json.loads(config.state_path("movie_actor_queue.json").read_text())
+            self.assertIn("Actor", queue["actors"])
+
+    def test_poster_candidate_rerun_refreshes_provider_before_materializing(self):
+        from harvester_core.artifacts import RecordingCommitter, get_inbox_item, persist_preparation
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); movies = root / "movies"; tv = root / "tv"
+            movies.mkdir(); tv.mkdir(); folder = movies / "Movie"; folder.mkdir()
+            nfo = folder / "movie.nfo"
+            config = load_config({"state_dir": root / "state", "movie_root": movies,
+                                  "tv_root": tv}, environ={}, app_dir=root)
+            candidates = [{"id": 505, "title": "Poster Choice"}]
+            save_json_atomic(config.state_path("movie_manifest_tmdb.json"), {"_meta": {}, "movies": {
+                str(nfo): {"status": "unresolved", "local_target": str(nfo),
+                           "nfo_path": str(nfo), "poster_path": str(folder / "poster.jpg"),
+                           "query_title": "Movie", "candidates": candidates}}})
+            plan = persist_preparation(
+                config, "refetch-movie-poster", [str(nfo)], RecordingCommitter(), kind="movie",
+                state="needs_attention", requested_artifacts=["poster"],
+                display_title="Movie — Poster",
+                summary={"provider_results": [{"candidates": candidates}]})
+
+            class Provider:
+                def get(self, path, params=None):
+                    if path == "/configuration":
+                        return {"images": {"secure_base_url": "https://images/",
+                                           "poster_sizes": ["w780"]}}
+                    if path == "/movie/505":
+                        return {"id": 505, "title": "Poster Choice",
+                                "poster_path": "/chosen.jpg"}
+                    if path == "/movie/505/credits": return {"crew": [], "cast": []}
+                    raise AssertionError((path, params))
+
+            cache = root / ".cache" / "ui"
+            with mock.patch.object(harvester_ui, "PROJECT_DIR", root), \
+                    mock.patch.object(harvester_ui, "CACHE_DIR", cache), \
+                    mock.patch("harvester_core.config.load_config", return_value=config):
+                argv = harvester_ui.action_argv("inbox.select_candidate", {
+                    "item_id": plan["plan_id"], "candidate_index": 0})
+            scope = Path(argv[argv.index("--scope-file") + 1])
+            rows = bulk.load_scope_items(config, argv[4], scope,
+                                         argv[argv.index("--generation") + 1], 1)
+            with mock.patch("harvester_core.providers.tmdb.TMDBClient", return_value=Provider()), \
+                    mock.patch("harvester_core.transport.transport_from_config",
+                               return_value=object()), \
+                    mock.patch("harvester_core.jobs.movie_materialize.download_image",
+                               return_value=(b"\xff\xd8\xffposter", "image/jpeg")):
+                bulk.run_scoped(config, argv[4], rows, 1)
+            rebuilt = get_inbox_item(config, plan["plan_id"])
+            record = json.loads(config.state_path("movie_manifest_tmdb.json").read_text())[
+                "movies"][str(nfo)]
+            self.assertEqual(record["tmdb_id"], 505)
+            self.assertEqual(record["poster_url"], "https://images/w780/chosen.jpg")
+            self.assertEqual(rebuilt["state"], "ready", rebuilt)
+            self.assertEqual(rebuilt["display_title"], "Movie — Poster")
+            self.assertEqual(len(rebuilt["actions"]), 1)
+
     def test_search_manual_poster_preserves_unrelated_tv_attention(self):
         from harvester_core.artifacts import RecordingCommitter, list_inbox, persist_preparation
         with tempfile.TemporaryDirectory() as temporary:
