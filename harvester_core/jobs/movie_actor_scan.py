@@ -84,7 +84,8 @@ def uniqueid(root, wanted_type):
     return None
 
 
-def parse_nfo_file(path):
+def parse_nfo_document(path):
+    """Parse a valid NFO, including an authoritative empty actor list."""
     try:
         tree = et.parse(path)
     except Exception:
@@ -133,9 +134,6 @@ def parse_nfo_file(path):
             "nfo_thumb": thumb.strip() if thumb else None,
         })
 
-    if not actors:
-        return None
-
     return {
         "path": os.path.abspath(path),
         "title": title,
@@ -145,6 +143,12 @@ def parse_nfo_file(path):
         "tmdb_id": int(tmdb_id) if tmdb_id and str(tmdb_id).isdigit() else None,
         "actors": actors,
     }
+
+
+def parse_nfo_file(path):
+    """Return actor-bearing NFOs for the legacy global actor census."""
+    record = parse_nfo_document(path)
+    return record if record and record["actors"] else None
 
 
 def scan_nfos(DIRS):
@@ -237,6 +241,42 @@ def build_actor_work_queue(DIRS):
         "actors": dict(sorted(actors.items())),
     }
 
+    return queue
+
+
+def upsert_nfo_actors(queue, nfo):
+    """Merge one committed NFO into an existing queue without rebuilding it.
+
+    A targeted movie repair must not replace the global actor census or reset
+    unrelated resolution history. Contexts for this exact NFO are refreshed;
+    every other actor record and context is retained byte-for-byte logically.
+    """
+    actors = queue.setdefault("actors", {})
+    nfo_path = nfo.get("path")
+    # Replacement is authoritative for this one NFO. Remove its old context
+    # from every actor first so cast members omitted by the replacement do not
+    # retain a stale association; actor records and their other history stay.
+    for item in actors.values():
+        item["contexts"] = [context for context in item.get("contexts", [])
+                            if context.get("nfo") != nfo_path]
+    for actor in nfo.get("actors", []):
+        name = actor["name"]
+        item = actors.setdefault(name, {
+            "status": "pending", "tries": 0, "updated": None, "urls": [],
+            "tmdb_person_id": None, "tmdb_person_name": None,
+            "matched_context": None, "movie_tmdb_id": None,
+            "fail_reason": None, "failures": [], "contexts": [],
+        })
+        context = {"title": nfo.get("title"),
+                   "original_title": nfo.get("original_title"),
+                   "year": nfo.get("year"), "imdb_id": nfo.get("imdb_id"),
+                   "tmdb_id": nfo.get("tmdb_id"), "nfo": nfo_path,
+                   "role": actor.get("role"),
+                   "old_nfo_thumb": actor.get("nfo_thumb")}
+        item["contexts"].append(context)
+    meta = queue.setdefault("_meta", {})
+    meta["updated"] = now_iso()
+    meta["actor_count"] = len(actors)
     return queue
 
 

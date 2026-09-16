@@ -23,6 +23,7 @@ from harvester_core.jobs.movie_actor_scan import (
     parse_nfo_file,
     resolve_actor_from_contexts,
     resolve_movie_tmdb_id,
+    upsert_nfo_actors,
 )
 from harvester_core.jobs.tv_materialize import (
     download_bytes,
@@ -286,6 +287,34 @@ class HarvesterTests(unittest.TestCase):
                 )
             queue = make_actor_work_queue([root], Path(temporary) / "queue.json")
             self.assertEqual(len(queue["actors"]["Same Actor"]["contexts"]), 2)
+
+    def test_upsert_replacement_removes_only_stale_context_for_removed_actor(self):
+        replaced = "/movies/Changed/movie.nfo"
+        other = "/movies/Other/movie.nfo"
+        removed_history = {"status": "ok", "tries": 4,
+                           "urls": ["https://images/removed.jpg"],
+                           "contexts": [{"nfo": replaced, "role": "Old role"},
+                                        {"nfo": other, "role": "Other movie"}]}
+        queue = {"_meta": {"version": 1}, "actors": {
+            "Removed Actor": removed_history,
+            "Retained Actor": {"status": "failed", "tries": 2,
+                               "contexts": [{"nfo": replaced, "role": "Old"}]}}}
+
+        upsert_nfo_actors(queue, {
+            "path": replaced, "title": "Changed", "year": 2024,
+            "actors": [{"name": "Retained Actor", "role": "New"}]})
+
+        removed = queue["actors"]["Removed Actor"]
+        self.assertEqual(removed["status"], "ok")
+        self.assertEqual(removed["tries"], 4)
+        self.assertEqual(removed["urls"], ["https://images/removed.jpg"])
+        self.assertEqual(removed["contexts"], [{"nfo": other, "role": "Other movie"}])
+        retained = queue["actors"]["Retained Actor"]
+        self.assertEqual(retained["status"], "failed")
+        self.assertEqual(retained["tries"], 2)
+        self.assertEqual(len(retained["contexts"]), 1)
+        self.assertEqual(retained["contexts"][0]["nfo"], replaced)
+        self.assertEqual(retained["contexts"][0]["role"], "New")
 
     def test_movie_title_year_resolution_without_ids(self):
         provider = FakeProvider({

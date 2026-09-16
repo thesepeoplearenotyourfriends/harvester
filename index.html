@@ -23,7 +23,6 @@
           ><button data-work="failed-actors">Failed Actors</button
           ><button data-work="lost-found">Missing Movie NFO</button
           ><button data-work="missing-posters">Missing Movie Posters</button
-          ><button data-work="unresolved-movies">Unresolved Movies</button
           ><button data-work="unresolved-tv">Unresolved TV</button>
           <button data-work="inbox">Bulk Inbox</button>
         </div>
@@ -110,14 +109,6 @@
           inspect: "inspect.movie",
           kind: "movie",
         },
-        "unresolved-movies": {
-          title: "Unresolved Movies",
-          action: "list.movies",
-          data: { status: "unresolved" },
-          get: "get.movie",
-          inspect: "inspect.movie",
-          kind: "movie",
-        },
         "failed-movies": {
           title: "Failed Movies",
           action: "list.movies",
@@ -192,7 +183,6 @@
         "failed-actors": { kind: "actor", aspect: "identity" },
         "lost-found": { kind: "movie", aspect: "nfo" },
         "missing-posters": { kind: "movie", aspect: "poster" },
-        "unresolved-movies": { kind: "movie", aspect: "identity" },
         "failed-movies": { kind: "movie", aspect: "identity" },
         "ambiguous-tv": { kind: "show", aspect: "identity" },
         "unresolved-tv": { kind: "show", aspect: "identity" },
@@ -319,11 +309,6 @@
             w: "missing-posters",
             c: count("movies", "missing_poster"),
           },
-          {
-            n: "Unresolved",
-            w: "unresolved-movies",
-            c: count("movies", "unresolved"),
-          },
           { n: "Failed", w: "failed-movies", c: count("movies", "failed") },
           { h: "TV" },
           {
@@ -356,8 +341,8 @@
           "</div></div>";
         let groups = {
           Actors: tocRows().slice(1, 4),
-          Movies: tocRows().slice(5, 10),
-          TV: tocRows().slice(11, 16),
+          Movies: tocRows().slice(5, 9),
+          TV: tocRows().slice(10, 15),
         };
         document.querySelector("#workspace").innerHTML =
           '<div class="overview"><h1>Overview</h1><p class="muted">Saved work and local receipts</p>' +
@@ -740,14 +725,15 @@
         const candidates = detail.nfo_candidates || [], usable = candidates.filter((item) => item.usable);
         const existing = candidates.length ? `<h3>Existing NFOs on disk</h3><ul class="nfo-candidates">${candidates.map((item, index) =>
           `<li><strong>${esc(item.name)}</strong><br><span class="muted">${item.parseable ? `parseable · &lt;${esc(item.root)}&gt;${item.title ? ` · title: ${esc(item.title)}` : ""}` : `unusable · XML parse error: ${esc(item.parse_error || "unknown error")}`}</span>${item.usable ? `<br><button type="button" data-nfo-token="${esc(item.token)}" class="${usable.length === 1 ? "primary" : "compact-action"}">Use this NFO</button>` : ""}</li>`).join("")}</ul>` : '<p class="muted">No .nfo files found in this directory.</p>';
-        return `<section class="search-nfo"><h2>NFO</h2><p><strong>${detail.nfo?.present ? "Present" : "Missing"}</strong></p><button id="copy-nfo-prompt" type="button" class="compact-action">Copy NFO prompt</button>${existing}<h3>Use NFO:</h3><textarea id="search-nfo-paste" rows="7" placeholder="Paste XML…"></textarea><button id="prepare-pasted-nfo" type="button">Use pasted XML</button></section>`;
+        const actorOption = detail.kind === "movie" ? '<label><input id="fetch-actor-mugshots" type="checkbox" checked> Fetch associated actor mugshots</label><br>' : "";
+        return `<section class="search-nfo"><h2>NFO</h2><p><strong>${detail.nfo?.present ? "Present" : "Missing"}</strong></p>${actorOption}<button id="copy-nfo-prompt" type="button" class="compact-action">Copy NFO prompt</button>${existing}<h3>Use NFO:</h3><textarea id="search-nfo-paste" rows="7" placeholder="Paste XML…"></textarea><button id="prepare-pasted-nfo" type="button">Use pasted XML</button></section>`;
       }
       function showSearchPrepared() {
         const note = document.querySelector("#search-prepared");
         if (note) { note.hidden = false; document.querySelector("#search-open-inbox").onclick = openInbox; }
       }
       async function refetchItem(row) {
-        await runBulk("item.refetch", { kind: row.kind, identifier: row.identifier }, `Re-fetch ${rowLabel(row)}`, null, [row]);
+        await runBulk("item.refetch", { kind: row.kind, identifier: row.identifier, fetch_actor_mugshots: document.querySelector("#fetch-actor-mugshots")?.checked ?? true }, `Re-fetch ${rowLabel(row)}`, null, [row]);
         await refreshInboxSummary();
         showSearchPrepared();
       }
@@ -774,7 +760,7 @@
         const prepareBytes = async (bytes) => {
           if (bytes.length > 1000000) { showError("NFO is larger than 1 MB"); return; }
           try {
-            await App.request("item.install_nfo", { kind: detail.kind, identifier: detail.identifier, content_base64: bytesBase64(bytes) }, false, true);
+            await App.request("item.install_nfo", { kind: detail.kind, identifier: detail.identifier, content_base64: bytesBase64(bytes), fetch_actor_mugshots: document.querySelector("#fetch-actor-mugshots")?.checked ?? true }, false, true);
             await refreshInboxSummary(); showSearchPrepared();
           } catch (error) { showError(error.message || "Could not prepare NFO"); }
         };
@@ -793,7 +779,7 @@
         };
         document.querySelectorAll("[data-nfo-token]").forEach((button) => button.onclick = async () => {
           try {
-            const result = await App.request("item.adopt_nfo", { kind: detail.kind, identifier: detail.identifier, candidate_token: button.dataset.nfoToken, candidate_generation: detail.nfo_candidates_generation }, false, true);
+            const result = await App.request("item.adopt_nfo", { kind: detail.kind, identifier: detail.identifier, candidate_token: button.dataset.nfoToken, candidate_generation: detail.nfo_candidates_generation, fetch_actor_mugshots: document.querySelector("#fetch-actor-mugshots")?.checked ?? true }, false, true);
             if (result.prepared) { await refreshInboxSummary(); showSearchPrepared(); }
             else {
               const index = state.rows.findIndex((row) => row.identifier === detail.identifier);

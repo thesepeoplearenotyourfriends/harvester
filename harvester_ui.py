@@ -103,8 +103,9 @@ def _rescan(data):
 
 BULK_WORKFLOWS = frozenset({
     "missing-actor-images", "refetch-actor-image", "failed-actors", "lost-found", "missing-posters",
-    "unresolved-movies", "failed-movies", "unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors",
-    "missing-tv-nfo", "missing-tv-posters",
+    "failed-movies", "unresolved-tv", "ambiguous-tv", "not-found-tv", "tv-errors",
+    "missing-tv-nfo", "missing-tv-posters", "refetch-movie", "refetch-movie-nfo",
+    "refetch-movie-poster",
 })
 
 
@@ -166,7 +167,9 @@ def _bulk_item(data):
 
 def _item_refetch(data):
     """Derive a preparation recipe from one durable record identity."""
-    if (set(data) != {"kind", "identifier"} or data.get("kind") not in
+    allowed = {"kind", "identifier", "fetch_actor_mugshots"}
+    if (not {"kind", "identifier"}.issubset(data) or not set(data).issubset(allowed) or
+            data.get("kind") not in
             {"actor", "movie", "show"} or not isinstance(data.get("identifier"), str)):
         raise BridgeError("item.refetch requires kind and trusted durable identifier")
     _identifier(data["kind"])({"identifier": data["identifier"]})
@@ -180,10 +183,11 @@ def _item_refetch(data):
     identity = record.get("name") if data["kind"] == "actor" else (
         record.get("nfo_path") or record.get("local_target") if data["kind"] == "movie"
         else record.get("local_target"))
-    workflow = {"actor": "refetch-actor-image", "movie": "refetch-movie-nfo",
+    workflow = {"actor": "refetch-actor-image", "movie": "refetch-movie",
                 "show": "refetch-tv-nfo"}[data["kind"]]
     row = {"identifier": identity, "display_name": data["identifier"],
-           "local_target": record.get("local_target"), "kind": data["kind"]}
+           "local_target": record.get("local_target"), "kind": data["kind"],
+           "fetch_actor_mugshots": bool(data.get("fetch_actor_mugshots", True))}
     generation = hashlib.sha256(json.dumps(
         [row], ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
     ).encode("utf-8")).hexdigest()[:20]
@@ -261,7 +265,8 @@ def _prepare_inbox_rerun(config, item, kind, override):
            "manifest_identities": item["identities"],
            "identifier": item["identities"][0] if item["identities"] else None,
            "display_name": item["display_title"], "local_target": item.get("local_target"),
-           "kind": kind}
+           "kind": kind,
+           "fetch_actor_mugshots": item.get("fetch_actor_mugshots", True)}
     generation = hashlib.sha256(json.dumps(
         [row], ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
     ).encode("utf-8")).hexdigest()[:20]
@@ -475,12 +480,13 @@ def prepare_item_image(data):
             raise BridgeError("manual poster ownership is ambiguous")
         identity = detail["selected_manifest_identity"]
         target = Path(detail["directory"]) / "poster.jpg"
-        workflow = "unresolved-movies" if kind == "movie" else "tv-errors"
+        workflow = "refetch-movie-poster" if kind == "movie" else "tv-errors"
     previous = next((item for item in list_inbox(config)
                      if item.get("workflow") == workflow and item.get("identities") == [identity]), None)
     plan = persist_preparation(config, workflow, [identity], RecordingCommitter(),
                                kind=kind,
-                               display_title=data["identifier"],
+                               display_title=(f"{data['identifier']} — Poster"
+                                              if kind == "movie" else data["identifier"]),
                                local_target=record.get("local_target"),
                                summary={"outcome": "ready", "message": "Manual image prepared"},
                                requested_artifacts=["actor_image" if kind == "actor" else "poster"])
@@ -588,7 +594,8 @@ def _nfo_context(data):
     return config, record, detail
 
 
-def _prepare_nfo_bytes(config, kind, identifier, record, detail, source):
+def _prepare_nfo_bytes(config, kind, identifier, record, detail, source,
+                       fetch_actor_mugshots=True):
     """Create an Inbox write for exact caller bytes and a host-owned target."""
     from harvester_core.artifacts import (RecordingCommitter, get_inbox_item, list_inbox,
                                           persist_preparation, _precondition)
@@ -597,23 +604,24 @@ def _prepare_nfo_bytes(config, kind, identifier, record, detail, source):
     identity = detail["selected_manifest_identity"]
     target = (Path(record.get("nfo_path") or identity) if kind == "movie"
               else Path(detail["directory"]) / "show.nfo")
-    workflow = "unresolved-movies" if kind == "movie" else "tv-errors"
+    workflow = "refetch-movie-nfo" if kind == "movie" else "tv-errors"
     same_identity = [item for item in list_inbox(config)
                      if item.get("identities") == [identity]]
     nfo_work = [item for item in same_identity
                 if "nfo" in item.get("requested_artifacts", [])]
     if len(nfo_work) > 1:
         raise BridgeError("multiple NFO Inbox proposals require explicit review")
-    previous = (nfo_work[0] if len(nfo_work) == 1 else
-                same_identity[0] if len(same_identity) == 1 else None)
+    previous = nfo_work[0] if len(nfo_work) == 1 else None
     if previous:
         workflow = previous["workflow"]
     plan = persist_preparation(
-        config, workflow, [identity], RecordingCommitter(), kind=kind, display_title=identifier,
+        config, workflow, [identity], RecordingCommitter(), kind=kind,
+        display_title=f"{identifier} — NFO",
         local_target=record.get("local_target"),
         summary={"outcome": "ready", "message": "NFO supplied manually"},
         requested_artifacts=["nfo"])
     item = get_inbox_item(config, plan["plan_id"])
+    item["fetch_actor_mugshots"] = bool(fetch_actor_mugshots and kind == "movie")
     if previous:
         item["actions"] = previous.get("actions", [])
         item["summary"] = previous.get("summary", item["summary"])
@@ -643,7 +651,9 @@ def _prepare_nfo_bytes(config, kind, identifier, record, detail, source):
 
 def prepare_item_nfo(data):
     """Prepare pasted/chosen NFO content without accepting filesystem paths."""
-    if (set(data) != {"kind", "identifier", "content_base64"} or
+    required = {"kind", "identifier", "content_base64"}
+    if (not required.issubset(data) or not set(data).issubset(
+            required | {"fetch_actor_mugshots"}) or
             data.get("kind") not in {"movie", "show"} or
             not isinstance(data.get("identifier"), str) or
             not isinstance(data.get("content_base64"), str)):
@@ -654,12 +664,14 @@ def prepare_item_nfo(data):
         raise BridgeError("invalid NFO data") from error
     config, record, detail = _nfo_context(data)
     return _prepare_nfo_bytes(config, data["kind"], data["identifier"], record, detail,
-                              source)
+                              source, data.get("fetch_actor_mugshots", True))
 
 
 def adopt_item_nfo(data):
     """Resolve a bounded inspection candidate entirely on the host side."""
-    if (set(data) != {"kind", "identifier", "candidate_token", "candidate_generation"} or
+    required = {"kind", "identifier", "candidate_token", "candidate_generation"}
+    if (not required.issubset(data) or not set(data).issubset(
+            required | {"fetch_actor_mugshots"}) or
             data.get("kind") not in {"movie", "show"} or
             not isinstance(data.get("identifier"), str) or
             not isinstance(data.get("candidate_token"), str) or
@@ -697,7 +709,14 @@ def adopt_item_nfo(data):
             save_json_atomic(manifest_path, manifest)
             from harvester_core.artifacts import migrate_inbox_identity
             migrate_inbox_identity(config, old_key, new_key)
-            return {"adopted": True, "identifier": new_key, "prepared": 0}
+            result = {"adopted": True, "identifier": new_key, "prepared": 0}
+            from harvester_core.artifacts import _maintain_selected_nfo_actors
+            actor_result = _maintain_selected_nfo_actors(
+                config, {"actions": [{"action": "write", "path": new_key}]},
+                acquire=bool(data.get("fetch_actor_mugshots", True)))
+            if actor_result is not None:
+                result["actor_mugshots"] = actor_result
+            return result
         raise BridgeError("selected NFO is no longer available")
     canonical = Path(detail["directory"]) / "show.nfo"
     source = _validated_nfo("show", source)
