@@ -39,10 +39,19 @@ class ArtifactCommitSeamTests(unittest.TestCase):
                        "<actor><name>Missing</name></actor></movie>", encoding="utf-8")
         actors = self.movies / ".actors"; actors.mkdir()
         (actors / "Existing.jpg").write_bytes(b"already here")
+        unrelated = {"status": "ok", "tries": 7, "urls": ["https://old/unrelated.jpg"],
+                     "contexts": [{"nfo": "/library/other.nfo"}]}
+        save_json_atomic(self.config.state_path("movie_actor_queue.json"),
+                         {"_meta": {"version": 1}, "actors": {"Unrelated": unrelated}})
+        saved_urls = {"Unrelated": ["https://old/unrelated.jpg"]}
+        saved_downloads = {"Unrelated": {"status": "ok", "bytes": 123}}
+        save_json_atomic(self.config.state_path("actor_thumb_urls_tmdb.json"), saved_urls)
+        save_json_atomic(self.config.state_path("actor_photo_download_status.json"), saved_downloads)
         scanned = []
         fetched = []
 
         def scan(*_args, **kwargs):
+            self.assertNotIn("rebuild", kwargs)
             scanned.extend(kwargs["targets"])
             return {"processed": 1}
 
@@ -61,6 +70,14 @@ class ArtifactCommitSeamTests(unittest.TestCase):
         self.assertEqual(scanned, ["Missing"])
         self.assertEqual(fetched, ["Missing"])
         self.assertEqual(result, {"existing": 1, "fetched": 1, "unavailable": 0})
+        queue = json.loads(self.config.state_path("movie_actor_queue.json").read_text())
+        self.assertEqual(queue["actors"]["Unrelated"], unrelated)
+        self.assertIn("Missing", queue["actors"])
+        self.assertIn("Existing", queue["actors"])
+        self.assertEqual(json.loads(self.config.state_path(
+            "actor_thumb_urls_tmdb.json").read_text()), saved_urls)
+        self.assertEqual(json.loads(self.config.state_path(
+            "actor_photo_download_status.json").read_text()), saved_downloads)
 
     def test_actor_prepare_records_bytes_without_artifact_or_receipt(self):
         save_json_atomic(self.config.state_path("actor_thumb_urls_tmdb.json"),

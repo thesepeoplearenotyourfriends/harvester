@@ -403,16 +403,22 @@ def _maintain_selected_nfo_actors(config, manifest):
     roll back or block the movie artifact the user just authorized.
     """
     from .images import safe_actor_filename
-    from .jobs.movie_actor_scan import parse_nfo_file, run as scan
+    from .jobs.movie_actor_scan import parse_nfo_file, run as scan, upsert_nfo_actors
     from .jobs.movie_actor_fetch import run as fetch
     nfo_paths = [Path(action["path"]) for action in manifest.get("actions", [])
                  if action.get("action") == "write" and
                  Path(action.get("path", "")).suffix.casefold() == ".nfo"]
     parsed = parse_nfo_file(nfo_paths[0]) if len(nfo_paths) == 1 else None
     names = list(dict.fromkeys(actor["name"] for actor in (parsed or {}).get("actors", [])))
+    if not names:
+        return {"existing": 0, "fetched": 0, "unavailable": 0}
     existing = [name for name in names
                 if (config.movie_root / ".actors" / safe_actor_filename(name)).is_file()]
     missing = [name for name in names if name not in existing]
+    from .storage import load_json, save_json_atomic
+    queue_path = config.state_path("movie_actor_queue.json")
+    queue = load_json(queue_path, {"_meta": {"version": 1}, "actors": {}})
+    save_json_atomic(queue_path, upsert_nfo_actors(queue, parsed))
     if not missing:
         return {"existing": len(existing), "fetched": 0, "unavailable": 0}
     try:
@@ -421,15 +427,13 @@ def _maintain_selected_nfo_actors(config, manifest):
         transport = transport_from_config(config)
         provider = TMDBClient(config.tmdb_api_key, config.tmdb_bearer_token,
                               config.state_path("tmdb_api_cache.json"), transport)
-        scan(config, provider, rebuild=True, refresh=True, retry_failed=True, targets=missing)
+        scan(config, provider, refresh=True, retry_failed=True, targets=missing)
         outcome = fetch(config, retry_failed=True, targets=missing, transport=transport)
         fetched = int(outcome.get("counts", {}).get("ok", 0))
         unavailable = len(missing) - fetched
     except Exception as error:
         # A failure before the scanner reaches its per-actor loop (configuration,
         # credentials, transport) still belongs in the normal durable actor queue.
-        from .storage import load_json, save_json_atomic
-        queue_path = config.state_path("movie_actor_queue.json")
         queue = load_json(queue_path, {"actors": {}})
         actors = queue.setdefault("actors", {})
         for name in missing:

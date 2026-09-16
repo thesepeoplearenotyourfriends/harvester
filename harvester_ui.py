@@ -610,8 +610,7 @@ def _prepare_nfo_bytes(config, kind, identifier, record, detail, source,
                 if "nfo" in item.get("requested_artifacts", [])]
     if len(nfo_work) > 1:
         raise BridgeError("multiple NFO Inbox proposals require explicit review")
-    previous = (nfo_work[0] if len(nfo_work) == 1 else
-                same_identity[0] if len(same_identity) == 1 else None)
+    previous = nfo_work[0] if len(nfo_work) == 1 else None
     if previous:
         workflow = previous["workflow"]
     plan = persist_preparation(

@@ -240,6 +240,38 @@ def build_actor_work_queue(DIRS):
     return queue
 
 
+def upsert_nfo_actors(queue, nfo):
+    """Merge one committed NFO into an existing queue without rebuilding it.
+
+    A targeted movie repair must not replace the global actor census or reset
+    unrelated resolution history. Contexts for this exact NFO are refreshed;
+    every other actor record and context is retained byte-for-byte logically.
+    """
+    actors = queue.setdefault("actors", {})
+    nfo_path = nfo.get("path")
+    for actor in nfo.get("actors", []):
+        name = actor["name"]
+        item = actors.setdefault(name, {
+            "status": "pending", "tries": 0, "updated": None, "urls": [],
+            "tmdb_person_id": None, "tmdb_person_name": None,
+            "matched_context": None, "movie_tmdb_id": None,
+            "fail_reason": None, "failures": [], "contexts": [],
+        })
+        context = {"title": nfo.get("title"),
+                   "original_title": nfo.get("original_title"),
+                   "year": nfo.get("year"), "imdb_id": nfo.get("imdb_id"),
+                   "tmdb_id": nfo.get("tmdb_id"), "nfo": nfo_path,
+                   "role": actor.get("role"),
+                   "old_nfo_thumb": actor.get("nfo_thumb")}
+        item["contexts"] = [value for value in item.get("contexts", [])
+                            if value.get("nfo") != nfo_path]
+        item["contexts"].append(context)
+    meta = queue.setdefault("_meta", {})
+    meta["updated"] = now_iso()
+    meta["actor_count"] = len(actors)
+    return queue
+
+
 def queue_stats(queue):
     stats = defaultdict(int)
 
